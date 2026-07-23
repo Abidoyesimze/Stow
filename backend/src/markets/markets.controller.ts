@@ -25,10 +25,13 @@ import { Public } from '../common/decorators/public.decorator';
 import { BanGuard } from '../common/guards/ban.guard';
 import { User } from '../users/entities/user.entity';
 import { BulkCreateMarketsDto } from './dto/bulk-create-markets.dto';
+import { ChallengeResolutionDto } from './dto/challenge-resolution.dto';
 import { CreateCommentDto } from './dto/create-comment.dto';
 import { CreateDisputeDto } from '../disputes/dto/create-dispute.dto';
 import { CreateMarketDto } from './dto/create-market.dto';
 import { ListCommentsDto } from './dto/list-comments.dto';
+import { ProposeResolutionDto } from './dto/propose-resolution.dto';
+import { ResolveChallengeDto } from './dto/resolve-challenge.dto';
 import { UpdateMarketDto } from './dto/update-market.dto';
 import {
   ListMarketsDto,
@@ -262,6 +265,88 @@ export class MarketsController {
     @CurrentUser() user: User,
   ): Promise<Market> {
     return this.marketsService.resumeMarket(id, user);
+  }
+
+  @Post(':id/propose-resolution')
+  @UseGuards(BanGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary:
+      'Propose a resolution outcome, starting the grace/challenge window',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Resolution proposed, market awaiting settlement',
+    type: Market,
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'Invalid outcome or market has not ended',
+  })
+  @ApiResponse({ status: 403, description: 'Caller is not creator or admin' })
+  @ApiResponse({ status: 404, description: 'Market not found' })
+  @ApiResponse({
+    status: 409,
+    description: 'Market already resolved or resolution already proposed',
+  })
+  async proposeResolution(
+    @Param('id') id: string,
+    @Body() dto: ProposeResolutionDto,
+    @CurrentUser() user: User,
+  ): Promise<Market> {
+    return this.marketsService.proposeResolution(id, dto, user);
+  }
+
+  @Post(':id/challenge')
+  @UseGuards(BanGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Challenge a proposed resolution before the grace period elapses',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Challenge recorded, auto-settlement frozen pending admin review',
+    type: Market,
+  })
+  @ApiResponse({
+    status: 400,
+    description:
+      'No pending resolution to challenge, or challenge window closed',
+  })
+  @ApiResponse({ status: 404, description: 'Market not found' })
+  async challengeResolution(
+    @Param('id') id: string,
+    @Body() dto: ChallengeResolutionDto,
+    @CurrentUser() user: User,
+  ): Promise<Market> {
+    return this.marketsService.challengeResolution(id, dto, user);
+  }
+
+  @Post(':id/resolve-challenge')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Resolve a challenged market (admin only)' })
+  @ApiResponse({
+    status: 200,
+    description: 'Challenge resolved and market settled',
+    type: Market,
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'No active challenge, or invalid outcome',
+  })
+  @ApiResponse({ status: 403, description: 'Caller is not admin' })
+  @ApiResponse({ status: 404, description: 'Market not found' })
+  @ApiResponse({ status: 502, description: 'Soroban contract call failed' })
+  async resolveChallenge(
+    @Param('id') id: string,
+    @Body() dto: ResolveChallengeDto,
+    @CurrentUser() user: User,
+  ): Promise<Market> {
+    return this.marketsService.resolveChallenge(id, dto, user);
   }
 
   @Post(':id/comments')
