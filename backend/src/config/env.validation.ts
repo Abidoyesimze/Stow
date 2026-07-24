@@ -77,6 +77,23 @@ class EnvironmentVariables {
 
   @IsNumber()
   LEADERBOARD_SNAPSHOT_RETENTION_DAYS: number = 30;
+
+  // Oracle submission anomaly detection (#1364)
+  @IsOptional()
+  @IsNumber()
+  ORACLE_ANOMALY_THRESHOLD?: number;
+
+  @IsOptional()
+  @IsNumber()
+  ORACLE_ANOMALY_MIN_SAMPLES?: number;
+
+  @IsOptional()
+  @IsNumber()
+  ORACLE_ANOMALY_WINDOW?: number;
+
+  @IsOptional()
+  @IsString()
+  ORACLE_ANOMALY_HOLD?: string;
 }
 
 export function validate(config: Record<string, unknown>) {
