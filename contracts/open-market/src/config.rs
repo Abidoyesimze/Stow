@@ -10,6 +10,12 @@ use crate::storage_types::DataKey;
 pub const PERSISTENT_BUMP: u32 = 518_400;
 pub const PERSISTENT_THRESHOLD: u32 = 501_120; // PERSISTENT_BUMP − 1 day
 
+// ── Governance timelock defaults ──────────────────────────────────────────────
+/// Default delay (seconds) a passed governance proposal must sit in the queue
+/// before it becomes executable. ~2 days at real time. Admin-configurable via
+/// [`set_timelock_delay`].
+pub const DEFAULT_TIMELOCK_DELAY: u64 = 172_800;
+
 // ── Storage-specific TTL constants (merged from ttl.rs) ───────────────────────
 // ~30 days at ~6s/ledger for frequently accessed market state.
 pub const LEDGER_BUMP_MARKET: u32 = 432_000;
@@ -113,6 +119,15 @@ pub struct Config {
     pub xlm_token: Address,
     /// When `true`, all non-admin entry points must revert with `Paused`.
     pub is_paused: bool,
+    /// Address authorized to veto a queued governance proposal during its
+    /// timelock window. Defaults to `admin` at initialization.
+    pub guardian: Address,
+    /// Delay (seconds) a passed governance proposal must wait in the queue
+    /// before `execute_proposal` will apply it. This value — and `guardian`
+    /// above — are only mutable via the admin-only setters in this module;
+    /// no `ProposalType` variant may change them, so a proposal can never
+    /// vote itself a shorter timelock or a friendlier guardian.
+    pub timelock_delay: u64,
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -160,6 +175,7 @@ pub fn initialize(
     validate_protocol_fee(fee_bps)?;
 
     let config = Config {
+        guardian: admin.clone(),
         admin,
         protocol_fee_bps: fee_bps,
         max_creator_fee_bps: 500,  // 5 % absolute cap for market creators
@@ -167,6 +183,7 @@ pub fn initialize(
         oracle_address: oracle,
         xlm_token,
         is_paused: false,
+        timelock_delay: DEFAULT_TIMELOCK_DELAY,
     };
 
     env.storage().persistent().set(&DataKey::Config, &config);
@@ -295,6 +312,74 @@ fn emit_oracle_updated(env: &Env, old_oracle: &Address, new_oracle: &Address) {
     env.events().publish(
         (symbol_short!("cfg"), symbol_short!("ora_upd")),
         (old_oracle.clone(), new_oracle.clone()),
+    );
+}
+
+/// Update the governance timelock delay. Caller must be the stored admin.
+///
+/// This is intentionally only reachable through the admin path — no
+/// `ProposalType` exists to change it via governance — so a proposal can
+/// never shorten its own timelock to bypass the veto window.
+pub fn set_timelock_delay(
+    env: &Env,
+    admin: Address,
+    new_delay: u64,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    let old_delay = config.timelock_delay;
+    config.timelock_delay = new_delay;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_timelock_delay_updated(env, old_delay, new_delay);
+
+    Ok(())
+}
+
+fn emit_timelock_delay_updated(env: &Env, old_delay: u64, new_delay: u64) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("tl_upd")),
+        (old_delay, new_delay),
+    );
+}
+
+/// Update the governance guardian address. Caller must be the stored admin.
+///
+/// Like `timelock_delay`, this is only reachable through the admin path —
+/// no `ProposalType` exists to change it via governance — so a proposal can
+/// never appoint a friendly guardian to neutralize the veto safeguard.
+pub fn set_guardian(
+    env: &Env,
+    admin: Address,
+    new_guardian: Address,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    let old_guardian = config.guardian;
+    config.guardian = new_guardian.clone();
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_guardian_updated(env, &old_guardian, &new_guardian);
+
+    Ok(())
+}
+
+fn emit_guardian_updated(env: &Env, old_guardian: &Address, new_guardian: &Address) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("grd_upd")),
+        (old_guardian.clone(), new_guardian.clone()),
     );
 }
 
