@@ -282,7 +282,7 @@ fn create_market_fails_when_paused() {
     let client = deploy(&env);
     let creator = Address::generate(&env);
 
-    client.set_paused(&true);
+    client.set_paused(&true, &1u32);
 
     let result = client.try_create_market(&creator, &default_params(&env));
     assert!(matches!(result, Err(Ok(InsightArenaError::Paused))));
@@ -370,6 +370,63 @@ fn list_categories_returns_seeded_defaults() {
     assert!(categories.contains(Symbol::new(&env, "Entertainment")));
     assert!(categories.contains(Symbol::new(&env, "Science")));
     assert!(categories.contains(Symbol::new(&env, "Other")));
+}
+
+#[test]
+fn add_category_fails_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _oracle) = deploy_with_actors(&env);
+
+    client.set_paused(&true, &1u32);
+
+    let result = client.try_add_category(&admin, &Symbol::new(&env, "Weather"));
+    assert!(matches!(result, Err(Ok(InsightArenaError::Paused))));
+}
+
+#[test]
+fn remove_category_fails_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _oracle) = deploy_with_actors(&env);
+    let category = Symbol::new(&env, "Weather");
+    client.add_category(&admin, &category);
+
+    client.set_paused(&true, &1u32);
+
+    let result = client.try_remove_category(&admin, &category);
+    assert!(matches!(result, Err(Ok(InsightArenaError::Paused))));
+}
+
+#[test]
+fn close_market_fails_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _oracle) = deploy_with_actors(&env);
+    let creator = Address::generate(&env);
+
+    let id = client.create_market(&creator, &default_params(&env));
+    env.ledger().set_timestamp(env.ledger().timestamp() + 1001);
+
+    client.set_paused(&true, &1u32);
+
+    let result = client.try_close_market(&admin, &id);
+    assert!(matches!(result, Err(Ok(InsightArenaError::Paused))));
+}
+
+#[test]
+fn cancel_market_fails_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _oracle) = deploy_with_actors(&env);
+    let creator = Address::generate(&env);
+
+    let id = client.create_market(&creator, &default_params(&env));
+
+    client.set_paused(&true, &1u32);
+
+    let result = client.try_cancel_market(&admin, &id);
+    assert!(matches!(result, Err(Ok(InsightArenaError::Paused))));
 }
 
 #[test]
