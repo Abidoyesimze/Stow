@@ -22,6 +22,7 @@ pub mod storage_types;
 pub use crate::config::Config;
 pub use crate::errors::InsightArenaError;
 pub use crate::governance::{Proposal, ProposalType};
+pub use crate::storage_types::ProposalState;
 pub use crate::liquidity::{calculate_liquidity_value, calculate_lp_tokens, calculate_swap_output};
 pub use crate::market::CreateMarketParams;
 pub use crate::storage_types::{
@@ -381,6 +382,41 @@ impl InsightArenaContract {
         proposal_id: u32,
     ) -> Result<(), InsightArenaError> {
         governance::cancel_proposal(&env, caller, proposal_id)
+    }
+
+    /// Guardian-only veto of a queued proposal during its timelock window.
+    pub fn veto_proposal(
+        env: Env,
+        guardian: Address,
+        proposal_id: u32,
+    ) -> Result<(), InsightArenaError> {
+        governance::veto_proposal(&env, guardian, proposal_id)
+    }
+
+    /// Return the current lifecycle state of a proposal (Voting/Queued/Executable/Executed/Cancelled/Vetoed).
+    pub fn get_proposal_state(
+        env: Env,
+        proposal_id: u32,
+    ) -> Result<ProposalState, InsightArenaError> {
+        governance::get_proposal_state(&env, proposal_id)
+    }
+
+    /// Update the governance timelock delay (seconds). Caller must be the current admin.
+    pub fn set_timelock_delay(
+        env: Env,
+        admin: Address,
+        new_delay: u64,
+    ) -> Result<(), InsightArenaError> {
+        config::set_timelock_delay(&env, admin, new_delay)
+    }
+
+    /// Update the governance guardian address. Caller must be the current admin.
+    pub fn set_guardian(
+        env: Env,
+        admin: Address,
+        new_guardian: Address,
+    ) -> Result<(), InsightArenaError> {
+        config::set_guardian(&env, admin, new_guardian)
     }
 
     /// Return the total protocol fees accumulated in the treasury.

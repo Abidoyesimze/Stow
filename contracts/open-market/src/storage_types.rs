@@ -106,6 +106,27 @@ pub enum DataKey {
     TreasuryBalance,
 }
 
+/// Lifecycle state of a governance proposal, derived from its stored flags and
+/// the current ledger time rather than persisted directly.
+///
+/// `Voting -> Queued -> Executable -> (Executed | Vetoed | Cancelled)`
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProposalState {
+    /// Voting window is still open.
+    Voting,
+    /// Voting passed and `ready_at` has been recorded, but the timelock has not elapsed.
+    Queued,
+    /// The timelock has elapsed; the proposal may now be executed.
+    Executable,
+    /// The proposal's effect has been applied.
+    Executed,
+    /// The proposer or admin withdrew the proposal before execution.
+    Cancelled,
+    /// The guardian vetoed the proposal during the timelock window.
+    Vetoed,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Dispute {

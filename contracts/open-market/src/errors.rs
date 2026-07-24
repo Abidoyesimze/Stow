@@ -138,4 +138,9 @@ pub enum InsightArenaError {
     // ── Conditional Markets ───────────────────────────────────────────────────
     /// The maximum allowed depth for nested conditional markets has been exceeded.
     ConditionalDepthExceeded = 103,
+
+    // ── Governance Timelock ───────────────────────────────────────────────────
+    /// A passed proposal was queued but its timelock `ready_at` timestamp has not
+    /// yet elapsed. Raised when `execute_proposal` is called too early.
+    TimelockNotElapsed = 104,
 }
