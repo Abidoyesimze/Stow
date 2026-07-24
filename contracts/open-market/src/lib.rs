@@ -26,10 +26,11 @@ pub use crate::storage_types::ProposalState;
 pub use crate::liquidity::{calculate_liquidity_value, calculate_lp_tokens, calculate_swap_output};
 pub use crate::market::CreateMarketParams;
 pub use crate::storage_types::{
-    ConditionalChain, ConditionalMarket, CreatorLeaderboardEntry, CreatorStats, DataKey, Dispute,
-    Event, EventMatch, EventPrediction, FeeTier, FeeTierConfig, InviteCode, LPPosition,
-    LeaderboardEntry, LeaderboardSnapshot, LiquidityPool, Market, MarketFeeInfo, MarketStats,
-    PlatformStats, Prediction, Season, SwapRecord, UserProfile, VolatilityState, Winner,
+    ConditionalChain, ConditionalMarket, CreatorLeaderboardEntry, CreatorStats, DataKey,
+    DependencyStatus, Dispute, Event, EventMatch, EventPrediction, FeeTier, FeeTierConfig,
+    InviteCode, LPPosition, LeaderboardEntry, LeaderboardSnapshot, LiquidityPool, Market,
+    MarketFeeInfo, MarketStats, PlatformStats, Prediction, Season, SwapRecord, UserProfile,
+    VolatilityState, Winner,
 };
 
 use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, Vec};
@@ -80,8 +81,9 @@ impl InsightArenaContract {
     }
 
     /// Pause or resume the contract. Caller must be the stored admin.
-    pub fn set_paused(env: Env, paused: bool) -> Result<(), InsightArenaError> {
-        config::set_paused(&env, paused)
+    /// `reason_code` is recorded on the emitted event for auditing.
+    pub fn set_paused(env: Env, paused: bool, reason_code: u32) -> Result<(), InsightArenaError> {
+        config::set_paused(&env, paused, reason_code)
     }
 
     /// Transfer admin rights to `new_admin`. Caller must be the current admin.
@@ -231,6 +233,16 @@ impl InsightArenaContract {
     /// Return the conditional depth of a market (0 for root, 1 for first-level conditional, etc.).
     pub fn calculate_conditional_depth(env: Env, market_id: u64) -> u32 {
         market::calculate_conditional_depth(&env, market_id)
+    }
+
+    /// Return a market's conditional-dependency status: whether it is a
+    /// conditional child, its immediate parent (if any), and whether that
+    /// parent has resolved. `resolve_market` blocks on an unresolved parent.
+    pub fn get_dependency_status(
+        env: Env,
+        market_id: u64,
+    ) -> Result<crate::storage_types::DependencyStatus, InsightArenaError> {
+        market::get_dependency_status(&env, market_id)
     }
 
     // ── Dispute ───────────────────────────────────────────────────────────────

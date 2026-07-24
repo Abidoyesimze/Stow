@@ -256,7 +256,11 @@ pub fn update_protocol_fee_from_governance(
 ///
 /// When `paused` is `true`, all non-admin entry points should call
 /// [`ensure_not_paused`] and revert with [`InsightArenaError::Paused`].
-pub fn set_paused(env: &Env, paused: bool) -> Result<(), InsightArenaError> {
+///
+/// `reason_code` is an opaque, caller-defined code (e.g. 1 = incident,
+/// 2 = scheduled maintenance, 0 = resume/no reason) recorded on the emitted
+/// event for off-chain auditing. It is not validated or persisted.
+pub fn set_paused(env: &Env, paused: bool, reason_code: u32) -> Result<(), InsightArenaError> {
     let mut config = load_config(env)?;
 
     config.admin.require_auth();
@@ -265,7 +269,16 @@ pub fn set_paused(env: &Env, paused: bool) -> Result<(), InsightArenaError> {
     env.storage().persistent().set(&DataKey::Config, &config);
     bump_config(env);
 
+    emit_paused_toggled(env, &config.admin, paused, reason_code);
+
     Ok(())
+}
+
+fn emit_paused_toggled(env: &Env, actor: &Address, paused: bool, reason_code: u32) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("paused")),
+        (actor.clone(), paused, reason_code),
+    );
 }
 
 pub fn transfer_admin(env: &Env, new_admin: Address) -> Result<(), InsightArenaError> {
