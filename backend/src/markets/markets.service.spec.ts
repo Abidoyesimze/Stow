@@ -483,6 +483,7 @@ describe('MarketsService.findFeaturedMarkets', () => {
       total: 2,
       page: 1,
       limit: 20,
+      totalPages: 1,
     });
   });
 
@@ -1143,9 +1144,9 @@ describe('MarketsService pause/resume cache invalidation', () => {
       makeMarket({ is_paused: false }),
     );
 
-    await expect(
-      service.resumeMarket('market-1', mockAdmin),
-    ).rejects.toThrow(ConflictException);
+    await expect(service.resumeMarket('market-1', mockAdmin)).rejects.toThrow(
+      ConflictException,
+    );
     expect(cacheManager.del).not.toHaveBeenCalled();
   });
 

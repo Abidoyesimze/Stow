@@ -12,6 +12,8 @@ import { UsersModule } from '../users/users.module';
 import { AnalyticsModule } from '../analytics/analytics.module';
 import { DisputesModule } from '../disputes/disputes.module';
 import { WebhooksModule } from '../webhooks/webhooks.module';
+import { CommonModule } from '../common/common.module';
+import { OptionalIdempotencyInterceptor } from '../common/idempotency/optional-idempotency.interceptor';
 
 @Module({
   imports: [
@@ -26,9 +28,14 @@ import { WebhooksModule } from '../webhooks/webhooks.module';
     AnalyticsModule,
     DisputesModule,
     WebhooksModule,
+    CommonModule,
   ],
   controllers: [MarketsController],
-  providers: [MarketsService, MarketSettlementScheduler],
+  providers: [
+    MarketsService,
+    MarketSettlementScheduler,
+    OptionalIdempotencyInterceptor,
+  ],
   exports: [MarketsService, TypeOrmModule],
 })
 export class MarketsModule {}
