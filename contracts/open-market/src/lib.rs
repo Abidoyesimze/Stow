@@ -98,6 +98,17 @@ impl InsightArenaContract {
         config::update_oracle(&env, admin, new_oracle)
     }
 
+    /// Update the minimum creator reputation required to create a market.
+    /// Caller must be the current admin. See `ProposalType::UpdateMinReputation`
+    /// for the timelocked governance path.
+    pub fn set_min_creator_reputation(
+        env: Env,
+        admin: Address,
+        new_threshold: u32,
+    ) -> Result<(), InsightArenaError> {
+        config::set_min_creator_reputation(&env, admin, new_threshold)
+    }
+
     // ── Market ────────────────────────────────────────────────────────────────
 
     /// Create a new prediction market. Returns the auto-assigned `market_id`.
@@ -579,6 +590,41 @@ impl InsightArenaContract {
         creator: Address,
     ) -> Result<(), InsightArenaError> {
         reputation::reset_creator_stats(&env, admin, creator)
+    }
+
+    /// Return `creator`'s current reputation score (0-1000). Pure read, no
+    /// storage mutation.
+    pub fn get_reputation_score(env: Env, creator: Address) -> u32 {
+        reputation::get_reputation_score(&env, &creator)
+    }
+
+    /// `true` if `creator` is exempt from the minimum-reputation gate on
+    /// market creation.
+    pub fn is_trusted_creator(env: Env, creator: Address) -> bool {
+        reputation::is_trusted_creator(&env, &creator)
+    }
+
+    /// Add `creator` to the trusted-creator allowlist, exempting them from the
+    /// minimum-reputation gate on market creation. Caller must be the current
+    /// admin. See `ProposalType::AddTrustedCreator` for the timelocked
+    /// governance path.
+    pub fn add_trusted_creator(
+        env: Env,
+        admin: Address,
+        creator: Address,
+    ) -> Result<(), InsightArenaError> {
+        reputation::add_trusted_creator(&env, admin, creator)
+    }
+
+    /// Remove `creator` from the trusted-creator allowlist. Caller must be the
+    /// current admin. See `ProposalType::RemoveTrustedCreator` for the
+    /// timelocked governance path.
+    pub fn remove_trusted_creator(
+        env: Env,
+        admin: Address,
+        creator: Address,
+    ) -> Result<(), InsightArenaError> {
+        reputation::remove_trusted_creator(&env, admin, creator)
     }
 
     // ── Analytics ─────────────────────────────────────────────────────────────
