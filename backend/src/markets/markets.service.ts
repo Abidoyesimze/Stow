@@ -654,7 +654,8 @@ export class MarketsService {
     dto: ListMarketsDto,
   ): Promise<PaginatedMarketsResponse> {
     const page = dto.page ?? 1;
-    const limit = Math.min(dto.limit ?? 20, 50);
+    // PaginationQueryDto already enforces max 100; guard with Math.min for safety
+    const limit = Math.min(dto.limit ?? 20, 100);
     const skip = (page - 1) * limit;
 
     const qb = this.marketsRepository
@@ -700,8 +701,9 @@ export class MarketsService {
       .take(limit);
 
     const [data, total] = await qb.getManyAndCount();
+    const totalPages = Math.ceil(total / limit) || 0;
 
-    return { data, total, page, limit };
+    return { data, total, page, limit, totalPages };
   }
 
   async findAll(): Promise<Market[]> {
@@ -820,9 +822,16 @@ export class MarketsService {
     marketId: string,
     page = 1,
     limit = 20,
-  ): Promise<{ data: Comment[]; total: number; page: number; limit: number }> {
+  ): Promise<{
+    data: Comment[];
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  }> {
     const market = await this.findByIdOrOnChainId(marketId);
-    const take = Math.min(limit, 50);
+    // Enforce shared max of 100 rows
+    const take = Math.min(limit, 100);
     const skip = (page - 1) * take;
 
     const [data, total] = await this.commentsRepository.findAndCount({
@@ -833,7 +842,8 @@ export class MarketsService {
       take,
     });
 
-    return { data, total, page, limit: take };
+    const totalPages = Math.ceil(total / take) || 0;
+    return { data, total, page, limit: take, totalPages };
   }
 
   /**
@@ -863,10 +873,10 @@ export class MarketsService {
       .orderBy('market.featured_at', 'DESC')
       .skip(skip)
       .take(limit);
-
     const [data, total] = await qb.getManyAndCount();
+    const totalPages = Math.ceil(total / limit) || 0;
 
-    return { data, total, page, limit };
+    return { data, total, page, limit, totalPages };
   }
 
   /**

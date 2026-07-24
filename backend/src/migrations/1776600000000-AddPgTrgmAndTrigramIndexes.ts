@@ -1,8 +1,6 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
-export class AddPgTrgmAndTrigramIndexes1776600000000
-  implements MigrationInterface
-{
+export class AddPgTrgmAndTrigramIndexes1776600000000 implements MigrationInterface {
   name = 'AddPgTrgmAndTrigramIndexes1776600000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
@@ -43,15 +41,11 @@ export class AddPgTrgmAndTrigramIndexes1776600000000
     await queryRunner.query(
       `DROP INDEX IF EXISTS "IDX_competitions_title_trgm"`,
     );
-    await queryRunner.query(
-      `DROP INDEX IF EXISTS "IDX_users_username_trgm"`,
-    );
+    await queryRunner.query(`DROP INDEX IF EXISTS "IDX_users_username_trgm"`);
     await queryRunner.query(
       `DROP INDEX IF EXISTS "IDX_markets_description_trgm"`,
     );
-    await queryRunner.query(
-      `DROP INDEX IF EXISTS "IDX_markets_title_trgm"`,
-    );
+    await queryRunner.query(`DROP INDEX IF EXISTS "IDX_markets_title_trgm"`);
     // Note: we intentionally do NOT drop the pg_trgm extension in down()
     // because other parts of the database may depend on it.
   }
