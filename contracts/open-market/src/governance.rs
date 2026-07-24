@@ -3,6 +3,7 @@ use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol, Vec};
 use crate::config;
 use crate::errors::InsightArenaError;
 use crate::market;
+use crate::reputation;
 use crate::storage_types::{DataKey, ProposalState};
 use crate::Config;
 
@@ -20,6 +21,15 @@ pub enum ProposalType {
     UpdateOracle(Address),
     UpdateMinStake(i128),
     AddSupportedCategory(Symbol),
+    /// Governance-timelocked update of `Config::min_creator_reputation`, the
+    /// minimum score required to create a market (0-1000).
+    UpdateMinReputation(u32),
+    /// Governance-timelocked addition of an address to the trusted-creator
+    /// allowlist, exempting it from the minimum-reputation gate.
+    AddTrustedCreator(Address),
+    /// Governance-timelocked removal of an address from the trusted-creator
+    /// allowlist.
+    RemoveTrustedCreator(Address),
 }
 
 #[contracttype]
@@ -288,6 +298,18 @@ pub fn execute_proposal(
                 store_categories(env, &categories);
             }
             symbol_short!("cat")
+        }
+        ProposalType::UpdateMinReputation(threshold) => {
+            config::update_min_reputation_from_governance(env, threshold)?;
+            symbol_short!("minrep")
+        }
+        ProposalType::AddTrustedCreator(addr) => {
+            reputation::add_trusted_creator_from_governance(env, addr)?;
+            symbol_short!("trstadd")
+        }
+        ProposalType::RemoveTrustedCreator(addr) => {
+            reputation::remove_trusted_creator_from_governance(env, addr)?;
+            symbol_short!("trstrem")
         }
     };
 

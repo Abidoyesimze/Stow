@@ -157,6 +157,16 @@ fn emit_market_cancelled(env: &Env, market_id: u64, caller: &Address) {
     );
 }
 
+/// Emitted when `create_market` rejects an attempt for insufficient reputation.
+/// Carries the attempted creator's address so indexers/clients can surface why
+/// the transaction reverted with `InsufficientReputation`.
+fn emit_market_creation_denied(env: &Env, creator: &Address) {
+    env.events().publish(
+        (symbol_short!("mkt"), symbol_short!("rep_den")),
+        creator.clone(),
+    );
+}
+
 pub fn emit_market_resolved(env: &Env, market_id: u64, resolved_outcome: Symbol) {
     env.events().publish(
         (symbol_short!("mkt"), symbol_short!("reslvd")),
@@ -209,9 +219,14 @@ fn has_duplicate_outcomes(outcomes: &Vec<Symbol>) -> bool {
 /// 3. `end_time` must be strictly after the current ledger timestamp
 /// 4. `resolution_time` must be >= `end_time`
 /// 5. At least two distinct outcomes required
-/// 6. `category` must be in the admin-managed whitelist
-/// 7. `creator_fee_bps` must not exceed the platform cap
-/// 8. `min_stake` >= platform minimum; `max_stake` >= `min_stake`
+/// 6. Creator's reputation score must meet the governance-configured
+///    `Config::min_creator_reputation` threshold, unless the creator is on
+///    the trusted-creator allowlist — reverts with `InsufficientReputation`
+///    and emits a `MarketCreationDenied` event (with the attempted creator's
+///    address) otherwise.
+/// 7. `category` must be in the admin-managed whitelist
+/// 8. `creator_fee_bps` must not exceed the platform cap
+/// 9. `min_stake` >= platform minimum; `max_stake` >= `min_stake`
 pub fn create_market(
     env: &Env,
     creator: Address,
@@ -242,18 +257,27 @@ pub fn create_market(
         return Err(InsightArenaError::InvalidInput);
     }
 
-    // ── Load config for fee and stake floor checks ────────────────────────────
+    // ── Load config for reputation, fee, and stake floor checks ───────────────
     let cfg = config::get_config(env)?;
+
+    // ── Guard 6: creator reputation must meet the governance threshold ────────
+    // Trusted-creator allowlist bypasses the score check entirely. The denial
+    // event fires before the error so indexers can see who was rejected and why.
+    if !reputation::meets_creation_threshold(env, &creator, cfg.min_creator_reputation) {
+        emit_market_creation_denied(env, &creator);
+        return Err(InsightArenaError::InsufficientReputation);
+    }
+
     if !load_categories(env).contains(params.category.clone()) {
         return Err(InsightArenaError::InvalidInput);
     }
 
-    // ── Guard 6: creator fee must not exceed the platform cap ─────────────────
+    // ── Guard 7: creator fee must not exceed the platform cap ─────────────────
     if params.creator_fee_bps > cfg.max_creator_fee_bps {
         return Err(InsightArenaError::InvalidFee);
     }
 
-    // ── Guard 7: stake bounds ─────────────────────────────────────────────────
+    // ── Guard 8: stake bounds ─────────────────────────────────────────────────
     if params.min_stake < cfg.min_stake_xlm {
         return Err(InsightArenaError::StakeTooLow);
     }
