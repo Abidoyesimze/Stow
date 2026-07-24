@@ -1,6 +1,7 @@
 // backend/src/search/search.service.spec.ts
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { SelectQueryBuilder } from 'typeorm';
 import { Market } from '../markets/entities/market.entity';
 import { User } from '../users/entities/user.entity';
@@ -10,6 +11,7 @@ import {
 } from '../competitions/entities/competition.entity';
 import { SearchService } from './search.service';
 import { GlobalSearchDto, SearchType } from './dto/global-search.dto';
+import { SuggestType } from './dto/suggest-query.dto';
 
 type MockQb<T> = jest.Mocked<
   Pick<
@@ -23,6 +25,7 @@ type MockQb<T> = jest.Mocked<
     | 'addOrderBy'
     | 'skip'
     | 'take'
+    | 'limit'
     | 'getMany'
     | 'getManyAndCount'
   >
@@ -40,10 +43,9 @@ function makeQb<T>(results: T[], count?: number): MockQb<T> {
     addOrderBy: jest.fn().mockReturnThis(),
     skip: jest.fn().mockReturnThis(),
     take: jest.fn().mockReturnThis(),
+    limit: jest.fn().mockReturnThis(),
     getMany: jest.fn().mockResolvedValue(results),
-    getManyAndCount: jest
-      .fn()
-      .mockResolvedValue([results, resolvedCount]),
+    getManyAndCount: jest.fn().mockResolvedValue([results, resolvedCount]),
   } as unknown as MockQb<T>;
   return qb;
 }
@@ -94,11 +96,21 @@ describe('SearchService', () => {
     headline: '<b>Crypto</b> League',
   } as unknown as Competition;
 
+  let mockCacheManager: {
+    get: jest.Mock;
+    set: jest.Mock;
+  };
+
   beforeEach(async () => {
     // Return count >= FTS_FALLBACK_THRESHOLD (3) so we get the fast FTS path
     marketQb = makeQb([mockMarket], 5);
     userQb = makeQb([mockUser], 5);
     competitionQb = makeQb([mockCompetition], 5);
+
+    mockCacheManager = {
+      get: jest.fn().mockResolvedValue(undefined),
+      set: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -116,6 +128,10 @@ describe('SearchService', () => {
           useValue: {
             createQueryBuilder: jest.fn().mockReturnValue(competitionQb),
           },
+        },
+        {
+          provide: CACHE_MANAGER,
+          useValue: mockCacheManager,
         },
       ],
     }).compile();
@@ -312,6 +328,10 @@ describe('SearchService', () => {
               createQueryBuilder: jest.fn().mockReturnValue(competitionQb),
             },
           },
+          {
+            provide: CACHE_MANAGER,
+            useValue: mockCacheManager,
+          },
         ],
       }).compile();
 
@@ -355,6 +375,10 @@ describe('SearchService', () => {
               createQueryBuilder: jest.fn().mockReturnValue(competitionQb),
             },
           },
+          {
+            provide: CACHE_MANAGER,
+            useValue: mockCacheManager,
+          },
         ],
       }).compile();
 
@@ -373,7 +397,13 @@ describe('SearchService', () => {
 
     it('trigram fallback andWhere includes OR similarity condition', async () => {
       marketQb = makeQb(
-        [{ ...mockMarket, fts_rank: '0', trgm_score: '0.35' } as unknown as Market],
+        [
+          {
+            ...mockMarket,
+            fts_rank: '0',
+            trgm_score: '0.35',
+          } as unknown as Market,
+        ],
         1,
       );
 
@@ -395,6 +425,10 @@ describe('SearchService', () => {
             useValue: {
               createQueryBuilder: jest.fn().mockReturnValue(competitionQb),
             },
+          },
+          {
+            provide: CACHE_MANAGER,
+            useValue: mockCacheManager,
           },
         ],
       }).compile();
@@ -579,6 +613,10 @@ describe('SearchService', () => {
               createQueryBuilder: jest.fn().mockReturnValue(competitionQb),
             },
           },
+          {
+            provide: CACHE_MANAGER,
+            useValue: mockCacheManager,
+          },
         ],
       }).compile();
 
@@ -629,6 +667,10 @@ describe('SearchService', () => {
               createQueryBuilder: jest.fn().mockReturnValue(competitionQb),
             },
           },
+          {
+            provide: CACHE_MANAGER,
+            useValue: mockCacheManager,
+          },
         ],
       }).compile();
 
@@ -643,6 +685,139 @@ describe('SearchService', () => {
 
       expect(result.markets[0].highlight).toBe(mockMarket.title);
       expect(result.markets[0].highlight).toBeTruthy();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // suggest()
+  // -------------------------------------------------------------------------
+
+  describe('suggest()', () => {
+    const scoredMarket = {
+      id: 'market-1',
+      title: 'Bitcoin price prediction',
+      score: '0.8',
+    } as unknown as Market;
+
+    const scoredUser = {
+      id: 'user-1',
+      username: 'bitfan',
+      score: '0.6',
+    } as unknown as User;
+
+    const scoredCompetition = {
+      id: 'comp-1',
+      title: 'Bitcoin League',
+      score: '0.4',
+    } as unknown as Competition;
+
+    beforeEach(() => {
+      marketQb = makeQb([scoredMarket]);
+      userQb = makeQb([scoredUser]);
+      competitionQb = makeQb([scoredCompetition]);
+
+      (
+        service as unknown as {
+          marketsRepository: { createQueryBuilder: jest.Mock };
+        }
+      ).marketsRepository.createQueryBuilder = jest
+        .fn()
+        .mockReturnValue(marketQb);
+      (
+        service as unknown as {
+          usersRepository: { createQueryBuilder: jest.Mock };
+        }
+      ).usersRepository.createQueryBuilder = jest.fn().mockReturnValue(userQb);
+      (
+        service as unknown as {
+          competitionsRepository: { createQueryBuilder: jest.Mock };
+        }
+      ).competitionsRepository.createQueryBuilder = jest
+        .fn()
+        .mockReturnValue(competitionQb);
+    });
+
+    it('returns an empty list without querying for an empty prefix', async () => {
+      const result = await service.suggest({ q: '' });
+
+      expect(result).toEqual({ suggestions: [] });
+      expect(marketQb.getMany).not.toHaveBeenCalled();
+    });
+
+    it('returns an empty list without querying for a 1-character prefix', async () => {
+      const result = await service.suggest({ q: 'b' });
+
+      expect(result).toEqual({ suggestions: [] });
+      expect(mockCacheManager.get).not.toHaveBeenCalled();
+    });
+
+    it('caps the query at the requested limit via a bounded LIMIT clause', async () => {
+      await service.suggest({ q: 'bit', type: SuggestType.Markets, limit: 5 });
+
+      expect(marketQb.limit).toHaveBeenCalledWith(5);
+    });
+
+    it('returns ranked, deduplicated ids+labels merged across types', async () => {
+      const result = await service.suggest({ q: 'bit', type: SuggestType.All });
+
+      expect(result.suggestions).toEqual([
+        { id: 'market-1', label: 'Bitcoin price prediction', type: 'market' },
+        { id: 'user-1', label: 'bitfan', type: 'user' },
+        { id: 'comp-1', label: 'Bitcoin League', type: 'competition' },
+      ]);
+    });
+
+    it('only queries the requested type', async () => {
+      await service.suggest({ q: 'bit', type: SuggestType.Users });
+
+      expect(userQb.getMany).toHaveBeenCalled();
+      expect(marketQb.getMany).not.toHaveBeenCalled();
+      expect(competitionQb.getMany).not.toHaveBeenCalled();
+    });
+
+    it('returns the cached response on a repeat lookup without re-querying', async () => {
+      const cached = {
+        suggestions: [
+          { id: 'market-1', label: 'Bitcoin', type: 'market' as const },
+        ],
+      };
+      mockCacheManager.get.mockResolvedValueOnce(cached);
+
+      const result = await service.suggest({
+        q: 'bit',
+        type: SuggestType.Markets,
+      });
+
+      expect(result).toEqual(cached);
+      expect(marketQb.getMany).not.toHaveBeenCalled();
+    });
+
+    it('caches the computed response after a miss', async () => {
+      await service.suggest({ q: 'bit', type: SuggestType.Markets });
+
+      expect(mockCacheManager.set).toHaveBeenCalledWith(
+        expect.stringContaining('search:suggest:'),
+        expect.objectContaining({ suggestions: expect.any(Array) }),
+        expect.any(Number),
+      );
+    });
+
+    it('excludes banned users and non-public markets/competitions via where clauses', async () => {
+      await service.suggest({ q: 'bit', type: SuggestType.All });
+
+      expect(marketQb.where).toHaveBeenCalledWith(
+        'market.is_public = :isPublic',
+        {
+          isPublic: true,
+        },
+      );
+      expect(userQb.where).toHaveBeenCalledWith('user.is_banned = :banned', {
+        banned: false,
+      });
+      expect(competitionQb.where).toHaveBeenCalledWith(
+        'competition.visibility = :visibility',
+        { visibility: CompetitionVisibility.Public },
+      );
     });
   });
 });

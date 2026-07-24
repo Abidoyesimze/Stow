@@ -1,5 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { InjectRepository } from '@nestjs/typeorm';
+import type { Cache } from 'cache-manager';
 import { Repository } from 'typeorm';
 import { Market } from '../markets/entities/market.entity';
 import { User } from '../users/entities/user.entity';
@@ -17,6 +19,14 @@ import {
   SuggestionsResponseDto,
 } from './dto/global-search.dto';
 import { escapeLikeWildcards } from './dto/search-query.dto';
+import {
+  MAX_SUGGEST_LIMIT,
+  MIN_SUGGEST_PREFIX_LENGTH,
+  SuggestItemDto,
+  SuggestQueryDto,
+  SuggestResponseDto,
+  SuggestType,
+} from './dto/suggest-query.dto';
 
 /**
  * Minimum number of FTS hits required before we skip the trigram fallback.
@@ -31,6 +41,16 @@ const FTS_FALLBACK_THRESHOLD = 3;
  */
 const TRGM_SIMILARITY_THRESHOLD = 0.1;
 
+/** How long a prefix's suggestion results are cached for */
+const SUGGEST_CACHE_TTL_MS = 30_000;
+
+interface ScoredSuggestion {
+  id: string;
+  label: string;
+  score: number;
+  type: 'market' | 'user' | 'competition';
+}
+
 @Injectable()
 export class SearchService {
   constructor(
@@ -40,6 +60,7 @@ export class SearchService {
     private readonly usersRepository: Repository<User>,
     @InjectRepository(Competition)
     private readonly competitionsRepository: Repository<Competition>,
+    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
 
   async search(dto: GlobalSearchDto): Promise<GlobalSearchResponseDto> {
@@ -115,6 +136,129 @@ export class SearchService {
     };
   }
 
+  /**
+   * Lightweight, debounce-friendly type-ahead suggestions (ids + labels only).
+   * Backed by the trigram indexes on title/username so prefix lookups stay index-friendly,
+   * and results for popular prefixes are cached briefly to absorb repeat keystrokes.
+   */
+  async suggest(dto: SuggestQueryDto): Promise<SuggestResponseDto> {
+    const prefix = dto.q?.trim() ?? '';
+    if (prefix.length < MIN_SUGGEST_PREFIX_LENGTH) {
+      return { suggestions: [] };
+    }
+
+    const type = dto.type ?? SuggestType.All;
+    const limit = Math.min(dto.limit ?? MAX_SUGGEST_LIMIT, MAX_SUGGEST_LIMIT);
+    const cacheKey = `search:suggest:${type}:${limit}:${prefix.toLowerCase()}`;
+
+    const cached = await this.cacheManager.get<SuggestResponseDto>(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const escapedPrefix = escapeLikeWildcards(prefix);
+
+    const [markets, users, competitions] = await Promise.all([
+      type === SuggestType.All || type === SuggestType.Markets
+        ? this.suggestMarkets(escapedPrefix, limit)
+        : Promise.resolve([]),
+      type === SuggestType.All || type === SuggestType.Users
+        ? this.suggestUsers(escapedPrefix, limit)
+        : Promise.resolve([]),
+      type === SuggestType.All || type === SuggestType.Competitions
+        ? this.suggestCompetitions(escapedPrefix, limit)
+        : Promise.resolve([]),
+    ]);
+
+    const suggestions: SuggestItemDto[] = [
+      ...markets,
+      ...users,
+      ...competitions,
+    ]
+      .sort((a, b) => b.score - a.score || a.label.localeCompare(b.label))
+      .slice(0, limit)
+      .map(({ id, label, type: itemType }) => ({ id, label, type: itemType }));
+
+    const response: SuggestResponseDto = { suggestions };
+    await this.cacheManager.set(cacheKey, response, SUGGEST_CACHE_TTL_MS);
+    return response;
+  }
+
+  private async suggestMarkets(
+    prefix: string,
+    limit: number,
+  ): Promise<ScoredSuggestion[]> {
+    const rows = await this.marketsRepository
+      .createQueryBuilder('market')
+      .select(['market.id', 'market.title'])
+      .addSelect('similarity(market.title, :prefix)', 'score')
+      .where('market.is_public = :isPublic', { isPublic: true })
+      .andWhere('market.title ILIKE :pattern', { pattern: `${prefix}%` })
+      .setParameter('prefix', prefix)
+      .orderBy('score', 'DESC')
+      .addOrderBy('market.title', 'ASC')
+      .limit(limit)
+      .getMany();
+
+    return (rows as (Market & { score?: string })[]).map((m) => ({
+      id: m.id,
+      label: m.title,
+      score: parseFloat(m.score ?? '0'),
+      type: 'market' as const,
+    }));
+  }
+
+  private async suggestUsers(
+    prefix: string,
+    limit: number,
+  ): Promise<ScoredSuggestion[]> {
+    const rows = await this.usersRepository
+      .createQueryBuilder('user')
+      .select(['user.id', 'user.username'])
+      .addSelect('similarity(user.username, :prefix)', 'score')
+      .where('user.is_banned = :banned', { banned: false })
+      .andWhere('user.username IS NOT NULL')
+      .andWhere('user.username ILIKE :pattern', { pattern: `${prefix}%` })
+      .setParameter('prefix', prefix)
+      .orderBy('score', 'DESC')
+      .addOrderBy('user.username', 'ASC')
+      .limit(limit)
+      .getMany();
+
+    return (rows as (User & { score?: string })[]).map((u) => ({
+      id: u.id,
+      label: u.username as string,
+      score: parseFloat(u.score ?? '0'),
+      type: 'user' as const,
+    }));
+  }
+
+  private async suggestCompetitions(
+    prefix: string,
+    limit: number,
+  ): Promise<ScoredSuggestion[]> {
+    const rows = await this.competitionsRepository
+      .createQueryBuilder('competition')
+      .select(['competition.id', 'competition.title'])
+      .addSelect('similarity(competition.title, :prefix)', 'score')
+      .where('competition.visibility = :visibility', {
+        visibility: CompetitionVisibility.Public,
+      })
+      .andWhere('competition.title ILIKE :pattern', { pattern: `${prefix}%` })
+      .setParameter('prefix', prefix)
+      .orderBy('score', 'DESC')
+      .addOrderBy('competition.title', 'ASC')
+      .limit(limit)
+      .getMany();
+
+    return (rows as (Competition & { score?: string })[]).map((c) => ({
+      id: c.id,
+      label: c.title,
+      score: parseFloat(c.score ?? '0'),
+      type: 'competition' as const,
+    }));
+  }
+
   // ---------------------------------------------------------------------------
   // Markets
   // ---------------------------------------------------------------------------
@@ -171,10 +315,7 @@ export class SearchService {
     const [ftsRaw, ftsCount] = await ftsQb.getManyAndCount();
 
     if (ftsCount >= FTS_FALLBACK_THRESHOLD) {
-      return [
-        this.mapMarketsWithScore(ftsRaw, skip, limit),
-        ftsCount,
-      ];
+      return [this.mapMarketsWithScore(ftsRaw, skip, limit), ftsCount];
     }
 
     // Phase 2: trigram fallback — merge FTS hits with similarity hits
@@ -236,14 +377,15 @@ export class SearchService {
 
     const [trgmRaw, trgmCount] = await trgmQb.getManyAndCount();
 
-    return [
-      this.mapMarketsWithScore(trgmRaw, skip, limit),
-      trgmCount,
-    ];
+    return [this.mapMarketsWithScore(trgmRaw, skip, limit), trgmCount];
   }
 
   private mapMarketsWithScore(
-    raw: (Market & { fts_rank?: string; trgm_score?: string; headline?: string })[],
+    raw: (Market & {
+      fts_rank?: string;
+      trgm_score?: string;
+      headline?: string;
+    })[],
     skip: number,
     limit: number,
   ): MarketSearchResult[] {
@@ -367,7 +509,11 @@ export class SearchService {
   }
 
   private mapUsersWithScore(
-    raw: (User & { fts_rank?: string; trgm_score?: string; headline?: string })[],
+    raw: (User & {
+      fts_rank?: string;
+      trgm_score?: string;
+      headline?: string;
+    })[],
     skip: number,
     limit: number,
   ): UserSearchResult[] {
@@ -441,10 +587,7 @@ export class SearchService {
     const [ftsRaw, ftsCount] = await ftsQb.getManyAndCount();
 
     if (ftsCount >= FTS_FALLBACK_THRESHOLD) {
-      return [
-        this.mapCompetitionsWithScore(ftsRaw, skip, limit),
-        ftsCount,
-      ];
+      return [this.mapCompetitionsWithScore(ftsRaw, skip, limit), ftsCount];
     }
 
     // Trigram fallback
@@ -507,10 +650,7 @@ export class SearchService {
 
     const [trgmRaw, trgmCount] = await trgmQb.getManyAndCount();
 
-    return [
-      this.mapCompetitionsWithScore(trgmRaw, skip, limit),
-      trgmCount,
-    ];
+    return [this.mapCompetitionsWithScore(trgmRaw, skip, limit), trgmCount];
   }
 
   private mapCompetitionsWithScore(
