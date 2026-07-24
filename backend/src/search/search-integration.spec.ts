@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Repository } from 'typeorm';
 import { SearchService } from './search.service';
 import { Market } from '../markets/entities/market.entity';
@@ -38,6 +39,10 @@ describe('SearchService - Wildcard Escaping Integration', () => {
           useValue: {
             createQueryBuilder: jest.fn(),
           },
+        },
+        {
+          provide: CACHE_MANAGER,
+          useValue: { get: jest.fn(), set: jest.fn() },
         },
       ],
     }).compile();
