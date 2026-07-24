@@ -128,6 +128,15 @@ pub struct Config {
     /// no `ProposalType` variant may change them, so a proposal can never
     /// vote itself a shorter timelock or a friendlier guardian.
     pub timelock_delay: u64,
+    /// Minimum reputation score (0-1000, see
+    /// `reputation::calculate_creator_reputation`) a creator must have to
+    /// create a market. Creators below this score are rejected with
+    /// `InsufficientReputation` unless they are on the trusted-creator
+    /// allowlist (`DataKey::TrustedCreator`). Governance-configurable via
+    /// `set_min_creator_reputation` (admin, immediate) or
+    /// `ProposalType::UpdateMinReputation` (timelocked governance). Defaults
+    /// to `0` at initialization, which disables the gate entirely.
+    pub min_creator_reputation: u32,
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -150,6 +159,17 @@ fn load_config(env: &Env) -> Result<Config, InsightArenaError> {
 fn validate_protocol_fee(fee_bps: u32) -> Result<(), InsightArenaError> {
     if fee_bps > 10_000 {
         return Err(InsightArenaError::InvalidFee);
+    }
+
+    Ok(())
+}
+
+fn validate_min_reputation(threshold: u32) -> Result<(), InsightArenaError> {
+    // Reputation scores are clamped to [0, 1000] by `calculate_creator_reputation`;
+    // a higher threshold could never be met by anyone, which is almost certainly
+    // a misconfiguration rather than an intentional full lockout.
+    if threshold > 1000 {
+        return Err(InsightArenaError::InvalidInput);
     }
 
     Ok(())
@@ -184,6 +204,7 @@ pub fn initialize(
         xlm_token,
         is_paused: false,
         timelock_delay: DEFAULT_TIMELOCK_DELAY,
+        min_creator_reputation: 0, // gate disabled by default; admin/governance opt in
     };
 
     env.storage().persistent().set(&DataKey::Config, &config);
@@ -380,6 +401,61 @@ fn emit_guardian_updated(env: &Env, old_guardian: &Address, new_guardian: &Addre
     env.events().publish(
         (symbol_short!("cfg"), symbol_short!("grd_upd")),
         (old_guardian.clone(), new_guardian.clone()),
+    );
+}
+
+/// Update the minimum creator reputation required to create a market.
+/// Caller must be the stored admin. For the timelocked governance path see
+/// [`update_min_reputation_from_governance`], invoked via
+/// `ProposalType::UpdateMinReputation`.
+pub fn set_min_creator_reputation(
+    env: &Env,
+    admin: Address,
+    new_threshold: u32,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    validate_min_reputation(new_threshold)?;
+
+    let old_threshold = config.min_creator_reputation;
+    config.min_creator_reputation = new_threshold;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_min_reputation_updated(env, old_threshold, new_threshold);
+
+    Ok(())
+}
+
+/// Governance path for updating the minimum reputation threshold. Called only
+/// from `governance::execute_proposal` after a `ProposalType::UpdateMinReputation`
+/// proposal has cleared quorum, majority, and the timelock window.
+pub fn update_min_reputation_from_governance(
+    env: &Env,
+    new_threshold: u32,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+    validate_min_reputation(new_threshold)?;
+
+    let old_threshold = config.min_creator_reputation;
+    config.min_creator_reputation = new_threshold;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_min_reputation_updated(env, old_threshold, new_threshold);
+
+    Ok(())
+}
+
+fn emit_min_reputation_updated(env: &Env, old_threshold: u32, new_threshold: u32) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("rep_upd")),
+        (old_threshold, new_threshold),
     );
 }
 
