@@ -121,6 +121,18 @@ class EnvironmentVariables {
   @IsOptional()
   @IsNumber()
   AUTH_THROTTLE_TTL_MS?: number;
+
+  @IsOptional()
+  @IsString()
+  MATCH_RESULTS_FEED_URL?: string;
+
+  @IsOptional()
+  @IsString()
+  MATCH_RESULTS_FEED_CREDENTIAL?: string;
+
+  @IsOptional()
+  @IsNumber()
+  MATCH_RESULTS_POLL_INTERVAL_MS?: number;
 }
 
 export function validate(config: Record<string, unknown>) {
