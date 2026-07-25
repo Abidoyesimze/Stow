@@ -40,12 +40,27 @@ import { AccountModule } from './account/account.module';
 
 @Module({
   imports: [
-    ThrottlerModule.forRoot([
-      {
-        ttl: 60000,
-        limit: 100,
-      },
-    ]),
+    ConfigModule.forRoot({
+      isGlobal: true,
+      validate,
+      envFilePath: '.env',
+    }),
+
+    ThrottlerModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => [
+        {
+          ttl: 60000,
+          limit: 100,
+        },
+        {
+          name: 'auth',
+          ttl: config.get<number>('AUTH_THROTTLE_TTL_MS') ?? 60000,
+          limit: config.get<number>('AUTH_THROTTLE_LIMIT') ?? 5,
+        },
+      ],
+    }),
     LoggerModule.forRoot({
       pinoHttp: {
         level: process.env.NODE_ENV !== 'production' ? 'debug' : 'info',
@@ -57,12 +72,6 @@ import { AccountModule } from './account/account.module';
       },
     }),
     ScheduleModule.forRoot(),
-
-    ConfigModule.forRoot({
-      isGlobal: true,
-      validate,
-      envFilePath: '.env',
-    }),
 
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
