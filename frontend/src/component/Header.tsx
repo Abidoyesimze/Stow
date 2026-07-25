@@ -9,13 +9,15 @@ import { useToast } from "@/hooks/useToast";
 import { MobileMenu } from "./header/MobileMenu";
 import { NavLinks } from "./header/NavLinksComponent";
 import { UserWalletControls } from "./header/UserWalletControls";
+import { WalletBalanceDisplay } from "./header/WalletBalanceDisplay";
 import { isActivePath } from "./header/navLinks";
 
 const MOBILE_MENU_ID = "mobile-navigation-menu";
 
 export default function Header() {
   const pathname = usePathname();
-  const { address, isAuthenticated, isRestoring, logout, openConnectModal } = useWallet();
+  const { address, isAuthenticated, isRestoring, logout, openConnectModal } =
+    useWallet();
   const confirm = useConfirm();
   const toast = useToast();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -67,7 +69,12 @@ export default function Header() {
     if (!isDropdownOpen) return;
     const handleOutsideClick = (event: MouseEvent) => {
       const target = event.target as Node | null;
-      if (!target || dropdownRef.current?.contains(target) || dropdownButtonRef.current?.contains(target)) return;
+      if (
+        !target ||
+        dropdownRef.current?.contains(target) ||
+        dropdownButtonRef.current?.contains(target)
+      )
+        return;
       setIsDropdownOpen(false);
     };
     const handleEscape = (event: KeyboardEvent) => {
@@ -99,7 +106,8 @@ export default function Header() {
     setIsMobileMenuOpen(false);
     const confirmed = await confirm({
       title: "Disconnect wallet?",
-      description: "You'll need to reconnect your wallet to trade or view your account.",
+      description:
+        "You'll need to reconnect your wallet to trade or view your account.",
       confirmLabel: "Disconnect",
       variant: "destructive",
     });
@@ -112,17 +120,63 @@ export default function Header() {
     <>
       <header className="fixed top-0 left-0 right-0 z-50 border-b border-gray-800 bg-black/80 backdrop-blur-sm">
         <div className="max-w-7xl mx-auto px-6 py-4">
-          <nav className="flex items-center justify-between" aria-label="Primary navigation">
-            <Link href="/" className="text-xl font-bold text-white hover:text-[#4FD1C5]">InsightArena</Link>
+          <nav
+            className="flex items-center justify-between"
+            aria-label="Primary navigation"
+          >
+            <Link
+              href="/"
+              className="text-xl font-bold text-white hover:text-[#4FD1C5]"
+            >
+              InsightArena
+            </Link>
             <NavLinks isActive={isActive} />
             <div className="flex items-center gap-3">
-              <button ref={menuButtonRef} type="button" aria-label="Open mobile menu" aria-haspopup="dialog" aria-expanded={isMobileMenuOpen} aria-controls={MOBILE_MENU_ID} className="inline-flex md:hidden rounded-lg border border-gray-700 p-2 text-white hover:bg-gray-900" onClick={() => setIsMobileMenuOpen(true)}>☰</button>
-              <UserWalletControls address={address} copied={copied} isActive={isActive} isAuthenticated={isAuthenticated} isDropdownOpen={isDropdownOpen} isRestoring={isRestoring} dropdownButtonRef={dropdownButtonRef} dropdownRef={dropdownRef} onConnect={openConnectModal} onCopyAddress={handleCopyAddress} onDisconnect={handleDisconnect} setIsDropdownOpen={setIsDropdownOpen} />
+              <WalletBalanceDisplay />
+              <button
+                ref={menuButtonRef}
+                type="button"
+                aria-label="Open mobile menu"
+                aria-haspopup="dialog"
+                aria-expanded={isMobileMenuOpen}
+                aria-controls={MOBILE_MENU_ID}
+                className="inline-flex md:hidden rounded-lg border border-gray-700 p-2 text-white hover:bg-gray-900"
+                onClick={() => setIsMobileMenuOpen(true)}
+              >
+                ☰
+              </button>
+              <UserWalletControls
+                address={address}
+                copied={copied}
+                isActive={isActive}
+                isAuthenticated={isAuthenticated}
+                isDropdownOpen={isDropdownOpen}
+                isRestoring={isRestoring}
+                dropdownButtonRef={dropdownButtonRef}
+                dropdownRef={dropdownRef}
+                onConnect={openConnectModal}
+                onCopyAddress={handleCopyAddress}
+                onDisconnect={handleDisconnect}
+                setIsDropdownOpen={setIsDropdownOpen}
+              />
             </div>
           </nav>
         </div>
       </header>
-      <MobileMenu address={address} copied={copied} id={MOBILE_MENU_ID} isActive={isActive} isAuthenticated={isAuthenticated} isOpen={isMobileMenuOpen} isRestoring={isRestoring} menuRef={mobileMenuRef} onClose={() => setIsMobileMenuOpen(false)} onConnect={openConnectModal} onCopyAddress={handleCopyAddress} onDisconnect={handleDisconnect} />
+      <MobileMenu
+        address={address}
+        copied={copied}
+        id={MOBILE_MENU_ID}
+        isActive={isActive}
+        isAuthenticated={isAuthenticated}
+        isOpen={isMobileMenuOpen}
+        isRestoring={isRestoring}
+        menuRef={mobileMenuRef}
+        onClose={() => setIsMobileMenuOpen(false)}
+        onConnect={openConnectModal}
+        onCopyAddress={handleCopyAddress}
+        onDisconnect={handleDisconnect}
+      />
     </>
   );
 }
