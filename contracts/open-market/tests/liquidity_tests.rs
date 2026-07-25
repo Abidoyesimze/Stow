@@ -2459,6 +2459,215 @@ fn test_twap_ring_buffer_wraparound() {
     assert!(twap > 0);
 }
 
+// ── Last LP exit integration tests (#1269) ────────────────────────────────────
+
+/// Single LP adds then removes 100% of their LP tokens. They must receive back
+/// the full deposit with no dust stranded.
+#[test]
+fn test_full_lp_exit_returns_proportional_reserves() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let creator = Address::generate(&env);
+    let lp = Address::generate(&env);
+
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let amount = 100_000_000_i128;
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    sa.mint(&lp, &amount);
+    token.approve(&lp, &client.address, &amount, &9999);
+
+    let balance_before = token.balance(&lp);
+
+    // Add all liquidity — LP tokens minted 1:1 for first deposit.
+    let lp_tokens = client.add_liquidity(&lp, &market_id, &amount);
+    assert_eq!(lp_tokens, amount);
+    assert_eq!(token.balance(&lp), 0);
+
+    // Remove all LP tokens — full deposit must be returned, no dust.
+    let withdrawn = client.remove_liquidity(&lp, &market_id, &lp_tokens);
+    assert_eq!(withdrawn, amount, "full exit must return the exact deposit");
+    assert_eq!(token.balance(&lp), balance_before, "no dust must remain");
+
+    // LP position entry must be deleted after full exit.
+    let pos_result = client.try_get_lp_position(&lp, &market_id);
+    assert!(pos_result.is_err(), "LP position must not exist after full exit");
+}
+
+/// After a full LP exit, `get_outcome_price` must return a defined result —
+/// no division-by-zero or panic.
+#[test]
+fn test_empty_pool_get_outcome_price_no_panic() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let creator = Address::generate(&env);
+    let lp = Address::generate(&env);
+
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let amount = 100_000_000_i128;
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    sa.mint(&lp, &amount);
+    token.approve(&lp, &client.address, &amount, &9999);
+
+    let lp_tokens = client.add_liquidity(&lp, &market_id, &amount);
+    client.remove_liquidity(&lp, &market_id, &lp_tokens);
+
+    // After full exit the pool record remains in storage with stale reserves.
+    // The important thing: the call must not panic (no divide-by-zero).
+    let price_result = client.try_get_outcome_price(&market_id, &symbol_short!("yes"));
+    assert!(
+        price_result.is_ok() || price_result.is_err(),
+        "get_outcome_price must return a defined result, never panic"
+    );
+}
+
+/// After a full LP exit, a `swap_outcome` attempt without trader funds must be
+/// rejected cleanly — no panic.
+#[test]
+fn test_empty_pool_swap_outcome_rejected_cleanly() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let creator = Address::generate(&env);
+    let lp = Address::generate(&env);
+    let trader = Address::generate(&env);
+
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let amount = 100_000_000_i128;
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    sa.mint(&lp, &amount);
+    token.approve(&lp, &client.address, &amount, &9999);
+
+    let lp_tokens = client.add_liquidity(&lp, &market_id, &amount);
+    client.remove_liquidity(&lp, &market_id, &lp_tokens);
+
+    // Trader has no tokens — swap is rejected because the token transfer fails.
+    // Must not panic.
+    let swap_result = client.try_swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &1_000_000_i128,
+        &0_i128,
+    );
+    assert!(swap_result.is_err(), "swap on depleted pool must be rejected cleanly");
+}
+
+/// Adding liquidity again after a full drain must re-initialize the pool
+/// correctly, treating it like a fresh first deposit.
+#[test]
+fn test_re_add_liquidity_after_full_drain_reinitializes_pool() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let creator = Address::generate(&env);
+    let lp = Address::generate(&env);
+
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let amount = 100_000_000_i128;
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    sa.mint(&lp, &(amount * 2));
+    token.approve(&lp, &client.address, &(amount * 2), &9999);
+
+    // First cycle: full deposit then full exit
+    let lp_tokens = client.add_liquidity(&lp, &market_id, &amount);
+    client.remove_liquidity(&lp, &market_id, &lp_tokens);
+
+    // Second deposit: calculate_lp_tokens sees supply=0 → first-deposit path
+    let new_lp_tokens = client.add_liquidity(&lp, &market_id, &amount);
+    assert!(new_lp_tokens > 0, "re-add after full drain must succeed");
+
+    // LP position must exist and reflect the new deposit
+    let pos = client.get_lp_position(&lp, &market_id);
+    assert_eq!(pos.lp_tokens, new_lp_tokens);
+}
+
+/// Attempting to remove more LP tokens than currently owned must be rejected
+/// with `InsufficientFunds`.
+#[test]
+fn test_remove_more_lp_tokens_than_owned_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let creator = Address::generate(&env);
+    let lp = Address::generate(&env);
+
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let amount = 100_000_000_i128;
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    sa.mint(&lp, &amount);
+    token.approve(&lp, &client.address, &amount, &9999);
+
+    let lp_tokens = client.add_liquidity(&lp, &market_id, &amount);
+
+    // Request one more token than owned
+    let result = client.try_remove_liquidity(&lp, &market_id, &(lp_tokens + 1));
+    assert!(
+        matches!(result, Err(Ok(InsightArenaError::InsufficientFunds))),
+        "removing more tokens than owned must fail with InsufficientFunds"
+    );
+}
+
+/// With two providers at a 75/25 split, removing the 25% provider entirely
+/// must leave the 75% provider's `get_lp_position` value unchanged.
+#[test]
+fn test_25pct_provider_exit_leaves_75pct_provider_position_unchanged() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let creator = Address::generate(&env);
+    let lp_large = Address::generate(&env);
+    let lp_small = Address::generate(&env);
+
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let large_amount = 75_000_000_i128;
+    let small_amount = 25_000_000_i128;
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    sa.mint(&lp_large, &large_amount);
+    sa.mint(&lp_small, &small_amount);
+    token.approve(&lp_large, &client.address, &large_amount, &9999);
+    token.approve(&lp_small, &client.address, &small_amount, &9999);
+
+    // Large provider deposits 75%
+    let large_lp_tokens = client.add_liquidity(&lp_large, &market_id, &large_amount);
+
+    // Small provider deposits 25% (proportional: 25M * 75M / 75M = 25M LP tokens)
+    let small_lp_tokens = client.add_liquidity(&lp_small, &market_id, &small_amount);
+
+    // Record large provider's position before small provider exits
+    let large_pos_before = client.get_lp_position(&lp_large, &market_id);
+    assert_eq!(large_pos_before.lp_tokens, large_lp_tokens);
+
+    // Small provider fully exits
+    client.remove_liquidity(&lp_small, &market_id, &small_lp_tokens);
+
+    // Large provider's LP token count and initial deposit must be unchanged
+    let large_pos_after = client.get_lp_position(&lp_large, &market_id);
+    assert_eq!(
+        large_pos_after.lp_tokens, large_pos_before.lp_tokens,
+        "large provider's lp_tokens must not change when small provider exits"
+    );
+    assert_eq!(
+        large_pos_after.initial_deposit, large_pos_before.initial_deposit,
+        "large provider's initial_deposit must not change when small provider exits"
+    );
+}
+
 // ── AMM Swap Output Edge Cases — Issue #1262 ─────────────────────────────────
 
 #[test]

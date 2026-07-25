@@ -112,6 +112,15 @@ class EnvironmentVariables {
   @IsOptional()
   @IsNumber()
   WEBHOOK_REPLAY_WINDOW_SECONDS?: number;
+
+  // Auth endpoint rate limiting (#1272)
+  @IsOptional()
+  @IsNumber()
+  AUTH_THROTTLE_LIMIT?: number;
+
+  @IsOptional()
+  @IsNumber()
+  AUTH_THROTTLE_TTL_MS?: number;
 }
 
 export function validate(config: Record<string, unknown>) {

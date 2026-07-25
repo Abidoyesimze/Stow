@@ -1,4 +1,8 @@
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import {
+  INestApplication,
+  UnauthorizedException,
+  ValidationPipe,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -12,10 +16,10 @@ import { AuthService } from './auth.service';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { AuthAuditEvent } from './entities/auth-audit-event.entity';
 import { JwtStrategy } from './strategies/jwt.strategy';
-import { Reflector } from '@nestjs/core';
+import { APP_GUARD, Reflector } from '@nestjs/core';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RateLimitService } from './rate-limit.service';
-import { ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 
 const sign = (kp: Keypair, text: string): string =>
   kp.sign(Buffer.from(text, 'utf-8')).toString('hex');
@@ -518,5 +522,64 @@ describe('Auth E2E — challenge → verify flow', () => {
     it('missing refresh_token field → 400', async () => {
       await server.post('/auth/refresh').send({}).expect(400);
     });
+  });
+});
+
+describe('POST /auth/verify — rate limiting', () => {
+  let throttleApp: INestApplication;
+
+  beforeAll(async () => {
+    const module = await Test.createTestingModule({
+      imports: [
+        ThrottlerModule.forRoot([{ name: 'auth', ttl: 60000, limit: 5 }]),
+      ],
+      controllers: [AuthController],
+      providers: [
+        { provide: APP_GUARD, useClass: ThrottlerGuard },
+        {
+          provide: AuthService,
+          useValue: {
+            generateChallenge: jest.fn(),
+            verifyChallenge: jest
+              .fn()
+              .mockRejectedValue(new UnauthorizedException()),
+          },
+        },
+        {
+          provide: RateLimitService,
+          useValue: { getStatus: jest.fn() },
+        },
+        {
+          provide: ConfigService,
+          useValue: { get: jest.fn() },
+        },
+      ],
+    })
+      .overrideGuard(JwtAuthGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
+
+    throttleApp = module.createNestApplication();
+    throttleApp.useGlobalPipes(
+      new ValidationPipe({ whitelist: true, transform: true }),
+    );
+    await throttleApp.init();
+  });
+
+  afterAll(() => throttleApp.close());
+
+  it('returns 429 on the 6th request within the rate limit window', async () => {
+    const srv = throttleApp.getHttpServer() as Parameters<typeof request>[0];
+    const payload = { stellar_address: 'GABC', signed_challenge: 'fake-sig' };
+
+    // First 5 requests exhaust the auth throttle bucket (may 401 from the
+    // mocked service — that is expected and irrelevant here).
+    for (let i = 0; i < 5; i++) {
+      await request(srv).post('/auth/verify').send(payload);
+    }
+
+    // 6th request must be rejected by the throttle guard before the handler runs.
+    const res = await request(srv).post('/auth/verify').send(payload);
+    expect(res.status).toBe(429);
   });
 });
