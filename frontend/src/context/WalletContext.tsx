@@ -256,9 +256,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       setAuthError(null);
       setIsConnectModalOpen(false);
       writeStoredSession({ walletId, address: walletAddress });
-      router.push("/dashboard");
     },
-    [router],
+    [],
   );
 
   const value = useMemo<WalletContextValue>(
