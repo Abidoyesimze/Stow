@@ -5,6 +5,7 @@ import { useSearchParams, useRouter } from "next/navigation";
 import { apiClient, ApiError } from "@/lib/api";
 import { useFavorites } from "@/context/FavoritesContext";
 import MarketCard from "@/component/MarketCard";
+import MarketDisputePanel from "@/component/markets/MarketDisputePanel";
 import { EmptyState } from "@/component/ui/empty-state";
 import { Skeleton } from "@/component/ui/skeleton";
 import { Heart, AlertCircle, Inbox } from "lucide-react";
@@ -247,15 +248,28 @@ export default function MarketsPage() {
         {/* Markets Grid */}
         {filteredMarkets.length > 0 ? (
           <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-            {filteredMarkets.map((market) => (
-              <MarketCard
-                key={market.id}
-                market={market}
-                isFavorite={favoriteIds.has(market.id)}
-                onFavoriteToggle={() => handleFavoriteToggle(market.id)}
-                onPredict={() => handlePredict(market.id)}
-              />
-            ))}
+            {filteredMarkets.map((market) => {
+              const isResolved =
+                market.status.toLowerCase() === "resolved" ||
+                market.status.toLowerCase() === "closed";
+              return (
+                <div key={market.id} className="space-y-0">
+                  <MarketCard
+                    market={market}
+                    isFavorite={favoriteIds.has(market.id)}
+                    onFavoriteToggle={() => handleFavoriteToggle(market.id)}
+                    onPredict={() => handlePredict(market.id)}
+                  />
+                  {isResolved && (
+                    <MarketDisputePanel
+                      marketId={market.id}
+                      marketTitle={market.title}
+                      isResolved={isResolved}
+                    />
+                  )}
+                </div>
+              );
+            })}
           </div>
         ) : (
           <EmptyState
