@@ -43,7 +43,7 @@ export default function MarketCard({
   }
 
   return (
-    <div className="rounded-xl border border-white/6 bg-white/3 p-4">
+    <div className="min-h-[220px] rounded-xl border border-white/6 bg-white/3 p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1">
           <div className="flex items-center justify-between gap-2">
