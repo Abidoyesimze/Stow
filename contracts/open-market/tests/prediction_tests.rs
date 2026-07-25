@@ -161,7 +161,7 @@ fn test_submit_prediction_already_predicted() {
 #[test]
 fn test_submit_predictions_batch_success() {
     let env = Env::default();
-    env.mock_all_auths();
+    env.mock_all_auths_allowing_non_root_auth();
     let (client, xlm_token, _, _) = deploy(&env);
     let predictor = Address::generate(&env);
     let stake = 20_000_000_i128;

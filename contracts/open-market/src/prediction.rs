@@ -171,14 +171,26 @@ pub fn submit_predictions_batch(
         return Err(InsightArenaError::BatchSizeExceeded);
     }
 
+    let mut total_stake: i128 = 0;
+    for request in requests.iter() {
+        total_stake = total_stake
+            .checked_add(request.stake_amount)
+            .ok_or(InsightArenaError::Overflow)?;
+    }
+
+    if total_stake > 0 {
+        escrow::lock_stake(env, &predictor, total_stake)?;
+    }
+
     let mut results = Vec::new(env);
     for request in requests.iter() {
-        submit_prediction(
+        do_submit_prediction(
             env,
             predictor.clone(),
             request.market_id,
             request.chosen_outcome,
             request.stake_amount,
+            true,
         )?;
         results.push_back(());
     }
@@ -210,6 +222,17 @@ pub fn submit_prediction(
     market_id: u64,
     chosen_outcome: Symbol,
     stake_amount: i128,
+) -> Result<(), InsightArenaError> {
+    do_submit_prediction(env, predictor, market_id, chosen_outcome, stake_amount, false)
+}
+
+fn do_submit_prediction(
+    env: &Env,
+    predictor: Address,
+    market_id: u64,
+    chosen_outcome: Symbol,
+    stake_amount: i128,
+    skip_lock: bool,
 ) -> Result<(), InsightArenaError> {
     // ── Guard 1: platform not paused ─────────────────────────────────────────
     config::ensure_not_paused(env)?;
@@ -271,7 +294,9 @@ pub fn submit_prediction(
     }
 
     // ── Lock stake in escrow (transfer XLM from predictor to contract) ────────
-    escrow::lock_stake(env, &predictor, stake_amount)?;
+    if !skip_lock {
+        escrow::lock_stake(env, &predictor, stake_amount)?;
+    }
 
     // ── Track cumulative platform volume ──────────────────────────────────────
     market::add_volume(env, stake_amount);
