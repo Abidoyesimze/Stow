@@ -319,6 +319,18 @@ impl InsightArenaContract {
         prediction::submit_predictions_batch(&env, predictor, requests)
     }
 
+    /// Transfer part or all of a prediction position from `from` to `to` while
+    /// the market is still open. Pure accounting move — no token transfer.
+    pub fn transfer_prediction(
+        env: Env,
+        market_id: u64,
+        from: Address,
+        to: Address,
+        shares: i128,
+    ) -> Result<(), InsightArenaError> {
+        prediction::transfer_prediction(&env, market_id, from, to, shares)
+    }
+
     /// Return the stored [`Prediction`] for a given `(market_id, predictor)` pair.
     pub fn get_prediction(
         env: Env,

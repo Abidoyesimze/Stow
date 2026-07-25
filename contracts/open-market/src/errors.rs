@@ -183,4 +183,15 @@ pub enum InsightArenaError {
     /// The elapsed time between the window's start and now collapsed to zero
     /// seconds, which would require dividing the price integral by zero.
     TwapDivideByZero = 110,
+
+    // ── Prediction Transfer ───────────────────────────────────────────────────
+    // NOTE: `#[contracterror]` enums are hard-capped at 50 XDR cases
+    // (`ScSpecUdtErrorEnumV0::cases<50>`) — this enum is now at the limit.
+    // Reuse an existing variant rather than adding a new one.
+    /// `transfer_prediction` was called with `from == to`.
+    /// A position cannot be transferred to itself.
+    SelfTransfer = 111,
+    /// `transfer_prediction` was called with `shares <= 0`.
+    /// A transfer must move a strictly positive amount.
+    ZeroShareTransfer = 112,
 }
