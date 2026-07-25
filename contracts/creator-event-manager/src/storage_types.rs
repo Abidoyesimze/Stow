@@ -318,6 +318,12 @@ pub enum DataKey {
     /// Settled either by `challenge_finalization` (slash to treasury) or by
     /// `settle_finalization_bond` (return to finalizer after the window).
     FinalizationBond(u64),
+
+    // ── Two-step admin handover (#1356) ──────────────────────────────────────
+    /// Pending admin nominee awaiting acceptance. Absent when no nomination
+    /// is outstanding. Written by `nominate_admin`, cleared by `accept_admin`
+    /// or `cancel_admin_nomination`.
+    PendingAdmin,
 }
 
 // ---------------------------------------------------------------------------

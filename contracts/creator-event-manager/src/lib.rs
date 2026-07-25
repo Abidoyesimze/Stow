@@ -161,6 +161,58 @@ impl CreatorEventManagerContract {
         }
     }
 
+    /// Nominate a new admin. Current admin stays in place until acceptance (#1356).
+    ///
+    /// # Panics
+    /// * `"unauthorized"` — caller is not the admin.
+    /// * `"invalid_address"` — nominee equals the contract address.
+    /// * `"nomination_pending"` — a nomination is already outstanding.
+    pub fn nominate_admin(env: Env, caller: Address, nominee: Address) {
+        match admin::nominate_admin(&env, caller, nominee) {
+            Ok(()) => {}
+            Err(AdminError::Unauthorized) => panic!("unauthorized"),
+            Err(AdminError::InvalidAddress) => panic!("invalid_address"),
+            Err(AdminError::NominationPending) => panic!("nomination_pending"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Accept a pending admin nomination. Only the nominee may accept (#1356).
+    ///
+    /// # Panics
+    /// * `"no_pending_nomination"` — no nomination is outstanding.
+    /// * `"not_nominee"` — caller is not the pending nominee.
+    pub fn accept_admin(env: Env, caller: Address) {
+        match admin::accept_admin(&env, caller) {
+            Ok(()) => {}
+            Err(AdminError::NoPendingNomination) => panic!("no_pending_nomination"),
+            Err(AdminError::NotNominee) => panic!("not_nominee"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Cancel a pending admin nomination. Only the current admin may cancel (#1356).
+    ///
+    /// # Panics
+    /// * `"unauthorized"` — caller is not the admin.
+    /// * `"no_pending_nomination"` — no nomination is outstanding.
+    pub fn cancel_admin_nomination(env: Env, caller: Address) {
+        match admin::cancel_admin_nomination(&env, caller) {
+            Ok(()) => {}
+            Err(AdminError::Unauthorized) => panic!("unauthorized"),
+            Err(AdminError::NoPendingNomination) => panic!("no_pending_nomination"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Return the pending admin nominee, or panics if none (#1356).
+    ///
+    /// # Panics
+    /// * `"no_pending_nomination"` — no nomination is outstanding.
+    pub fn get_pending_admin(env: Env) -> Address {
+        admin::get_pending_admin(&env).unwrap_or_else(|| panic!("no_pending_nomination"))
+    }
+
     /// Returns `true` if the contract has been initialised.
     pub fn is_initialized(env: Env) -> bool {
         admin::is_initialized(&env)

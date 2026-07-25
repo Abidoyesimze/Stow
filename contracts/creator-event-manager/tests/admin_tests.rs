@@ -652,3 +652,90 @@ fn test_get_verifier_threshold_zero_before_configured() {
 
     assert_eq!(client.get_verifier_threshold(), 0u32);
 }
+
+// ---------------------------------------------------------------------------
+// Two-step admin handover (#1356)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_nominate_and_accept_transfers_admin() {
+    let (env, client, _contract_id) = setup();
+    let (admin, ai_agent, treasury, xlm_token) = make_addresses(&env);
+    let nominee = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &ai_agent, &treasury, &xlm_token, &1_000_000i128);
+
+    client.nominate_admin(&admin, &nominee);
+    assert_eq!(client.get_pending_admin(), nominee);
+
+    // Admin unchanged until acceptance.
+    client.update_creation_fee(&admin, &2_000_000i128);
+    assert_eq!(client.get_creation_fee(), 2_000_000i128);
+
+    client.accept_admin(&nominee);
+
+    // Old admin revoked; nominee is admin.
+    client.update_creation_fee(&nominee, &3_000_000i128);
+    assert_eq!(client.get_creation_fee(), 3_000_000i128);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_old_admin_revoked_after_accept() {
+    let (env, client, _contract_id) = setup();
+    let (admin, ai_agent, treasury, xlm_token) = make_addresses(&env);
+    let nominee = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &ai_agent, &treasury, &xlm_token, &1_000_000i128);
+    client.nominate_admin(&admin, &nominee);
+    client.accept_admin(&nominee);
+
+    client.update_creation_fee(&admin, &4_000_000i128);
+}
+
+#[test]
+fn test_cancel_admin_nomination() {
+    let (env, client, _contract_id) = setup();
+    let (admin, ai_agent, treasury, xlm_token) = make_addresses(&env);
+    let nominee = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &ai_agent, &treasury, &xlm_token, &1_000_000i128);
+    client.nominate_admin(&admin, &nominee);
+    client.cancel_admin_nomination(&admin);
+
+    // Can nominate again after cancel.
+    let nominee2 = Address::generate(&env);
+    client.nominate_admin(&admin, &nominee2);
+    assert_eq!(client.get_pending_admin(), nominee2);
+}
+
+#[test]
+#[should_panic(expected = "not_nominee")]
+fn test_unauthorized_accept_rejected() {
+    let (env, client, _contract_id) = setup();
+    let (admin, ai_agent, treasury, xlm_token) = make_addresses(&env);
+    let nominee = Address::generate(&env);
+    let stranger = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &ai_agent, &treasury, &xlm_token, &1_000_000i128);
+    client.nominate_admin(&admin, &nominee);
+    client.accept_admin(&stranger);
+}
+
+#[test]
+#[should_panic(expected = "nomination_pending")]
+fn test_double_nominate_rejected() {
+    let (env, client, _contract_id) = setup();
+    let (admin, ai_agent, treasury, xlm_token) = make_addresses(&env);
+    let nominee = Address::generate(&env);
+    let nominee2 = Address::generate(&env);
+
+    env.mock_all_auths();
+    client.initialize(&admin, &ai_agent, &treasury, &xlm_token, &1_000_000i128);
+    client.nominate_admin(&admin, &nominee);
+    client.nominate_admin(&admin, &nominee2);
+}
