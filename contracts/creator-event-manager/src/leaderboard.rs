@@ -43,10 +43,11 @@ impl From<EventError> for LeaderboardError {
 /// points earned from predictions. The leaderboard is available before all
 /// matches are resolved; predictions for unresolved matches contribute 0 points.
 ///
-/// # Ranking Rules (all in order):
+/// # Ranking Rules (documented tie-break order #1343):
 /// 1. **Higher total_points** — primary sort key (descending).
 /// 2. **Higher exact_scores** — tiebreaker (descending).
-/// 3. **Earlier last_prediction_time** — tiebreaker (ascending).
+/// 3. **Earlier tie_break_key** — earliest qualifying prediction timestamp
+///    (ascending); stored on each entry for auditability.
 /// 4. **Address byte comparison** — final deterministic tiebreaker.
 ///
 /// # Flow:
@@ -58,8 +59,9 @@ impl From<EventError> for LeaderboardError {
 ///    - Count predictions where `points_earned == Some(4)` → `exact_scores`.
 ///    - Count total predictions submitted → `matches_played`.
 ///    - Find max `predicted_at` → `last_prediction_time`.
+///    - Find min `predicted_at` → `tie_break_key`.
 /// 4. Sort entries by the ranking rules above.
-/// 5. Assign rank 1..N in sorted order.
+/// 5. Assign rank 1..N in sorted order (exposed on each entry).
 /// 6. Return the sorted leaderboard.
 ///
 /// # Returns
@@ -90,6 +92,7 @@ pub fn get_event_leaderboard(
         let mut correct_results: u32 = 0;
         let mut exact_scores: u32 = 0;
         let mut last_prediction_time: u64 = 0;
+        let mut tie_break_key: u64 = u64::MAX;
 
         // Calculate stats from all predictions
         for prediction_id in user_predictions.iter() {
@@ -120,9 +123,13 @@ pub fn get_event_leaderboard(
                         .ok_or(LeaderboardError::Overflow)?;
                 }
 
-                // Track latest prediction time
+                // Track latest prediction time (informational)
                 if prediction.predicted_at > last_prediction_time {
                     last_prediction_time = prediction.predicted_at;
+                }
+                // Earliest qualifying timestamp is the stored tie-break key.
+                if prediction.predicted_at < tie_break_key {
+                    tie_break_key = prediction.predicted_at;
                 }
             }
         }
@@ -137,6 +144,7 @@ pub fn get_event_leaderboard(
             exact_scores,
             matches_played,
             last_prediction_time,
+            tie_break_key,
         );
         entries.push_back(entry);
     }
@@ -160,7 +168,7 @@ pub fn get_event_leaderboard(
         }
     }
 
-    // 5. Assign ranks (1-based)
+    // 5. Assign ranks (1-based) — exposed on every read of the leaderboard.
     for i in 0..len {
         let mut entry = entries.get(i).unwrap();
         entry.rank = (i as u32) + 1;
@@ -168,6 +176,18 @@ pub fn get_event_leaderboard(
     }
 
     Ok(entries)
+}
+
+/// Return the resolved 1-based rank for a participant, or `0` if they are not
+/// on the leaderboard (#1343).
+pub fn get_user_rank(env: &Env, event_id: u64, user: Address) -> Result<u32, LeaderboardError> {
+    let leaderboard = get_event_leaderboard(env, event_id)?;
+    for entry in leaderboard.iter() {
+        if entry.user == user {
+            return Ok(entry.rank);
+        }
+    }
+    Ok(0)
 }
 
 // ---------------------------------------------------------------------------

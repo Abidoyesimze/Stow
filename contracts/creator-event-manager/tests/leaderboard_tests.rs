@@ -441,3 +441,112 @@ fn test_leaderboard_address_tiebreaker_insertion_order_irrelevant() {
     assert_eq!(leaderboard.get(1).unwrap().user, larger);
     assert_eq!(leaderboard.get(1).unwrap().rank, 2);
 }
+
+// ---------------------------------------------------------------------------
+// Multi-way ties + exposed rank (#1343)
+// ---------------------------------------------------------------------------
+
+/// Three participants with identical scores are ordered by earliest
+/// qualifying timestamp, then address. Ranks are stable across repeated reads
+/// and match `get_user_rank`.
+#[test]
+fn test_leaderboard_multiway_tie_earliest_timestamp_then_address() {
+    let (env, client, contract_id, creator, ai_agent, xlm_token) = setup();
+
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+    let user_c = Address::generate(&env);
+
+    let (event_id, invite_code, match_ids) =
+        create_event_with_matches(&env, &contract_id, &client, &creator, &xlm_token, 1);
+
+    // Stagger join/predict times so each has a distinct earliest timestamp,
+    // then ensure points/exact_scores are identical.
+    client.join_event(&user_a, &invite_code);
+    client.submit_prediction(&user_a, &match_ids.get(0).unwrap(), &1u32, &0u32);
+    let t_a = env.ledger().timestamp();
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 10);
+    client.join_event(&user_b, &invite_code);
+    client.submit_prediction(&user_b, &match_ids.get(0).unwrap(), &1u32, &0u32);
+    let t_b = env.ledger().timestamp();
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 10);
+    client.join_event(&user_c, &invite_code);
+    client.submit_prediction(&user_c, &match_ids.get(0).unwrap(), &1u32, &0u32);
+    let t_c = env.ledger().timestamp();
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 300);
+    submit_match_result(
+        &env,
+        &client,
+        &ai_agent,
+        *match_ids.get(0).unwrap(),
+        MatchResult::TeamA,
+    );
+
+    let lb1 = client.get_event_leaderboard(&event_id);
+    let lb2 = client.get_event_leaderboard(&event_id);
+    assert_eq!(lb1, lb2);
+    assert_eq!(lb1.len(), 3);
+
+    // Earliest qualifier ranks first.
+    assert_eq!(lb1.get(0).unwrap().user, user_a);
+    assert_eq!(lb1.get(0).unwrap().rank, 1);
+    assert_eq!(lb1.get(0).unwrap().tie_break_key, t_a);
+    assert_eq!(lb1.get(1).unwrap().user, user_b);
+    assert_eq!(lb1.get(1).unwrap().rank, 2);
+    assert_eq!(lb1.get(1).unwrap().tie_break_key, t_b);
+    assert_eq!(lb1.get(2).unwrap().user, user_c);
+    assert_eq!(lb1.get(2).unwrap().rank, 3);
+    assert_eq!(lb1.get(2).unwrap().tie_break_key, t_c);
+
+    assert_eq!(client.get_user_rank(&event_id, &user_a), 1);
+    assert_eq!(client.get_user_rank(&event_id, &user_b), 2);
+    assert_eq!(client.get_user_rank(&event_id, &user_c), 3);
+}
+
+/// When timestamps are also identical, the address tie-break produces a
+/// stable three-way order independent of join order.
+#[test]
+fn test_leaderboard_multiway_tie_identical_timestamps_by_address() {
+    let (env, client, contract_id, creator, ai_agent, xlm_token) = setup();
+
+    let u1 = Address::generate(&env);
+    let u2 = Address::generate(&env);
+    let u3 = Address::generate(&env);
+
+    // Sort addresses lexicographically for the expected order.
+    let mut ordered = [u1.clone(), u2.clone(), u3.clone()];
+    ordered.sort();
+
+    let (event_id, invite_code, match_ids) =
+        create_event_with_matches(&env, &contract_id, &client, &creator, &xlm_token, 1);
+
+    // Join in reverse order relative to address sort; same ledger timestamp.
+    for user in [ordered[2].clone(), ordered[0].clone(), ordered[1].clone()] {
+        client.join_event(&user, &invite_code);
+        client.submit_prediction(&user, &match_ids.get(0).unwrap(), &1u32, &0u32);
+    }
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 300);
+    submit_match_result(
+        &env,
+        &client,
+        &ai_agent,
+        *match_ids.get(0).unwrap(),
+        MatchResult::TeamA,
+    );
+
+    let lb = client.get_event_leaderboard(&event_id);
+    assert_eq!(lb.len(), 3);
+    assert_eq!(lb.get(0).unwrap().user, ordered[0]);
+    assert_eq!(lb.get(0).unwrap().rank, 1);
+    assert_eq!(lb.get(1).unwrap().user, ordered[1]);
+    assert_eq!(lb.get(1).unwrap().rank, 2);
+    assert_eq!(lb.get(2).unwrap().user, ordered[2]);
+    assert_eq!(lb.get(2).unwrap().rank, 3);
+
+    // Repeated read is identical.
+    assert_eq!(client.get_event_leaderboard(&event_id), lb);
+}

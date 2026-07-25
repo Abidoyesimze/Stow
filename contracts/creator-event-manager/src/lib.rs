@@ -841,6 +841,21 @@ impl CreatorEventManagerContract {
         }
     }
 
+    /// Return the resolved 1-based leaderboard rank for `user` in `event_id` (#1343).
+    ///
+    /// Identical to the `rank` field on the matching [`LeaderboardEntry`].
+    /// Returns `0` when the user is not a participant.
+    ///
+    /// # Panics
+    /// * `"event_not_found"` — no event exists with the given ID.
+    pub fn get_user_rank(env: Env, event_id: u64, user: Address) -> u32 {
+        match views::get_user_rank(&env, event_id, user) {
+            Ok(rank) => rank,
+            Err(EventError::EventNotFound) => panic!("event_not_found"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
     /// Return the stored weighted standings for an event (#1311).
     ///
     /// Standings weight each correct prediction by documented multipliers:

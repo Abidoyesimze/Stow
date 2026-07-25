@@ -871,6 +871,14 @@ impl Prediction {
 /// and deterministic tie-breaking. This replaces the binary Winner model to
 /// support top-N prize splits and flexible reward distributions.
 ///
+/// ## Documented tie-break order (#1343)
+/// Applied consistently by [`LeaderboardEntry::outranks`] and every ranking
+/// path that builds the leaderboard:
+/// 1. Higher `total_points` (descending)
+/// 2. Higher `exact_scores` (descending)
+/// 3. Lower `tie_break_key` — earliest qualifying prediction timestamp (ascending)
+/// 4. Smaller `user` address (ascending, final deterministic key)
+///
 /// Stored in Vec<LeaderboardEntry> (typically temporary, computed on-demand).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -893,9 +901,14 @@ pub struct LeaderboardEntry {
     /// Total number of predictions this user submitted for the event
     pub matches_played: u32,
 
-    /// Unix timestamp of this user's most recent prediction
-    /// (used as tiebreaker — earlier submission = higher rank)
+    /// Unix timestamp of this user's most recent prediction (informational).
     pub last_prediction_time: u64,
+
+    /// Deterministic tie-break key: the earliest prediction timestamp for
+    /// this participant in the event (`u64::MAX` when they have none).
+    /// Stored alongside the entry so clients can audit ranking without
+    /// recomputing (#1343).
+    pub tie_break_key: u64,
 
     /// 1-based rank after sorting (1 is the top-ranked participant).
     /// Set by `get_event_leaderboard` after sorting all entries.
@@ -912,6 +925,7 @@ impl LeaderboardEntry {
         exact_scores: u32,
         matches_played: u32,
         last_prediction_time: u64,
+        tie_break_key: u64,
     ) -> Self {
         Self {
             user,
@@ -921,35 +935,27 @@ impl LeaderboardEntry {
             exact_scores,
             matches_played,
             last_prediction_time,
+            tie_break_key,
             rank: 0, // Will be assigned during leaderboard finalization
         }
     }
 
-    /// Returns `true` if this entry outranks `other` according to the tiebreaker rules.
-    ///
-    /// Sort order (all descending except last_prediction_time):
-    /// 1. Higher `total_points` wins
-    /// 2. On tie: Higher `exact_scores` wins
-    /// 3. On tie: Earlier `last_prediction_time` wins (lower timestamp = better rank)
-    /// 4. On tie: Compare addresses (deterministic final tiebreaker)
+    /// Returns `true` if this entry outranks `other` according to the
+    /// documented tie-break order (#1343):
+    /// 1. Higher `total_points`
+    /// 2. Higher `exact_scores`
+    /// 3. Earlier `tie_break_key` (lower timestamp = better rank)
+    /// 4. Smaller address (final deterministic tiebreaker)
     pub fn outranks(&self, other: &LeaderboardEntry) -> bool {
-        // Primary: higher total_points
         if self.total_points != other.total_points {
             return self.total_points > other.total_points;
         }
-
-        // Secondary: higher exact_scores
         if self.exact_scores != other.exact_scores {
             return self.exact_scores > other.exact_scores;
         }
-
-        // Tertiary: earlier last_prediction_time (lower = better)
-        if self.last_prediction_time != other.last_prediction_time {
-            return self.last_prediction_time < other.last_prediction_time;
+        if self.tie_break_key != other.tie_break_key {
+            return self.tie_break_key < other.tie_break_key;
         }
-
-        // Final tiebreaker: address comparison (deterministic)
-        // Compare the addresses directly; Soroban Address implements Ord
         self.user < other.user
     }
 }
