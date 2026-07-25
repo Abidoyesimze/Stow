@@ -6,7 +6,7 @@ import { Market, MarketSettlementState } from './entities/market.entity';
 import { SorobanService } from '../soroban/soroban.service';
 import { WebhookDispatcherService } from '../webhooks/services/webhook-dispatcher.service';
 
-interface SettlementRetryInfo {
+export interface SettlementRetryInfo {
   marketId: string;
   attempts: number;
   lastError?: string;
@@ -19,7 +19,8 @@ export class MarketSettlementScheduler {
   private readonly MAX_SETTLEMENTS_PER_TICK = 50;
   private readonly MAX_RETRY_ATTEMPTS = 5;
   private readonly INITIAL_BACKOFF_MS = 60000; // 1 minute
-  private readonly deadLetterQueue: Map<string, SettlementRetryInfo> = new Map();
+  private readonly deadLetterQueue: Map<string, SettlementRetryInfo> =
+    new Map();
 
   constructor(
     @InjectRepository(Market)
@@ -44,11 +45,14 @@ export class MarketSettlementScheduler {
   private async processRetries(): Promise<void> {
     const now = new Date();
     const retriesToProcess = Array.from(this.deadLetterQueue.entries()).filter(
-      ([, info]) => info.nextRetryAt <= now && info.attempts < this.MAX_RETRY_ATTEMPTS,
+      ([, info]) =>
+        info.nextRetryAt <= now && info.attempts < this.MAX_RETRY_ATTEMPTS,
     );
 
     for (const [marketId, retryInfo] of retriesToProcess) {
-      const market = await this.marketsRepository.findOne({ where: { id: marketId } });
+      const market = await this.marketsRepository.findOne({
+        where: { id: marketId },
+      });
       if (!market) {
         this.deadLetterQueue.delete(marketId);
         continue;
@@ -57,7 +61,9 @@ export class MarketSettlementScheduler {
       const settled = await this.settleMarketWithRetry(market, retryInfo);
       if (settled) {
         this.deadLetterQueue.delete(marketId);
-        this.logger.log(`Market ${marketId} settled after ${retryInfo.attempts + 1} attempt(s)`);
+        this.logger.log(
+          `Market ${marketId} settled after ${retryInfo.attempts + 1} attempt(s)`,
+        );
       } else if (retryInfo.attempts >= this.MAX_RETRY_ATTEMPTS - 1) {
         // Move to permanent dead-letter store
         this.logger.error(
@@ -71,7 +77,10 @@ export class MarketSettlementScheduler {
   /**
    * Emit alert when a settlement moves to dead-letter store
    */
-  private async emitDeadLetterAlert(market: Market, retryInfo: SettlementRetryInfo): Promise<void> {
+  private async emitDeadLetterAlert(
+    market: Market,
+    retryInfo: SettlementRetryInfo,
+  ): Promise<void> {
     await this.webhookDispatcher.emit('market.settlement.failed', {
       marketId: market.id,
       onChainMarketId: market.on_chain_market_id,
@@ -148,7 +157,10 @@ export class MarketSettlementScheduler {
         err,
       );
       // Add to retry queue with exponential backoff
-      await this.addToRetryQueue(market, err instanceof Error ? err.message : 'Unknown error');
+      await this.addToRetryQueue(
+        market,
+        err instanceof Error ? err.message : 'Unknown error',
+      );
       return false;
     }
 
@@ -190,11 +202,11 @@ export class MarketSettlementScheduler {
       this.logger.warn(
         `Retry attempt ${retryInfo.attempts + 1} failed for market ${market.id}: ${errorMsg}`,
       );
-      
+
       retryInfo.attempts++;
       retryInfo.lastError = errorMsg;
       retryInfo.nextRetryAt = this.calculateNextRetry(retryInfo.attempts);
-      
+
       return false;
     }
   }
@@ -233,7 +245,9 @@ export class MarketSettlementScheduler {
    * Manually retry a failed settlement (admin endpoint)
    */
   async retrySettlement(marketId: string): Promise<boolean> {
-    const market = await this.marketsRepository.findOne({ where: { id: marketId } });
+    const market = await this.marketsRepository.findOne({
+      where: { id: marketId },
+    });
     if (!market) {
       throw new Error(`Market ${marketId} not found`);
     }

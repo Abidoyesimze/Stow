@@ -549,13 +549,16 @@ export class MarketsController {
 
   @Get('admin/settlement-failures')
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get failed settlement items in dead-letter queue (admin only)' })
+  @ApiOperation({
+    summary: 'Get failed settlement items in dead-letter queue (admin only)',
+  })
   @ApiResponse({
     status: 200,
-    description: 'List of markets in the dead-letter queue with retry information',
+    description:
+      'List of markets in the dead-letter queue with retry information',
   })
   @ApiResponse({ status: 403, description: 'Not authorized' })
-  async getSettlementFailures(@CurrentUser() user: User) {
+  async getSettlementFailures() {
     // Assuming admin check is done via guards or service
     return this.marketsService.getSettlementFailures();
   }
@@ -570,10 +573,7 @@ export class MarketsController {
   })
   @ApiResponse({ status: 404, description: 'Market not found in retry queue' })
   @ApiResponse({ status: 403, description: 'Not authorized' })
-  async retrySettlement(
-    @Param('marketId') marketId: string,
-    @CurrentUser() user: User,
-  ) {
+  async retrySettlement(@Param('marketId') marketId: string) {
     return this.marketsService.retrySettlement(marketId);
   }
 }

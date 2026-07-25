@@ -127,7 +127,7 @@ describe('MarketSettlementScheduler', () => {
     expect(webhookDispatcher.emit).toHaveBeenCalledTimes(1);
   });
 
-  it('continues logging without throwing when Soroban settlement fails', async () => {
+  it('queues for retry without throwing when Soroban settlement fails', async () => {
     const market = makeMarket();
     marketsRepository.find.mockResolvedValue([market]);
     marketsRepository.update.mockResolvedValue({ affected: 1 } as UpdateResult);
@@ -135,11 +135,14 @@ describe('MarketSettlementScheduler', () => {
 
     const settled = await scheduler.settleEligibleMarkets();
 
-    expect(settled).toBe(1);
-    expect(webhookDispatcher.emit).toHaveBeenCalledWith(
+    // A failed on-chain settlement is not counted as settled; it is instead
+    // added to the retry queue and no `market.settled` event is emitted.
+    expect(settled).toBe(0);
+    expect(webhookDispatcher.emit).not.toHaveBeenCalledWith(
       'market.settled',
       expect.any(Object),
     );
+    expect(scheduler.getDeadLetterQueue()).toHaveLength(1);
   });
 
   it('handleSettlement swallows sweep-level errors without throwing', async () => {
