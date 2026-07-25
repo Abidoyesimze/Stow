@@ -199,7 +199,7 @@ fn test_submit_predictions_batch_oversize() {
     let predictor = Address::generate(&env);
     let stake = 20_000_000_i128;
 
-    let mut requests_vec = Vec::new();
+    let mut requests_vec = std::vec::Vec::new();
     for _ in 0..11 {
         requests_vec.push(BatchPredictionRequest {
             market_id: 1,
