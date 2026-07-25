@@ -343,7 +343,14 @@ export class SeasonsService {
     }
 
     if (!ending.is_finalized) {
-      await this.finalizeSeason(ending.id);
+      try {
+        await this.finalizeSeason(ending.id);
+      } catch (err) {
+        // Concurrent rollover may have finalized already; continue if so.
+        if (!(err instanceof ConflictException)) {
+          throw err;
+        }
+      }
     }
 
     const closed = await this.findById(ending.id);

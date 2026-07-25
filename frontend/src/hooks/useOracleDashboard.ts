@@ -121,7 +121,7 @@ export function useOracleDashboard(): OracleDashboardState {
               event?: { title: string };
               time_since_match_started_seconds?: number;
             }>;
-          }>("/api/v1/oracle/pending-matches")
+          }>("/oracle/pending-matches")
           .catch(() => null),
         apiClient
           .get<{
@@ -142,7 +142,7 @@ export function useOracleDashboard(): OracleDashboardState {
               failed_submissions: number;
               average_submission_time_ms: number;
             };
-          }>("/api/v1/oracle/submissions")
+          }>("/oracle/submissions")
           .catch(() => null),
       ]);
 

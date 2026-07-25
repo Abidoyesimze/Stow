@@ -34,7 +34,9 @@ export default function OracleShell({ children }: OracleShellProps) {
 
           <nav className="space-y-1 px-4 py-6" aria-label="Oracle navigation">
             {navigationItems.map(({ href, label }) => {
-              const isActive = pathname === href;
+              const isActive =
+                pathname === href ||
+                (href !== "/oracle" && pathname.startsWith(`${href}/`));
               return (
                 <Link
                   key={href}

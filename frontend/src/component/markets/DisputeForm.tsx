@@ -37,8 +37,11 @@ export default function DisputeForm({
     const value = evidenceDraft.trim();
     if (!value) return;
     try {
-      // eslint-disable-next-line no-new
-      new URL(value);
+      const parsed = new URL(value);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        setLocalError("Evidence must be an http(s) URL.");
+        return;
+      }
     } catch {
       setLocalError("Evidence must be a valid URL.");
       return;
