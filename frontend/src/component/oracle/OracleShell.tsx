@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 
 const navigationItems = [
+  { href: "/oracle", label: "Dashboard" },
   { href: "/oracle/creator-events", label: "Pending Matches" },
 ];
 
