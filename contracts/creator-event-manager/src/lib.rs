@@ -21,7 +21,8 @@ use admin::AdminError;
 use event::EventError;
 use r#match::MatchError;
 use storage_types::{
-    Event, LeaderboardEntry, Match, OracleSubmission, ParticipantScore, Prediction, StandingEntry,
+    Event, FinalizationBond, LeaderboardEntry, Match, OracleSubmission, ParticipantScore,
+    Prediction, StandingEntry,
 };
 use verification::VerificationError;
 use views::{EventStatistics, PlatformStatistics};
@@ -866,7 +867,60 @@ impl CreatorEventManagerContract {
             Err(EventError::EventNotEnded) => panic!("event_not_ended"),
             Err(EventError::MatchesNotComplete) => panic!("matches_not_complete"),
             Err(EventError::TransferFailed) => panic!("transfer_failed"),
+            Err(EventError::BondRequired) => panic!("bond_required"),
             Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Return a finalizer's bond after the challenge window closes unchallenged (#1344).
+    ///
+    /// # Panics
+    /// * `"bond_not_found"` — no bond was locked for this event.
+    /// * `"bond_already_settled"` — bond already returned or slashed.
+    /// * `"challenge_window_open"` — challenge window has not closed yet.
+    /// * `"transfer_failed"` — bond return transfer failed.
+    pub fn settle_finalization_bond(env: Env, caller: Address, event_id: u64) -> i128 {
+        match finalize::settle_finalization_bond(&env, caller, event_id) {
+            Ok(amount) => amount,
+            Err(EventError::BondNotFound) => panic!("bond_not_found"),
+            Err(EventError::BondAlreadySettled) => panic!("bond_already_settled"),
+            Err(EventError::ChallengeWindowOpen) => panic!("challenge_window_open"),
+            Err(EventError::TransferFailed) => panic!("transfer_failed"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Challenge a finalization and slash 100% of the finalizer's bond to treasury (#1344).
+    ///
+    /// Only the admin or a configured verifier signer may challenge, and only
+    /// while the challenge window is open.
+    ///
+    /// # Panics
+    /// * `"unauthorized_challenge"` — caller is neither admin nor verifier.
+    /// * `"bond_not_found"` — no bond was locked for this event.
+    /// * `"bond_already_settled"` — bond already returned or slashed.
+    /// * `"challenge_window_closed"` — challenge window has elapsed.
+    /// * `"transfer_failed"` — slash transfer failed.
+    pub fn challenge_finalization(env: Env, challenger: Address, event_id: u64) -> i128 {
+        match verification::challenge_finalization(&env, challenger, event_id) {
+            Ok(amount) => amount,
+            Err(EventError::UnauthorizedChallenge) => panic!("unauthorized_challenge"),
+            Err(EventError::BondNotFound) => panic!("bond_not_found"),
+            Err(EventError::BondAlreadySettled) => panic!("bond_already_settled"),
+            Err(EventError::ChallengeWindowClosed) => panic!("challenge_window_closed"),
+            Err(EventError::TransferFailed) => panic!("transfer_failed"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Return the finalization bond record for an event (#1344).
+    ///
+    /// # Panics
+    /// * `"bond_not_found"` — no bond was locked for this event.
+    pub fn get_finalization_bond(env: Env, event_id: u64) -> FinalizationBond {
+        match finalize::get_finalization_bond(&env, event_id) {
+            Some(bond) => bond,
+            None => panic!("bond_not_found"),
         }
     }
 

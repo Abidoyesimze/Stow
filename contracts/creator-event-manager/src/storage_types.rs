@@ -21,6 +21,13 @@ pub const MAX_EVENT_DURATION_SECONDS: u64 = 7_776_000;
 /// their allocation before it becomes eligible for `clawback_unclaimed` to
 /// treasury (#1312).
 pub const CLAIM_PERIOD_SECONDS: u64 = 2_592_000; // 30 days
+/// XLM bond (in stroops) that must be locked to call `finalize_event` (#1344).
+/// Held during the challenge window; returned if unchallenged, or fully
+/// slashed to treasury if a challenge succeeds.
+pub const FINALIZATION_BOND_STROOPS: i128 = 10_000_000; // 1 XLM
+/// Challenge window (seconds) after finalization during which the result may
+/// be disputed via `challenge_finalization` (#1344).
+pub const FINALIZATION_CHALLENGE_WINDOW_SECONDS: u64 = 86_400; // 1 day
 /// Valid predicted outcome symbols
 pub const OUTCOME_TEAM_A: &str = "TEAM_A";
 pub const OUTCOME_TEAM_B: &str = "TEAM_B";
@@ -305,6 +312,12 @@ pub enum DataKey {
     /// oracle sources for a match  (match_id). Written by
     /// `oracle::submit_oracle_value`.
     OracleSubmissions(u64),
+
+    // ── Finalization challenge bond (#1344) ──────────────────────────────────
+    /// Bond locked by the caller of `finalize_event` for an event  (event_id).
+    /// Settled either by `challenge_finalization` (slash to treasury) or by
+    /// `settle_finalization_bond` (return to finalizer after the window).
+    FinalizationBond(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -1107,4 +1120,38 @@ pub struct OracleSubmission {
 
     /// Unix timestamp when the value was submitted.
     pub submitted_at: u64,
+}
+
+// ---------------------------------------------------------------------------
+// FinalizationBond (#1344)
+// ---------------------------------------------------------------------------
+
+/// Bond locked by a finalizer when calling `finalize_event`.
+///
+/// Documented slash rule: on a successful challenge, **100%** of `bond` is
+/// transferred to the contract treasury. If the challenge window closes
+/// without a successful challenge, the full `bond` is returned to
+/// `finalizer`.
+///
+/// Stored under `DataKey::FinalizationBond(event_id)`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FinalizationBond {
+    /// Event this bond secures.
+    pub event_id: u64,
+
+    /// Address that called `finalize_event` and locked the bond.
+    pub finalizer: Address,
+
+    /// Bond amount in stroops (always [`FINALIZATION_BOND_STROOPS`] at lock).
+    pub bond: i128,
+
+    /// Ledger timestamp when finalization (and bond lock) occurred.
+    pub finalized_at: u64,
+
+    /// `true` once a successful `challenge_finalization` has slashed the bond.
+    pub challenged: bool,
+
+    /// `true` once the bond has been returned or slashed (terminal state).
+    pub settled: bool,
 }
