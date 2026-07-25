@@ -7,6 +7,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
@@ -17,6 +18,7 @@ import { CACHE_WARMING_KEYS } from '../cache/cache-warming.keys';
 import { SorobanService } from '../soroban/soroban.service';
 import { User } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
+import { MarketSettlementScheduler } from './market-settlement.scheduler';
 import { ChallengeResolutionDto } from './dto/challenge-resolution.dto';
 import { CreateCommentDto } from './dto/create-comment.dto';
 import { CreateMarketDto } from './dto/create-market.dto';
@@ -72,6 +74,8 @@ export class MarketsService {
     private readonly dataSource: DataSource,
     private readonly webhookDispatcher: WebhookDispatcherService,
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+    @Inject(forwardRef(() => MarketSettlementScheduler))
+    private readonly settlementScheduler: MarketSettlementScheduler,
   ) {}
 
   /**
@@ -1038,5 +1042,19 @@ export class MarketsService {
       user: { id: user.id },
       market: { id: market.id },
     });
+  }
+
+  /**
+   * Get failed settlement items from dead-letter queue (admin only)
+   */
+  async getSettlementFailures() {
+    return this.settlementScheduler.getDeadLetterQueue();
+  }
+
+  /**
+   * Manually retry a failed settlement (admin only)
+   */
+  async retrySettlement(marketId: string): Promise<boolean> {
+    return this.settlementScheduler.retrySettlement(marketId);
   }
 }
