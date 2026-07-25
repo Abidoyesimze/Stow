@@ -1,6 +1,14 @@
 use soroban_sdk::{contracttype, Address, Map, String, Symbol, Vec};
 
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchPredictionRequest {
+    pub market_id: u64,
+    pub chosen_outcome: Symbol,
+    pub stake_amount: i128,
+}
+
+#[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     /// Keyed by market_id. Represents a prediction market instance.

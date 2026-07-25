@@ -5,7 +5,7 @@ use crate::errors::InsightArenaError;
 use crate::escrow;
 use crate::market;
 use crate::season;
-use crate::storage_types::{DataKey, Market, Prediction, UserProfile};
+use crate::storage_types::{DataKey, Market, Prediction, UserProfile, BatchPredictionRequest};
 
 // ── TTL helpers ───────────────────────────────────────────────────────────────
 
@@ -158,6 +158,46 @@ fn apply_winner_payout(
 
 // ── Entry-point logic ─────────────────────────────────────────────────────────
 
+pub const MAX_PREDICTION_BATCH_SIZE: u32 = 10;
+
+/// Submit a batch of predictions atomically.
+/// Enforces a maximum batch size and reverts the entire transaction if any prediction fails.
+pub fn submit_predictions_batch(
+    env: &Env,
+    predictor: Address,
+    requests: Vec<BatchPredictionRequest>,
+) -> Result<Vec<()>, InsightArenaError> {
+    if requests.len() > MAX_PREDICTION_BATCH_SIZE {
+        return Err(InsightArenaError::BatchSizeExceeded);
+    }
+
+    let mut total_stake: i128 = 0;
+    for request in requests.iter() {
+        total_stake = total_stake
+            .checked_add(request.stake_amount)
+            .ok_or(InsightArenaError::Overflow)?;
+    }
+
+    if total_stake > 0 {
+        escrow::lock_stake(env, &predictor, total_stake)?;
+    }
+
+    let mut results = Vec::new(env);
+    for request in requests.iter() {
+        do_submit_prediction(
+            env,
+            predictor.clone(),
+            request.market_id,
+            request.chosen_outcome,
+            request.stake_amount,
+            true,
+        )?;
+        results.push_back(());
+    }
+
+    Ok(results)
+}
+
 /// Submit a prediction for an open market by staking XLM on a chosen outcome.
 ///
 /// Validation order:
@@ -182,6 +222,17 @@ pub fn submit_prediction(
     market_id: u64,
     chosen_outcome: Symbol,
     stake_amount: i128,
+) -> Result<(), InsightArenaError> {
+    do_submit_prediction(env, predictor, market_id, chosen_outcome, stake_amount, false)
+}
+
+fn do_submit_prediction(
+    env: &Env,
+    predictor: Address,
+    market_id: u64,
+    chosen_outcome: Symbol,
+    stake_amount: i128,
+    skip_lock: bool,
 ) -> Result<(), InsightArenaError> {
     // ── Guard 1: platform not paused ─────────────────────────────────────────
     config::ensure_not_paused(env)?;
@@ -243,7 +294,9 @@ pub fn submit_prediction(
     }
 
     // ── Lock stake in escrow (transfer XLM from predictor to contract) ────────
-    escrow::lock_stake(env, &predictor, stake_amount)?;
+    if !skip_lock {
+        escrow::lock_stake(env, &predictor, stake_amount)?;
+    }
 
     // ── Track cumulative platform volume ──────────────────────────────────────
     market::add_volume(env, stake_amount);

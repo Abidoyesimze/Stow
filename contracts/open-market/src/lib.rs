@@ -26,6 +26,7 @@ pub use crate::storage_types::ProposalState;
 pub use crate::liquidity::{calculate_liquidity_value, calculate_lp_tokens, calculate_swap_output};
 pub use crate::market::CreateMarketParams;
 pub use crate::storage_types::{
+    BatchPredictionRequest,
     ConditionalChain, ConditionalMarket, CreatorLeaderboardEntry, CreatorStats, DataKey,
     DependencyStatus, Dispute, Event, EventMatch, EventPrediction, FeeTier, FeeTierConfig,
     InviteCode, LPPosition, LeaderboardEntry, LeaderboardSnapshot, LiquidityPool, Market,
@@ -307,6 +308,15 @@ impl InsightArenaContract {
         stake_amount: i128,
     ) -> Result<(), InsightArenaError> {
         prediction::submit_prediction(&env, predictor, market_id, chosen_outcome, stake_amount)
+    }
+
+    /// Submit a batch of predictions atomically.
+    pub fn submit_predictions_batch(
+        env: Env,
+        predictor: Address,
+        requests: Vec<BatchPredictionRequest>,
+    ) -> Result<Vec<()>, InsightArenaError> {
+        prediction::submit_predictions_batch(&env, predictor, requests)
     }
 
     /// Return the stored [`Prediction`] for a given `(market_id, predictor)` pair.
