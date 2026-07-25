@@ -30,6 +30,9 @@ export class UserAchievement {
   @Column({ default: false })
   is_unlocked: boolean;
 
-  @CreateDateColumn()
-  unlocked_at: Date;
+  @Column({ default: 0 })
+  current_value: number;
+
+  @CreateDateColumn({ nullable: true })
+  unlocked_at: Date | null;
 }
