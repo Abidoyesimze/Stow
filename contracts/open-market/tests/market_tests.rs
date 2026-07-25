@@ -282,7 +282,7 @@ fn create_market_fails_when_paused() {
     let client = deploy(&env);
     let creator = Address::generate(&env);
 
-    client.set_paused(&true);
+    client.set_paused(&true, &1u32);
 
     let result = client.try_create_market(&creator, &default_params(&env));
     assert!(matches!(result, Err(Ok(InsightArenaError::Paused))));
@@ -370,6 +370,63 @@ fn list_categories_returns_seeded_defaults() {
     assert!(categories.contains(Symbol::new(&env, "Entertainment")));
     assert!(categories.contains(Symbol::new(&env, "Science")));
     assert!(categories.contains(Symbol::new(&env, "Other")));
+}
+
+#[test]
+fn add_category_fails_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _oracle) = deploy_with_actors(&env);
+
+    client.set_paused(&true, &1u32);
+
+    let result = client.try_add_category(&admin, &Symbol::new(&env, "Weather"));
+    assert!(matches!(result, Err(Ok(InsightArenaError::Paused))));
+}
+
+#[test]
+fn remove_category_fails_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _oracle) = deploy_with_actors(&env);
+    let category = Symbol::new(&env, "Weather");
+    client.add_category(&admin, &category);
+
+    client.set_paused(&true, &1u32);
+
+    let result = client.try_remove_category(&admin, &category);
+    assert!(matches!(result, Err(Ok(InsightArenaError::Paused))));
+}
+
+#[test]
+fn close_market_fails_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _oracle) = deploy_with_actors(&env);
+    let creator = Address::generate(&env);
+
+    let id = client.create_market(&creator, &default_params(&env));
+    env.ledger().set_timestamp(env.ledger().timestamp() + 1001);
+
+    client.set_paused(&true, &1u32);
+
+    let result = client.try_close_market(&admin, &id);
+    assert!(matches!(result, Err(Ok(InsightArenaError::Paused))));
+}
+
+#[test]
+fn cancel_market_fails_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _oracle) = deploy_with_actors(&env);
+    let creator = Address::generate(&env);
+
+    let id = client.create_market(&creator, &default_params(&env));
+
+    client.set_paused(&true, &1u32);
+
+    let result = client.try_cancel_market(&admin, &id);
+    assert!(matches!(result, Err(Ok(InsightArenaError::Paused))));
 }
 
 #[test]
@@ -969,6 +1026,184 @@ fn cancel_market_refunds_exact_stake_amounts() {
     ));
 }
 
+// ── cancel_market multi-predictor refund flow (#1265) ────────────────────────
+//
+// Unlike the storage-injection tests above, these run the full end-to-end
+// flow: predictors are funded, stake real tokens through submit_prediction,
+// and are refunded by cancel_market. Refunds in this contract are push-based —
+// cancel_market transfers every stake back in the same call, so "claiming a
+// refund" is the cancellation itself and the double-claim / non-participant
+// requirements are pinned against every post-cancellation extraction path
+// (second cancel, resolve-after-cancel, claim_payout, batch payouts).
+
+/// Five distinct stakes within default_params' min/max bounds (10M..=100M).
+const FLOW_STAKES: [i128; 5] = [12_000_000, 25_000_000, 40_000_000, 60_000_000, 100_000_000];
+/// Extra dust funded on top of each stake so a refund that merely pays back
+/// the stake amount (rather than restoring the exact balance) is caught.
+const FLOW_HEADROOM: i128 = 5_000_000;
+
+/// Create a market and stake `FLOW_STAKES` from 5 fresh predictors across both
+/// outcomes (indices 0,2,4 on "yes"; 1,3 on "no"). Returns
+/// (market_id, predictors, pre-stake balances).
+fn setup_five_predictor_market(
+    env: &Env,
+    client: &InsightArenaContractClient<'_>,
+    xlm_token: &Address,
+) -> (u64, [Address; 5], [i128; 5]) {
+    let creator = Address::generate(env);
+    let id = client.create_market(&creator, &default_params(env));
+
+    let predictors = [
+        Address::generate(env),
+        Address::generate(env),
+        Address::generate(env),
+        Address::generate(env),
+        Address::generate(env),
+    ];
+
+    let asset = StellarAssetClient::new(env, xlm_token);
+    let token = TokenClient::new(env, xlm_token);
+    let mut balances_before = [0_i128; 5];
+
+    for (i, predictor) in predictors.iter().enumerate() {
+        asset.mint(predictor, &(FLOW_STAKES[i] + FLOW_HEADROOM));
+        balances_before[i] = token.balance(predictor);
+
+        let outcome = if i % 2 == 0 {
+            symbol_short!("yes")
+        } else {
+            symbol_short!("no")
+        };
+        client.submit_prediction(predictor, &id, &outcome, &FLOW_STAKES[i]);
+    }
+
+    (id, predictors, balances_before)
+}
+
+/// Requirements 1–4 & 7: five predictors with five different stakes across
+/// both outcomes are each made exactly whole by cancellation, and the contract
+/// retains zero tokens from the cancelled market.
+#[test]
+fn cancel_market_five_predictors_restores_exact_pre_stake_balances() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    // Contract balance before the market opens (fresh deploy: zero).
+    let contract_before = token.balance(&client.address);
+
+    let (id, predictors, balances_before) =
+        setup_five_predictor_market(&env, &client, &xlm_token);
+
+    // Every stake is escrowed, and each predictor is down exactly their stake.
+    let total_staked: i128 = FLOW_STAKES.iter().sum();
+    assert_eq!(token.balance(&client.address), contract_before + total_staked);
+    for (i, predictor) in predictors.iter().enumerate() {
+        assert_eq!(token.balance(predictor), balances_before[i] - FLOW_STAKES[i]);
+    }
+
+    client.cancel_market(&admin, &id);
+    assert!(client.get_market(&id).is_cancelled);
+
+    // Every predictor's balance is restored exactly, regardless of stake size
+    // or which outcome they chose.
+    for (i, predictor) in predictors.iter().enumerate() {
+        assert_eq!(token.balance(predictor), balances_before[i]);
+    }
+
+    // The contract holds exactly what it held before the market opened —
+    // no dust locked, no over-refund.
+    assert_eq!(token.balance(&client.address), contract_before);
+}
+
+/// Requirement 5 & acceptance: a second refund for the same predictor is
+/// impossible. Refunds are pushed by cancel_market, so every path that could
+/// pay a second time is asserted closed: cancelling again, resolving the
+/// cancelled market (which would reopen claim_payout), claiming a payout
+/// directly, and batch-distributing payouts.
+#[test]
+fn cancel_market_second_refund_is_impossible_via_any_path() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, oracle, xlm_token) = deploy_with_token(&env);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let (id, predictors, balances_before) =
+        setup_five_predictor_market(&env, &client, &xlm_token);
+
+    client.cancel_market(&admin, &id);
+
+    // Path 1: cancelling again is rejected.
+    let second_cancel = client.try_cancel_market(&admin, &id);
+    assert!(matches!(
+        second_cancel,
+        Err(Ok(InsightArenaError::MarketAlreadyCancelled))
+    ));
+
+    // Path 2: the oracle cannot resolve a cancelled market, so the payout
+    // path can never open after refunds were issued.
+    let resolution_time = default_params(&env).resolution_time;
+    env.ledger().with_mut(|li| li.timestamp = resolution_time + 1);
+    let resolve_after_cancel = client.try_resolve_market(&oracle, &id, &symbol_short!("yes"));
+    assert!(matches!(
+        resolve_after_cancel,
+        Err(Ok(InsightArenaError::MarketAlreadyCancelled))
+    ));
+
+    // Path 3: direct payout claims fail while the market is unresolved.
+    for predictor in predictors.iter() {
+        let claim = client.try_claim_payout(predictor, &id);
+        assert!(matches!(
+            claim,
+            Err(Ok(InsightArenaError::MarketNotResolved))
+        ));
+    }
+
+    // Path 4: batch payout distribution also refuses the cancelled market.
+    let batch = client.try_batch_distribute_payouts(&admin, &id);
+    assert!(matches!(
+        batch,
+        Err(Ok(InsightArenaError::MarketNotResolved))
+    ));
+
+    // After all rejected attempts, balances are exactly the refunded ones and
+    // the contract kept nothing.
+    for (i, predictor) in predictors.iter().enumerate() {
+        assert_eq!(token.balance(predictor), balances_before[i]);
+    }
+    assert_eq!(token.balance(&client.address), 0);
+}
+
+/// Requirement 6: an address that never predicted receives nothing from the
+/// cancellation and cannot extract anything afterwards.
+#[test]
+fn cancel_market_non_participant_receives_nothing() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let (id, _predictors, _balances_before) =
+        setup_five_predictor_market(&env, &client, &xlm_token);
+
+    let outsider = Address::generate(&env);
+    assert_eq!(token.balance(&outsider), 0);
+
+    client.cancel_market(&admin, &id);
+
+    // The cancellation refunded only the five predictors.
+    assert_eq!(token.balance(&outsider), 0);
+    assert_eq!(token.balance(&client.address), 0);
+
+    // And the outsider has no post-cancellation claim path.
+    let claim = client.try_claim_payout(&outsider, &id);
+    assert!(matches!(
+        claim,
+        Err(Ok(InsightArenaError::MarketNotResolved))
+    ));
+}
+
 #[test]
 fn extend_market_end_time_success() {
     let env = Env::default();
@@ -1101,4 +1336,246 @@ fn extend_market_end_time_fails_when_closed() {
     env.ledger().set_timestamp(params.end_time);
     let result = client.try_extend_market_end_time(&creator, &id, &(params.end_time + 500));
     assert!(matches!(result, Err(Ok(InsightArenaError::MarketAlreadyClosed))));
+}
+
+// ── extend_market_end_time validation gaps (#1264) ──────────────────────────
+
+/// Requirement 3: "extending" to a timestamp strictly earlier than the current
+/// end time is rejected (the boundary case `new == current` is covered by
+/// `extend_market_end_time_fails_new_end_time_not_strictly_later`).
+#[test]
+fn extend_market_end_time_fails_earlier_than_current_end_time() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, _) = deploy_with_token(&env);
+    let creator = Address::generate(&env);
+
+    let params = default_params(&env);
+    let id = client.create_market(&creator, &params);
+
+    let result = client.try_extend_market_end_time(&creator, &id, &(params.end_time - 1));
+    assert!(matches!(result, Err(Ok(InsightArenaError::InvalidTimeRange))));
+
+    // The stored end_time is untouched.
+    assert_eq!(client.get_market(&id).end_time, params.end_time);
+}
+
+/// Requirement 4: extending to a timestamp in the past (before the current
+/// ledger time) is rejected. A past timestamp is always <= the market's
+/// end_time here because extension already requires `now < end_time`, so it
+/// falls into the same InvalidTimeRange guard — this pins that a past deadline
+/// can never be stored.
+#[test]
+fn extend_market_end_time_fails_past_timestamp() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, _) = deploy_with_token(&env);
+    let creator = Address::generate(&env);
+
+    let params = default_params(&env);
+    let id = client.create_market(&creator, &params);
+
+    // Move mid-window: the market is still open, but `now - 100` is history.
+    let mid_window = params.end_time - 500;
+    env.ledger().set_timestamp(mid_window);
+
+    let result = client.try_extend_market_end_time(&creator, &id, &(mid_window - 100));
+    assert!(matches!(result, Err(Ok(InsightArenaError::InvalidTimeRange))));
+    assert_eq!(client.get_market(&id).end_time, params.end_time);
+}
+
+/// Authorization is creator-only: even the platform admin is rejected, not
+/// just arbitrary addresses.
+#[test]
+fn extend_market_end_time_fails_for_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _oracle, _) = deploy_with_token(&env);
+    let creator = Address::generate(&env);
+
+    let params = default_params(&env);
+    let id = client.create_market(&creator, &params);
+
+    let result = client.try_extend_market_end_time(&admin, &id, &(params.end_time + 500));
+    assert!(matches!(result, Err(Ok(InsightArenaError::Unauthorized))));
+}
+
+/// Requirement 7 / acceptance: the extended window is actually honored by
+/// submit_prediction. A prediction placed after the original deadline but
+/// before the new one succeeds, and the new deadline is then enforced.
+#[test]
+fn extend_market_end_time_extended_window_honored_by_submit_prediction() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let creator = Address::generate(&env);
+
+    let params = default_params(&env);
+    let original_end = params.end_time;
+    let id = client.create_market(&creator, &params);
+
+    let predictor = Address::generate(&env);
+    let late_predictor = Address::generate(&env);
+    let stake = 20_000_000_i128;
+    let asset = StellarAssetClient::new(&env, &xlm_token);
+    asset.mint(&predictor, &stake);
+    asset.mint(&late_predictor, &stake);
+
+    // Extend before the original deadline passes.
+    let new_end = original_end + 2000;
+    client.extend_market_end_time(&creator, &id, &new_end);
+
+    // Inside the extension window: after the original deadline, before the new one.
+    env.ledger().set_timestamp(original_end + 100);
+    client.submit_prediction(&predictor, &id, &symbol_short!("yes"), &stake);
+    assert!(client.has_predicted(&id, &predictor));
+
+    // The new deadline is enforced just like the original one was.
+    env.ledger().set_timestamp(new_end);
+    let result = client.try_submit_prediction(&late_predictor, &id, &symbol_short!("no"), &stake);
+    assert!(matches!(result, Err(Ok(InsightArenaError::MarketExpired))));
+}
+
+// ============================================================================
+// Pagination boundary cases — issue #1250
+// ============================================================================
+
+#[test]
+fn list_markets_start_zero_returns_empty() {
+    // start=0 is explicitly guarded: the function treats 0 as invalid
+    // since market IDs are 1-based. Must return empty, not panic.
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    for _ in 0..10 {
+        client.create_market(&creator, &default_params(&env));
+    }
+
+    let result = client.list_markets(&0_u64, &5_u32);
+    assert_eq!(result.len(), 0);
+}
+
+#[test]
+fn list_markets_two_pages_tile_with_zero_overlap() {
+    // Create 10 markets. Page 1: start=1, limit=5 → markets 1–5.
+    // Page 2: start=6, limit=5 → markets 6–10.
+    // Union must contain exactly 10 unique IDs with no gaps or duplicates.
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    for _ in 0..10 {
+        client.create_market(&creator, &default_params(&env));
+    }
+
+    let page1 = client.list_markets(&1_u64, &5_u32);
+    let page2 = client.list_markets(&6_u64, &5_u32);
+
+    assert_eq!(page1.len(), 5);
+    assert_eq!(page2.len(), 5);
+
+    // Verify page 1 IDs are 1–5 in order
+    for i in 0..5_u32 {
+        assert_eq!(page1.get(i).unwrap().market_id, (i + 1) as u64);
+    }
+
+    // Verify page 2 IDs are 6–10 in order
+    for i in 0..5_u32 {
+        assert_eq!(page2.get(i).unwrap().market_id, (i + 6) as u64);
+    }
+
+    // Verify zero overlap between pages
+    let mut seen = Vec::new(&env);
+    for i in 0..5_u32 {
+        let id = page1.get(i).unwrap().market_id;
+        assert!(!seen.contains(id), "duplicate market_id {} in page1", id);
+        seen.push_back(id);
+    }
+    for i in 0..5_u32 {
+        let id = page2.get(i).unwrap().market_id;
+        assert!(!seen.contains(id), "overlap: market_id {} appears in both pages", id);
+        seen.push_back(id);
+    }
+
+    assert_eq!(seen.len(), 10);
+}
+
+#[test]
+fn list_markets_start_equals_total_returns_last_market() {
+    // start=10 with 10 total markets: start == total, not start > total.
+    // The guard only rejects start > total, so this returns market 10.
+    // This is the exact boundary where start + limit - 1 overshoots but
+    // start itself is valid.
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    for _ in 0..10 {
+        client.create_market(&creator, &default_params(&env));
+    }
+
+    let result = client.list_markets(&10_u64, &5_u32);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result.get(0).unwrap().market_id, 10);
+}
+
+#[test]
+fn list_markets_start_exceeds_total_returns_empty() {
+    // start=11 with 10 total markets: start > total, guard fires, empty returned.
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    for _ in 0..10 {
+        client.create_market(&creator, &default_params(&env));
+    }
+
+    let result = client.list_markets(&11_u64, &5_u32);
+    assert_eq!(result.len(), 0);
+}
+
+#[test]
+fn list_markets_near_end_returns_remaining_markets_only() {
+    // start=9 with 10 total markets and limit=5: only markets 9 and 10
+    // are available, so result must have exactly 2 entries.
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    for _ in 0..10 {
+        client.create_market(&creator, &default_params(&env));
+    }
+
+    let result = client.list_markets(&9_u64, &5_u32);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result.get(0).unwrap().market_id, 9);
+    assert_eq!(result.get(1).unwrap().market_id, 10);
+}
+
+#[test]
+fn list_markets_ids_are_in_ascending_order() {
+    // Verifies market IDs are strictly ascending across a full page.
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    for _ in 0..10 {
+        client.create_market(&creator, &default_params(&env));
+    }
+
+    let result = client.list_markets(&1_u64, &10_u32);
+    assert_eq!(result.len(), 10);
+
+    for i in 1..10_u32 {
+        let prev = result.get(i - 1).unwrap().market_id;
+        let curr = result.get(i).unwrap().market_id;
+        assert!(curr > prev, "market_id not ascending at index {}: {} >= {}", i, prev, curr);
+    }
 }

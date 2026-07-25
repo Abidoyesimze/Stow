@@ -71,6 +71,29 @@ class EnvironmentVariables {
 
   @IsNumber()
   EXPORT_TTL_HOURS: number = 48;
+
+  @IsString()
+  LEADERBOARD_SNAPSHOT_CRON: string = '0 * * * *';
+
+  @IsNumber()
+  LEADERBOARD_SNAPSHOT_RETENTION_DAYS: number = 30;
+
+  // Oracle submission anomaly detection (#1364)
+  @IsOptional()
+  @IsNumber()
+  ORACLE_ANOMALY_THRESHOLD?: number;
+
+  @IsOptional()
+  @IsNumber()
+  ORACLE_ANOMALY_MIN_SAMPLES?: number;
+
+  @IsOptional()
+  @IsNumber()
+  ORACLE_ANOMALY_WINDOW?: number;
+
+  @IsOptional()
+  @IsString()
+  ORACLE_ANOMALY_HOLD?: string;
 }
 
 export function validate(config: Record<string, unknown>) {

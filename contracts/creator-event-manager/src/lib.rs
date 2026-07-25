@@ -20,7 +20,7 @@ use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 use admin::AdminError;
 use event::EventError;
 use r#match::MatchError;
-use storage_types::{Event, LeaderboardEntry, Match, Prediction};
+use storage_types::{Event, LeaderboardEntry, Match, ParticipantScore, Prediction, StandingEntry};
 use verification::VerificationError;
 use views::{EventStatistics, PlatformStatistics};
 
@@ -183,6 +183,35 @@ impl CreatorEventManagerContract {
         admin::get_ai_agent(&env).unwrap_or_else(|| panic!("not_initialized"))
     }
 
+    /// Configure the M-of-N verifier signer set used for event verification.
+    ///
+    /// Only the admin may call this. Replaces any previously configured
+    /// signer set and threshold atomically.
+    ///
+    /// # Panics
+    /// * `"unauthorized"` — caller is not the admin.
+    /// * `"invalid_threshold"` — `threshold == 0` or `threshold > signers.len()`.
+    /// * `"duplicate_signer"` — `signers` contains the same address twice.
+    pub fn set_verifier_config(env: Env, caller: Address, signers: Vec<Address>, threshold: u32) {
+        match admin::set_verifier_config(&env, caller, signers, threshold) {
+            Ok(()) => {}
+            Err(AdminError::Unauthorized) => panic!("unauthorized"),
+            Err(AdminError::InvalidThreshold) => panic!("invalid_threshold"),
+            Err(AdminError::DuplicateSigner) => panic!("duplicate_signer"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Return the configured verifier signer set (empty if never configured).
+    pub fn get_verifier_signers(env: Env) -> Vec<Address> {
+        admin::get_verifier_signers(&env)
+    }
+
+    /// Return the configured verifier threshold (M), or 0 if never configured.
+    pub fn get_verifier_threshold(env: Env) -> u32 {
+        admin::get_verifier_threshold(&env)
+    }
+
     // =========================================================================
     // Verification (#790–#793)
     // =========================================================================
@@ -251,6 +280,38 @@ impl CreatorEventManagerContract {
     /// any address that has never been verified or does not exist in storage.
     pub fn is_verified(env: Env, address: Address) -> bool {
         verification::is_verified(&env, address)
+    }
+
+    /// Submit a verifier signature for an event (M-of-N event verification).
+    ///
+    /// `signer` must be one of the addresses configured via
+    /// `set_verifier_config`. Each signer may submit at most once per event.
+    /// Returns the number of distinct signers who have now submitted.
+    ///
+    /// # Panics
+    /// * `"event_not_found"` — no event exists for `event_id`.
+    /// * `"not_a_verifier_signer"` — `signer` is not a configured verifier.
+    /// * `"duplicate_signer"` — `signer` already submitted for this event.
+    pub fn submit_verification(env: Env, event_id: u64, signer: Address) -> u32 {
+        match verification::submit_verification(&env, event_id, signer) {
+            Ok(count) => count,
+            Err(VerificationError::EventNotFound) => panic!("event_not_found"),
+            Err(VerificationError::NotAVerifierSigner) => panic!("not_a_verifier_signer"),
+            Err(VerificationError::DuplicateSigner) => panic!("duplicate_signer"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Returns `true` once at least M distinct configured signers have
+    /// submitted verification for this event.
+    pub fn is_event_verified(env: Env, event_id: u64) -> bool {
+        verification::is_event_verified(&env, event_id)
+    }
+
+    /// Returns the number of distinct signers who have submitted verification
+    /// for this event so far.
+    pub fn get_event_verification_count(env: Env, event_id: u64) -> u32 {
+        verification::get_event_verification_count(&env, event_id)
     }
 
     // =========================================================================
@@ -725,6 +786,53 @@ impl CreatorEventManagerContract {
         }
     }
 
+    /// Return the stored weighted standings for an event (#1311).
+    ///
+    /// Standings weight each correct prediction by documented multipliers:
+    /// a 1.00× base on `points_earned`, +0.25× when the prediction was placed
+    /// at least one hour before the match start, and +0.50× when the winning
+    /// outcome was picked by strictly fewer than half of the match's
+    /// predictors. The snapshot is recomputed from scratch on every
+    /// `submit_match_result` and on `finalize_event`, so repeated computation
+    /// always yields identical standings.
+    ///
+    /// Tie-break ordering (deterministic, applied in order):
+    /// 1. Higher weighted score
+    /// 2. Higher correct-prediction count
+    /// 3. Earlier achievement (reached the score first)
+    /// 4. Smaller address
+    ///
+    /// Returns an empty `Vec` when no match result has been submitted yet.
+    ///
+    /// # Panics
+    /// * `"event_not_found"` — no event exists with the given ID.
+    pub fn get_event_standings(env: Env, event_id: u64) -> Vec<StandingEntry> {
+        match leaderboard::get_event_standings(&env, event_id) {
+            Ok(standings) => standings,
+            Err(leaderboard::LeaderboardError::EventNotFound) => panic!("event_not_found"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Return a participant's weighted score components for an event (#1311).
+    ///
+    /// Exposes the transparency breakdown behind `get_event_standings`: the
+    /// base component (`points × 1.00×`), accumulated early-prediction and
+    /// against-the-crowd bonuses, correct-prediction count, and the timestamp
+    /// the participant last increased their score. `weighted_score` always
+    /// equals the sum of the three components. Returns a zeroed score for a
+    /// user who has not scored (or not participated) yet.
+    ///
+    /// # Panics
+    /// * `"event_not_found"` — no event exists with the given ID.
+    pub fn get_participant_score(env: Env, event_id: u64, user: Address) -> ParticipantScore {
+        match leaderboard::get_participant_score(&env, event_id, user) {
+            Ok(score) => score,
+            Err(leaderboard::LeaderboardError::EventNotFound) => panic!("event_not_found"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
     // =========================================================================
     // Finalization / Payout
     // =========================================================================
@@ -764,8 +872,67 @@ impl CreatorEventManagerContract {
     ///
     /// Returns the `(address, amount)` vector recorded by `finalize_event`, or
     /// an empty vector if the event has not been finalized (or does not exist).
+    /// Note this reflects staged *allocations*, not necessarily transferred
+    /// funds — see `claim_prize` / `clawback_unclaimed` (#1312).
     pub fn get_event_payouts(env: Env, event_id: u64) -> Vec<(Address, i128)> {
         finalize::get_event_payouts(&env, event_id)
+    }
+
+    /// Claim a winner's staged prize allocation from a finalized event (#1312).
+    ///
+    /// `finalize_event` stages per-winner allocations instead of transferring
+    /// them immediately; this transfers `winner`'s allocation to them exactly
+    /// once. Only `winner` may claim their own allocation.
+    ///
+    /// Returns the claimed amount (in stroops).
+    ///
+    /// # Panics
+    /// * `"contract_paused"` — the contract is paused.
+    /// * `"event_not_found"` — no event exists with the given ID.
+    /// * `"event_not_finalized"` — the event has not been finalized yet.
+    /// * `"no_allocation"` — `winner` has no recorded allocation for this event.
+    /// * `"already_claimed"` — the allocation was already claimed, or already
+    ///   swept to treasury by `clawback_unclaimed`.
+    /// * `"transfer_failed"` — the payout transfer failed.
+    pub fn claim_prize(env: Env, winner: Address, event_id: u64) -> i128 {
+        match finalize::claim_prize(&env, winner, event_id) {
+            Ok(amount) => amount,
+            Err(EventError::Paused) => panic!("contract_paused"),
+            Err(EventError::EventNotFound) => panic!("event_not_found"),
+            Err(EventError::EventNotFinalized) => panic!("event_not_finalized"),
+            Err(EventError::NoAllocation) => panic!("no_allocation"),
+            Err(EventError::AlreadyClaimed) => panic!("already_claimed"),
+            Err(EventError::TransferFailed) => panic!("transfer_failed"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Sweep unclaimed prize allocations for a finalized event to treasury,
+    /// once the claim deadline has passed (#1312).
+    ///
+    /// Permissionless — anyone may trigger the sweep once the deadline has
+    /// passed, but they must authorize the call. Allocations already claimed
+    /// by their winner are left untouched. Safe to call repeatedly: once every
+    /// allocation is settled, further calls are a no-op that return `0`.
+    ///
+    /// Returns the total amount swept to treasury.
+    ///
+    /// # Panics
+    /// * `"contract_paused"` — the contract is paused.
+    /// * `"event_not_found"` — no event exists with the given ID.
+    /// * `"event_not_finalized"` — the event has not been finalized yet.
+    /// * `"claim_period_not_expired"` — the claim deadline has not passed yet.
+    /// * `"transfer_failed"` — the sweep transfer failed.
+    pub fn clawback_unclaimed(env: Env, caller: Address, event_id: u64) -> i128 {
+        match finalize::clawback_unclaimed(&env, caller, event_id) {
+            Ok(amount) => amount,
+            Err(EventError::Paused) => panic!("contract_paused"),
+            Err(EventError::EventNotFound) => panic!("event_not_found"),
+            Err(EventError::EventNotFinalized) => panic!("event_not_finalized"),
+            Err(EventError::ClaimPeriodNotExpired) => panic!("claim_period_not_expired"),
+            Err(EventError::TransferFailed) => panic!("transfer_failed"),
+            Err(_) => panic!("unexpected_error"),
+        }
     }
 
     /// Check whether an event is finalized.

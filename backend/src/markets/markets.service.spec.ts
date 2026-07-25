@@ -8,14 +8,18 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, Repository, SelectQueryBuilder } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { SorobanService } from '../soroban/soroban.service';
+import { CACHE_WARMING_KEYS } from '../cache/cache-warming.keys';
 
 import { User } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
+import { ChallengeResolutionDto } from './dto/challenge-resolution.dto';
 import { CreateMarketDto } from './dto/create-market.dto';
+import { ProposeResolutionDto } from './dto/propose-resolution.dto';
+import { ResolveChallengeDto } from './dto/resolve-challenge.dto';
 import { UpdateMarketDto } from './dto/update-market.dto';
 import { Comment } from './entities/comment.entity';
 import { MarketTemplate } from './entities/market-template.entity';
-import { Market } from './entities/market.entity';
+import { Market, MarketSettlementState } from './entities/market.entity';
 import { UserBookmark } from './entities/user-bookmark.entity';
 import { Prediction } from '../predictions/entities/prediction.entity';
 import { MarketsService } from './markets.service';
@@ -397,7 +401,6 @@ describe('MarketsService.findFeaturedMarkets', () => {
     reset: jest.fn(),
   };
 
-
   const makeFeaturedMarket = (overrides: Partial<Market> = {}): Market =>
     ({
       id: `market-${Math.random()}`,
@@ -480,6 +483,7 @@ describe('MarketsService.findFeaturedMarkets', () => {
       total: 2,
       page: 1,
       limit: 20,
+      totalPages: 1,
     });
   });
 
@@ -509,6 +513,7 @@ describe('MarketsService.findFeaturedMarkets', () => {
 describe('MarketsService.update', () => {
   let service: MarketsService;
   let marketsRepository: MockRepo;
+  let cacheManager: { get: jest.Mock; set: jest.Mock; del: jest.Mock };
 
   const mockCreator = {
     id: 'creator-1',
@@ -598,6 +603,7 @@ describe('MarketsService.update', () => {
     }).compile();
 
     service = module.get<MarketsService>(MarketsService);
+    cacheManager = module.get(CACHE_MANAGER);
   });
 
   it('should update market when caller is creator', async () => {
@@ -680,6 +686,55 @@ describe('MarketsService.update', () => {
     const result = await service.update('market-1', mockCreator.id, dto);
 
     expect(result.category).toBe('Sports');
+  });
+
+  it('invalidates trending, active-list, and per-market cache keys on update', async () => {
+    const market = makeMarket();
+    const dto: UpdateMarketDto = { title: 'Updated Title' };
+
+    marketsRepository.findOne.mockResolvedValue(market);
+    marketsRepository.save.mockResolvedValue({ ...market, ...dto });
+
+    await service.update('market-1', mockCreator.id, dto);
+
+    expect(cacheManager.del).toHaveBeenCalledWith(
+      CACHE_WARMING_KEYS.trendingEvents,
+    );
+    expect(cacheManager.del).toHaveBeenCalledWith(
+      CACHE_WARMING_KEYS.activeEvents,
+    );
+    expect(cacheManager.del).toHaveBeenCalledWith(
+      CACHE_WARMING_KEYS.popularEventDetail('market-1'),
+    );
+  });
+
+  it('does not invalidate cache when update is rejected', async () => {
+    const market = makeMarket();
+    const dto: UpdateMarketDto = { title: 'Updated Title' };
+
+    marketsRepository.findOne.mockResolvedValue(market);
+
+    await expect(
+      service.update('market-1', mockOtherUser.id, dto),
+    ).rejects.toThrow(ForbiddenException);
+    expect(cacheManager.del).not.toHaveBeenCalled();
+  });
+
+  it('stale-read: cache is cleared so a subsequent read reflects the mutation', async () => {
+    const market = makeMarket();
+    const dto: UpdateMarketDto = { title: 'Fresh Title' };
+
+    // Simulate a stale cached detail entry present before the mutation.
+    cacheManager.get.mockResolvedValue({ ...market, title: 'Original Title' });
+
+    marketsRepository.findOne.mockResolvedValue(market);
+    marketsRepository.save.mockResolvedValue({ ...market, ...dto });
+
+    await service.update('market-1', mockCreator.id, dto);
+
+    expect(cacheManager.del).toHaveBeenCalledWith(
+      CACHE_WARMING_KEYS.popularEventDetail('market-1'),
+    );
   });
 });
 
@@ -842,6 +897,7 @@ describe('MarketsService.cancelMarket', () => {
   let service: MarketsService;
   let marketsRepository: MockRepo;
   let sorobanService: jest.Mocked<Pick<SorobanService, 'cancelMarket'>>;
+  let cacheManager: { get: jest.Mock; set: jest.Mock; del: jest.Mock };
 
   const mockCreator = { id: 'creator-1', role: 'user' } as User;
   const mockAdmin = { id: 'admin-1', role: 'admin' } as User;
@@ -890,6 +946,7 @@ describe('MarketsService.cancelMarket', () => {
     }).compile();
 
     service = module.get<MarketsService>(MarketsService);
+    cacheManager = module.get(CACHE_MANAGER);
   });
 
   it('throws ForbiddenException when caller is not creator or admin', async () => {
@@ -945,6 +1002,15 @@ describe('MarketsService.cancelMarket', () => {
     expect(sorobanService.cancelMarket).toHaveBeenCalledWith('on-chain-1');
     expect(marketsRepository.save).toHaveBeenCalled();
     expect(result.is_cancelled).toBe(true);
+    expect(cacheManager.del).toHaveBeenCalledWith(
+      CACHE_WARMING_KEYS.trendingEvents,
+    );
+    expect(cacheManager.del).toHaveBeenCalledWith(
+      CACHE_WARMING_KEYS.activeEvents,
+    );
+    expect(cacheManager.del).toHaveBeenCalledWith(
+      CACHE_WARMING_KEYS.popularEventDetail('market-1'),
+    );
   });
 
   it('allows admin to cancel any market', async () => {
@@ -967,5 +1033,398 @@ describe('MarketsService.cancelMarket', () => {
       'Failed to cancel market on Soroban',
     );
     expect(marketsRepository.save).not.toHaveBeenCalled();
+  });
+});
+
+describe('MarketsService pause/resume cache invalidation', () => {
+  let service: MarketsService;
+  let marketsRepository: MockRepo;
+  let sorobanService: jest.Mocked<
+    Pick<SorobanService, 'pauseMarket' | 'resumeMarket'>
+  >;
+  let cacheManager: { get: jest.Mock; set: jest.Mock; del: jest.Mock };
+
+  const mockAdmin = { id: 'admin-1', role: 'admin' } as User;
+
+  const makeMarket = (overrides: Partial<Market> = {}): Market =>
+    ({
+      id: 'market-1',
+      on_chain_market_id: 'on-chain-1',
+      title: 'Test Market',
+      end_time: new Date(Date.now() + 60_000),
+      is_resolved: false,
+      is_cancelled: false,
+      is_paused: false,
+      creator: { id: 'creator-1' } as User,
+      ...overrides,
+    }) as Market;
+
+  beforeEach(async () => {
+    marketsRepository = {
+      create: jest.fn(),
+      save: jest.fn(),
+      findOne: jest.fn(),
+      find: jest.fn(),
+    };
+
+    sorobanService = { pauseMarket: jest.fn(), resumeMarket: jest.fn() };
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        MarketsService,
+        { provide: getRepositoryToken(Market), useValue: marketsRepository },
+        { provide: getRepositoryToken(Comment), useValue: {} },
+        { provide: getRepositoryToken(MarketTemplate), useValue: {} },
+        { provide: getRepositoryToken(UserBookmark), useValue: {} },
+        { provide: getRepositoryToken(Prediction), useValue: {} },
+        { provide: UsersService, useValue: {} },
+        { provide: SorobanService, useValue: sorobanService },
+        { provide: DataSource, useValue: {} },
+        { provide: WebhookDispatcherService, useValue: { emit: jest.fn() } },
+        {
+          provide: CACHE_MANAGER,
+          useValue: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
+        },
+      ],
+    }).compile();
+
+    service = module.get<MarketsService>(MarketsService);
+    cacheManager = module.get(CACHE_MANAGER);
+  });
+
+  it('pauseMarket() invalidates trending, active-list, and per-market cache keys', async () => {
+    const market = makeMarket();
+    marketsRepository.findOne.mockResolvedValue(market);
+    sorobanService.pauseMarket.mockResolvedValue({ tx_hash: 'abc' });
+    marketsRepository.save.mockResolvedValue({ ...market, is_paused: true });
+
+    await service.pauseMarket('market-1', mockAdmin);
+
+    expect(cacheManager.del).toHaveBeenCalledWith(
+      CACHE_WARMING_KEYS.trendingEvents,
+    );
+    expect(cacheManager.del).toHaveBeenCalledWith(
+      CACHE_WARMING_KEYS.activeEvents,
+    );
+    expect(cacheManager.del).toHaveBeenCalledWith(
+      CACHE_WARMING_KEYS.popularEventDetail('market-1'),
+    );
+  });
+
+  it('pauseMarket() does not invalidate cache when rejected (not admin)', async () => {
+    marketsRepository.findOne.mockResolvedValue(makeMarket());
+
+    await expect(
+      service.pauseMarket('market-1', { id: 'user-1', role: 'user' } as User),
+    ).rejects.toThrow(ForbiddenException);
+    expect(cacheManager.del).not.toHaveBeenCalled();
+  });
+
+  it('resumeMarket() invalidates trending, active-list, and per-market cache keys', async () => {
+    const market = makeMarket({ is_paused: true });
+    marketsRepository.findOne.mockResolvedValue(market);
+    sorobanService.resumeMarket.mockResolvedValue({ tx_hash: 'def' });
+    marketsRepository.save.mockResolvedValue({ ...market, is_paused: false });
+
+    await service.resumeMarket('market-1', mockAdmin);
+
+    expect(cacheManager.del).toHaveBeenCalledWith(
+      CACHE_WARMING_KEYS.trendingEvents,
+    );
+    expect(cacheManager.del).toHaveBeenCalledWith(
+      CACHE_WARMING_KEYS.activeEvents,
+    );
+    expect(cacheManager.del).toHaveBeenCalledWith(
+      CACHE_WARMING_KEYS.popularEventDetail('market-1'),
+    );
+  });
+
+  it('resumeMarket() does not invalidate cache when rejected (not paused)', async () => {
+    marketsRepository.findOne.mockResolvedValue(
+      makeMarket({ is_paused: false }),
+    );
+
+    await expect(service.resumeMarket('market-1', mockAdmin)).rejects.toThrow(
+      ConflictException,
+    );
+    expect(cacheManager.del).not.toHaveBeenCalled();
+  });
+
+  it('stale-read: pause then read reflects invalidated detail cache', async () => {
+    const market = makeMarket();
+    cacheManager.get.mockResolvedValue({ ...market, is_paused: false });
+    marketsRepository.findOne.mockResolvedValue(market);
+    sorobanService.pauseMarket.mockResolvedValue({ tx_hash: 'abc' });
+    marketsRepository.save.mockResolvedValue({ ...market, is_paused: true });
+
+    await service.pauseMarket('market-1', mockAdmin);
+
+    expect(cacheManager.del).toHaveBeenCalledWith(
+      CACHE_WARMING_KEYS.popularEventDetail('market-1'),
+    );
+  });
+});
+
+describe('MarketsService settlement grace period workflow', () => {
+  let service: MarketsService;
+  let marketsRepository: MockRepo;
+  let sorobanService: jest.Mocked<Pick<SorobanService, 'resolveMarket'>>;
+  let webhookDispatcher: { emit: jest.Mock };
+
+  const mockCreator = { id: 'creator-1', role: 'user' } as User;
+  const mockAdmin = { id: 'admin-1', role: 'admin' } as User;
+  const mockOther = { id: 'other-1', role: 'user' } as User;
+
+  const currentNow = new Date('2026-06-15T12:00:00.000Z');
+
+  const makeMarket = (overrides: Partial<Market> = {}): Market =>
+    ({
+      id: 'market-1',
+      on_chain_market_id: 'on-chain-1',
+      title: 'Test Market',
+      outcome_options: ['YES', 'NO'],
+      end_time: new Date(currentNow.getTime() - 60_000),
+      is_resolved: false,
+      is_cancelled: false,
+      creator: mockCreator,
+      settlement_state: MarketSettlementState.PENDING,
+      proposed_outcome: null,
+      resolution_proposed_at: null,
+      grace_period_seconds: 86400,
+      ...overrides,
+    }) as Market;
+
+  beforeEach(async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(currentNow);
+
+    marketsRepository = {
+      create: jest.fn(),
+      save: jest.fn(),
+      findOne: jest.fn(),
+      find: jest.fn(),
+    };
+
+    sorobanService = { resolveMarket: jest.fn() };
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        MarketsService,
+        { provide: getRepositoryToken(Market), useValue: marketsRepository },
+        { provide: getRepositoryToken(Comment), useValue: {} },
+        { provide: getRepositoryToken(MarketTemplate), useValue: {} },
+        { provide: getRepositoryToken(UserBookmark), useValue: {} },
+        { provide: getRepositoryToken(Prediction), useValue: {} },
+        { provide: UsersService, useValue: {} },
+        { provide: SorobanService, useValue: sorobanService },
+        { provide: DataSource, useValue: {} },
+        { provide: WebhookDispatcherService, useValue: { emit: jest.fn() } },
+        {
+          provide: CACHE_MANAGER,
+          useValue: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
+        },
+      ],
+    }).compile();
+
+    service = module.get<MarketsService>(MarketsService);
+    webhookDispatcher = module.get(WebhookDispatcherService);
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  describe('proposeResolution', () => {
+    const dto: ProposeResolutionDto = { outcome: 'YES' };
+
+    it('transitions market to PROPOSED and stamps resolution_proposed_at from the clock', async () => {
+      const market = makeMarket();
+      marketsRepository.findOne.mockResolvedValue(market);
+      marketsRepository.save.mockResolvedValue(market);
+
+      const result = await service.proposeResolution(
+        'market-1',
+        dto,
+        mockCreator,
+      );
+
+      expect(result.settlement_state).toBe(MarketSettlementState.PROPOSED);
+      expect(result.proposed_outcome).toBe('YES');
+      expect(result.resolution_proposed_at).toEqual(currentNow);
+      expect(webhookDispatcher.emit).toHaveBeenCalledWith(
+        'market.resolution_proposed',
+        expect.objectContaining({ proposed_outcome: 'YES' }),
+      );
+    });
+
+    it('allows admin to propose on behalf of any market', async () => {
+      const market = makeMarket({ creator: mockOther });
+      marketsRepository.findOne.mockResolvedValue(market);
+      marketsRepository.save.mockResolvedValue(market);
+
+      const result = await service.proposeResolution(
+        'market-1',
+        dto,
+        mockAdmin,
+      );
+
+      expect(result.settlement_state).toBe(MarketSettlementState.PROPOSED);
+    });
+
+    it('throws ForbiddenException when caller is neither creator nor admin', async () => {
+      marketsRepository.findOne.mockResolvedValue(makeMarket());
+
+      await expect(
+        service.proposeResolution('market-1', dto, mockOther),
+      ).rejects.toThrow(ForbiddenException);
+      expect(marketsRepository.save).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when end_time has not passed yet', async () => {
+      marketsRepository.findOne.mockResolvedValue(
+        makeMarket({ end_time: new Date(currentNow.getTime() + 60_000) }),
+      );
+
+      await expect(
+        service.proposeResolution('market-1', dto, mockCreator),
+      ).rejects.toThrow(BadRequestException);
+      expect(marketsRepository.save).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException for an outcome not in outcome_options', async () => {
+      marketsRepository.findOne.mockResolvedValue(makeMarket());
+
+      await expect(
+        service.proposeResolution(
+          'market-1',
+          { outcome: 'MAYBE' },
+          mockCreator,
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(marketsRepository.save).not.toHaveBeenCalled();
+    });
+
+    it('throws ConflictException when a resolution is already proposed', async () => {
+      marketsRepository.findOne.mockResolvedValue(
+        makeMarket({ settlement_state: MarketSettlementState.PROPOSED }),
+      );
+
+      await expect(
+        service.proposeResolution('market-1', dto, mockCreator),
+      ).rejects.toThrow(ConflictException);
+    });
+
+    it('throws ConflictException when market is already resolved', async () => {
+      marketsRepository.findOne.mockResolvedValue(
+        makeMarket({ is_resolved: true }),
+      );
+
+      await expect(
+        service.proposeResolution('market-1', dto, mockCreator),
+      ).rejects.toThrow(ConflictException);
+    });
+  });
+
+  describe('challengeResolution', () => {
+    const challengeDto: ChallengeResolutionDto = { reason: 'Looks wrong' };
+
+    it('freezes the market by moving it to CHALLENGED within the grace window', async () => {
+      const market = makeMarket({
+        settlement_state: MarketSettlementState.PROPOSED,
+        proposed_outcome: 'YES',
+        resolution_proposed_at: new Date(currentNow.getTime() - 1000),
+        grace_period_seconds: 86400,
+      });
+      marketsRepository.findOne.mockResolvedValue(market);
+      marketsRepository.save.mockResolvedValue(market);
+
+      const result = await service.challengeResolution(
+        'market-1',
+        challengeDto,
+        mockOther,
+      );
+
+      expect(result.settlement_state).toBe(MarketSettlementState.CHALLENGED);
+      expect(webhookDispatcher.emit).toHaveBeenCalledWith(
+        'market.resolution_challenged',
+        expect.objectContaining({ reason: 'Looks wrong' }),
+      );
+    });
+
+    it('throws BadRequestException once the grace window has closed', async () => {
+      const market = makeMarket({
+        settlement_state: MarketSettlementState.PROPOSED,
+        proposed_outcome: 'YES',
+        resolution_proposed_at: new Date(
+          currentNow.getTime() - 90_000_000, // > 86400s grace period ago
+        ),
+        grace_period_seconds: 86400,
+      });
+      marketsRepository.findOne.mockResolvedValue(market);
+
+      await expect(
+        service.challengeResolution('market-1', challengeDto, mockOther),
+      ).rejects.toThrow(BadRequestException);
+      expect(marketsRepository.save).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when no resolution is pending', async () => {
+      marketsRepository.findOne.mockResolvedValue(makeMarket());
+
+      await expect(
+        service.challengeResolution('market-1', challengeDto, mockOther),
+      ).rejects.toThrow(BadRequestException);
+      expect(marketsRepository.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('resolveChallenge', () => {
+    const resolveDto: ResolveChallengeDto = { outcome: 'NO' };
+
+    it('settles the market immediately on admin decision', async () => {
+      const market = makeMarket({
+        settlement_state: MarketSettlementState.CHALLENGED,
+        proposed_outcome: 'YES',
+      });
+      marketsRepository.findOne.mockResolvedValue(market);
+      sorobanService.resolveMarket.mockResolvedValue(undefined);
+      marketsRepository.save.mockResolvedValue(market);
+
+      const result = await service.resolveChallenge(
+        'market-1',
+        resolveDto,
+        mockAdmin,
+      );
+
+      expect(sorobanService.resolveMarket).toHaveBeenCalledWith(
+        'on-chain-1',
+        'NO',
+      );
+      expect(result.settlement_state).toBe(MarketSettlementState.SETTLED);
+      expect(result.is_resolved).toBe(true);
+      expect(result.resolved_outcome).toBe('NO');
+      expect(webhookDispatcher.emit).toHaveBeenCalledWith(
+        'market.settled',
+        expect.objectContaining({ resolved_outcome: 'NO' }),
+      );
+    });
+
+    it('throws ForbiddenException when caller is not admin', async () => {
+      await expect(
+        service.resolveChallenge('market-1', resolveDto, mockOther),
+      ).rejects.toThrow(ForbiddenException);
+      expect(marketsRepository.findOne).not.toHaveBeenCalled();
+    });
+
+    it('throws BadRequestException when market has no active challenge', async () => {
+      marketsRepository.findOne.mockResolvedValue(
+        makeMarket({ settlement_state: MarketSettlementState.PROPOSED }),
+      );
+
+      await expect(
+        service.resolveChallenge('market-1', resolveDto, mockAdmin),
+      ).rejects.toThrow(BadRequestException);
+      expect(sorobanService.resolveMarket).not.toHaveBeenCalled();
+    });
   });
 });
