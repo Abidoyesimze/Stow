@@ -5,8 +5,8 @@ use crate::errors::InsightArenaError;
 use crate::escrow;
 use crate::market;
 use crate::storage_types::{
-    DataKey, FeeTier, FeeTierConfig, LPPosition, LiquidityPool, MarketFeeInfo, SwapRecord,
-    VolatilityState,
+    DataKey, FeeTier, FeeTierConfig, LPPosition, LiquidityPool, MarketFeeInfo, PriceAccumulator,
+    PriceObservation, SwapRecord, VolatilityState,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -21,6 +21,22 @@ pub const DEFAULT_FEE_BPS: u32 = 30;
 /// the rolling volatility EMA. Higher values make the measure more reactive
 /// to recent swaps; lower values smooth it out over a longer window.
 pub const VOLATILITY_ALPHA_BPS: u32 = 2000;
+
+/// Fixed number of [`PriceObservation`] slots retained per (market, outcome) pair
+/// in the TWAP ring buffer. Bounds per-outcome storage growth: once this many
+/// price-changing operations have occurred, the oldest observation is
+/// overwritten by the newest.
+///
+/// **Max supported window:** `get_twap` can only average over the span still
+/// covered by the buffer, i.e. from the oldest surviving observation's
+/// timestamp to now. If an outcome has traded fewer than
+/// `TWAP_RING_BUFFER_CAPACITY` times since the pool was created, its entire
+/// history is available and any window back to pool creation is honored. Once
+/// more than `TWAP_RING_BUFFER_CAPACITY` price-changing swaps have occurred,
+/// only the most recent ones remain, so a window reaching further back than
+/// the oldest retained sample returns `TwapInsufficientHistory` rather than a
+/// silently truncated (and therefore misleading) average.
+pub const TWAP_RING_BUFFER_CAPACITY: u32 = 64;
 
 // ── AMM Math Functions ────────────────────────────────────────────────────────
 
@@ -260,6 +276,150 @@ pub fn get_market_fee_info(env: &Env, market_id: u64) -> Result<MarketFeeInfo, I
     })
 }
 
+// ── TWAP Price Oracle ─────────────────────────────────────────────────────────
+//
+// Accumulators are stored inline on `LiquidityPool::price_accumulators` (keyed
+// by outcome) rather than under a dedicated `DataKey` variant: `DataKey` is a
+// `#[contracttype]` union, and the underlying XDR spec caps a union at 50
+// cases — a limit this contract's `DataKey` already sits at. Piggybacking on
+// the pool, which every price-changing operation already loads and saves,
+// avoids the cap and gives each swap a single atomic read/write instead of two.
+
+/// Record a new price sample for `outcome` on `pool`, updating its cumulative
+/// price integral and pushing an observation into its ring buffer. Must be
+/// called on every operation that changes an outcome's reserve, with the
+/// pool's ledger timestamp; the caller is responsible for persisting `pool`
+/// afterwards (e.g. via `save_pool`).
+///
+/// The price active since the *previous* observation (`acc.last_price`) is
+/// integrated over the elapsed time since it was recorded before the new
+/// sample is stored — so a price that spikes and reverts within a single
+/// ledger timestamp contributes zero to the accumulator, making the resulting
+/// TWAP expensive to move with an intra-block manipulation.
+fn record_price_observation(
+    env: &Env,
+    pool: &mut LiquidityPool,
+    outcome: Symbol,
+    price: i128,
+) -> Result<(), InsightArenaError> {
+    let mut acc = pool
+        .price_accumulators
+        .get(outcome.clone())
+        .unwrap_or_else(|| PriceAccumulator::empty(env, pool.market_id, outcome.clone()));
+
+    let now = env.ledger().timestamp();
+
+    if acc.total_count > 0 {
+        let elapsed = now.saturating_sub(acc.last_timestamp);
+        let contribution = acc
+            .last_price
+            .checked_mul(elapsed as i128)
+            .ok_or(InsightArenaError::Overflow)?;
+        acc.cumulative = acc
+            .cumulative
+            .checked_add(contribution)
+            .ok_or(InsightArenaError::Overflow)?;
+    }
+
+    let observation = PriceObservation {
+        timestamp: now,
+        price,
+        price_cumulative: acc.cumulative,
+    };
+
+    if acc.observations.len() < TWAP_RING_BUFFER_CAPACITY {
+        acc.observations.push_back(observation);
+    } else {
+        acc.observations.set(acc.next_index, observation);
+    }
+    acc.next_index = (acc.next_index + 1) % TWAP_RING_BUFFER_CAPACITY;
+
+    acc.last_price = price;
+    acc.last_timestamp = now;
+    acc.total_count = acc.total_count.saturating_add(1);
+
+    pool.price_accumulators.set(outcome, acc);
+    Ok(())
+}
+
+/// Compute the time-weighted average price of `outcome` over the trailing
+/// `window` seconds (i.e. `[now - window, now]`).
+///
+/// Uses the standard cumulative-price-accumulator technique: the price
+/// integral is reconstructed at the window's start by locating the latest
+/// retained observation at or before that timestamp and extrapolating with
+/// its price for the remainder, then compared against the integral extrapolated
+/// to now. See `TWAP_RING_BUFFER_CAPACITY` for the max window the ring buffer
+/// can currently honor.
+pub fn get_twap(
+    env: &Env,
+    market_id: u64,
+    outcome: Symbol,
+    window: u64,
+) -> Result<i128, InsightArenaError> {
+    if window == 0 {
+        return Err(InsightArenaError::TwapEmptyWindow);
+    }
+
+    let pool = get_pool(env, market_id)?;
+    if pool.outcome_reserves.get(outcome.clone()).is_none() {
+        return Err(InsightArenaError::InvalidOutcome);
+    }
+
+    let acc = pool
+        .price_accumulators
+        .get(outcome)
+        .ok_or(InsightArenaError::TwapInsufficientHistory)?;
+    if acc.total_count == 0 {
+        return Err(InsightArenaError::TwapInsufficientHistory);
+    }
+
+    let now = env.ledger().timestamp();
+    let window_start = now.saturating_sub(window);
+
+    // Latest retained observation at or before `window_start`.
+    let mut before: Option<PriceObservation> = None;
+    for obs in acc.observations.iter() {
+        if obs.timestamp <= window_start {
+            let take = match &before {
+                Some(b) => obs.timestamp > b.timestamp,
+                None => true,
+            };
+            if take {
+                before = Some(obs);
+            }
+        }
+    }
+    let before = before.ok_or(InsightArenaError::TwapInsufficientHistory)?;
+
+    let cumulative_start = before
+        .price
+        .checked_mul((window_start - before.timestamp) as i128)
+        .ok_or(InsightArenaError::Overflow)?
+        .checked_add(before.price_cumulative)
+        .ok_or(InsightArenaError::Overflow)?;
+
+    let cumulative_now = acc
+        .last_price
+        .checked_mul((now - acc.last_timestamp) as i128)
+        .ok_or(InsightArenaError::Overflow)?
+        .checked_add(acc.cumulative)
+        .ok_or(InsightArenaError::Overflow)?;
+
+    let elapsed = now.saturating_sub(window_start);
+    if elapsed == 0 {
+        return Err(InsightArenaError::TwapDivideByZero);
+    }
+
+    let twap = cumulative_now
+        .checked_sub(cumulative_start)
+        .ok_or(InsightArenaError::Overflow)?
+        .checked_div(elapsed as i128)
+        .ok_or(InsightArenaError::Overflow)?;
+
+    Ok(twap)
+}
+
 // ── Helper Functions ──────────────────────────────────────────────────────────
 
 fn bump_pool(env: &Env, market_id: u64) {
@@ -406,7 +566,9 @@ pub fn add_liquidity(
         .persistent()
         .get::<_, LiquidityPool>(&DataKey::LiquidityPool(market_id));
 
-    let (lp_tokens, new_pool) = if let Some(mut pool) = pool {
+    let is_new_pool = pool.is_none();
+
+    let (lp_tokens, mut new_pool) = if let Some(mut pool) = pool {
         let lp_tokens = calculate_lp_tokens(amount, pool.total_liquidity, pool.lp_token_supply)?;
         pool.total_liquidity = pool
             .total_liquidity
@@ -423,6 +585,7 @@ pub fn add_liquidity(
             reserves.set(outcome, amount / mkt.outcome_options.len() as i128);
         }
         let pool = LiquidityPool::new(
+            env,
             market_id,
             reserves,
             DEFAULT_FEE_BPS,
@@ -433,6 +596,14 @@ pub fn add_liquidity(
         pool.total_liquidity = amount;
         (amount, pool)
     };
+
+    if is_new_pool {
+        for outcome in mkt.outcome_options.iter() {
+            if let Some(reserve) = new_pool.outcome_reserves.get(outcome.clone()) {
+                record_price_observation(env, &mut new_pool, outcome, reserve)?;
+            }
+        }
+    }
 
     save_pool(env, &new_pool);
     add_provider_to_list(env, market_id, &provider);
@@ -579,6 +750,9 @@ pub fn swap_outcome(
         .set(from_outcome.clone(), new_from_reserve);
     pool.outcome_reserves.set(to_outcome.clone(), new_to_reserve);
     pool.fee_bps = effective_fee_bps;
+
+    record_price_observation(env, &mut pool, from_outcome.clone(), new_from_reserve)?;
+    record_price_observation(env, &mut pool, to_outcome.clone(), new_to_reserve)?;
 
     save_pool(env, &pool);
 

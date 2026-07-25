@@ -2163,3 +2163,298 @@ fn test_swap_history_records_effective_fee_paid() {
     let expected_fee = swap_amount * fee_bps as i128 / 10_000;
     assert_eq!(record.fee_paid, expected_fee);
 }
+
+// ── TWAP Price Oracle Tests ───────────────────────────────────────────────────
+
+#[test]
+fn test_twap_multi_swap_matches_hand_computed_average() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let market_id = client.create_market(&_admin, &lp_market_params(&env));
+
+    let liquidity = 1_000_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let t0 = env.ledger().timestamp();
+    let p0 = client.get_outcome_price(&market_id, &symbol_short!("yes"));
+
+    let swap_amount = 20_000_i128;
+    sa.mint(&trader, &(swap_amount * 3));
+    token.approve(&trader, &client.address, &(swap_amount * 3), &9999);
+
+    // Three swaps, each 100 seconds apart, all moving "yes" reserve upward.
+    env.ledger().with_mut(|l| l.timestamp += 100);
+    client.swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &swap_amount,
+        &0_i128,
+    );
+    let p1 = client.get_outcome_price(&market_id, &symbol_short!("yes"));
+
+    env.ledger().with_mut(|l| l.timestamp += 100);
+    client.swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &swap_amount,
+        &0_i128,
+    );
+    let p2 = client.get_outcome_price(&market_id, &symbol_short!("yes"));
+
+    env.ledger().with_mut(|l| l.timestamp += 100);
+    client.swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &swap_amount,
+        &0_i128,
+    );
+
+    let now = env.ledger().timestamp();
+    assert_eq!(now, t0 + 300);
+
+    // The window exactly spans pool creation to now, so the hand-computed
+    // average only needs the prices active during each 100s interval: p0 for
+    // [t0, t0+100), p1 for [t0+100, t0+200), p2 for [t0+200, t0+300). The final
+    // swap (which set the price now current at t0+300) contributes zero
+    // duration and is correctly excluded.
+    let window: u64 = 300;
+    let expected = (p0 * 100 + p1 * 100 + p2 * 100) / window as i128;
+
+    let twap = client.get_twap(&market_id, &symbol_short!("yes"), &window);
+    assert_eq!(twap, expected);
+}
+
+#[test]
+fn test_twap_resists_single_block_price_spike() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let market_id = client.create_market(&_admin, &lp_market_params(&env));
+
+    let liquidity = 10_000_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let t0 = env.ledger().timestamp();
+
+    // Let a long baseline period elapse with the price sitting at its initial level.
+    env.ledger().with_mut(|l| l.timestamp += 10_000);
+    let price_before_spike = client.get_outcome_price(&market_id, &symbol_short!("yes"));
+
+    // A single huge swap spikes the "yes" reserve (and therefore the spot price).
+    let spike_amount = 20_000_000_i128;
+    sa.mint(&trader, &spike_amount);
+    token.approve(&trader, &client.address, &spike_amount, &9999);
+    client.swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &spike_amount,
+        &0_i128,
+    );
+
+    // Advance a single second so the spike itself contributes a (tiny) sliver
+    // of duration to the accumulator, then read both spot and TWAP.
+    env.ledger().with_mut(|l| l.timestamp += 1);
+    let spot_after_spike = client.get_outcome_price(&market_id, &symbol_short!("yes"));
+
+    let now = env.ledger().timestamp();
+    let window = now - t0;
+    let twap = client.get_twap(&market_id, &symbol_short!("yes"), &window);
+
+    assert!(spot_after_spike > price_before_spike * 2, "spike should be dramatic");
+
+    let spot_move = (spot_after_spike - price_before_spike).abs();
+    let twap_move = (twap - price_before_spike).abs();
+
+    // The spike lasted a single second out of a 10,001 second window, so it
+    // can move the TWAP by at most ~1/10000th as much as it moved the spot price.
+    assert!(
+        twap_move * 100 < spot_move,
+        "twap_move={twap_move} should be far smaller than spot_move={spot_move}"
+    );
+}
+
+#[test]
+fn test_twap_empty_window_returns_typed_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let provider = Address::generate(&env);
+    let market_id = client.create_market(&_admin, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    let liquidity = 100_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let result = client.try_get_twap(&market_id, &symbol_short!("yes"), &0_u64);
+    assert!(matches!(
+        result,
+        Err(Ok(InsightArenaError::TwapEmptyWindow))
+    ));
+}
+
+#[test]
+fn test_twap_window_predating_history_returns_typed_error() {
+    let env = Env::default();
+    env.ledger().with_mut(|l| l.timestamp = 500);
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let provider = Address::generate(&env);
+    let market_id = client.create_market(&_admin, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    let liquidity = 100_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    // Pool was created at t=500; a window of 10,000s reaches back before
+    // genesis (t=0), which predates the oldest retained observation.
+    let result = client.try_get_twap(&market_id, &symbol_short!("yes"), &10_000_u64);
+    assert!(matches!(
+        result,
+        Err(Ok(InsightArenaError::TwapInsufficientHistory))
+    ));
+}
+
+#[test]
+fn test_twap_zero_elapsed_returns_typed_error() {
+    let env = Env::default();
+    env.ledger().with_mut(|l| l.timestamp = 0);
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let provider = Address::generate(&env);
+    let market_id = client.create_market(&_admin, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    let liquidity = 100_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    assert_eq!(env.ledger().timestamp(), 0);
+
+    // At t=0 with any positive window, `window_start` saturates to 0 too, so
+    // `now - window_start` collapses to zero elapsed seconds.
+    let result = client.try_get_twap(&market_id, &symbol_short!("yes"), &1_u64);
+    assert!(matches!(
+        result,
+        Err(Ok(InsightArenaError::TwapDivideByZero))
+    ));
+}
+
+#[test]
+fn test_twap_unknown_outcome_returns_invalid_outcome() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let provider = Address::generate(&env);
+    let market_id = client.create_market(&_admin, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    let liquidity = 100_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let result = client.try_get_twap(&market_id, &symbol_short!("maybe"), &100_u64);
+    assert!(matches!(result, Err(Ok(InsightArenaError::InvalidOutcome))));
+}
+
+#[test]
+fn test_twap_ring_buffer_wraparound() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let market_id = client.create_market(&_admin, &lp_market_params(&env));
+
+    let liquidity = 100_000_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let t0 = env.ledger().timestamp();
+
+    // Trade well past the ring buffer's capacity so it wraps at least once.
+    let num_swaps: u32 = TWAP_RING_BUFFER_CAPACITY + 20;
+    let swap_amount = 1_000_i128;
+    sa.mint(&trader, &(swap_amount * num_swaps as i128));
+    token.approve(&trader, &client.address, &(swap_amount * num_swaps as i128), &9999);
+
+    for _ in 0..num_swaps {
+        env.ledger().with_mut(|l| l.timestamp += 50);
+        client.swap_outcome(
+            &trader,
+            &market_id,
+            &symbol_short!("yes"),
+            &symbol_short!("no"),
+            &swap_amount,
+            &0_i128,
+        );
+    }
+
+    let now = env.ledger().timestamp();
+    assert_eq!(now, t0 + (num_swaps as u64) * 50);
+
+    // A window reaching all the way back to pool creation now exceeds what the
+    // wrapped ring buffer retains (its oldest entries were overwritten), so it
+    // must be rejected with a typed error rather than a silently truncated
+    // (misleading) average or a panic.
+    let full_window = now - t0;
+    let result = client.try_get_twap(&market_id, &symbol_short!("yes"), &full_window);
+    assert!(matches!(
+        result,
+        Err(Ok(InsightArenaError::TwapInsufficientHistory))
+    ));
+
+    // A window covering only the most recently retained observations still
+    // succeeds without panicking, even though far more than
+    // `TWAP_RING_BUFFER_CAPACITY` price-changing operations occurred over the
+    // pool's full lifetime.
+    let recent_window: u64 = (TWAP_RING_BUFFER_CAPACITY as u64 / 2) * 50;
+    let twap = client.get_twap(&market_id, &symbol_short!("yes"), &recent_window);
+    assert!(twap > 0);
+}
