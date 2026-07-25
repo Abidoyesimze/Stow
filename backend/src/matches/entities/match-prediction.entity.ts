@@ -41,6 +41,15 @@ export class MatchPrediction {
   })
   predicted_outcome: PredictedOutcome;
 
+  @Column({ type: 'int', nullable: true })
+  predicted_home_score: number | null;
+
+  @Column({ type: 'int', nullable: true })
+  predicted_away_score: number | null;
+
+  @Column({ type: 'int', default: 0 })
+  points_earned: number;
+
   @Column({ type: 'boolean', nullable: true })
   is_correct: boolean | null;
 

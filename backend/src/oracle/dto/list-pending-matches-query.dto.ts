@@ -49,3 +49,9 @@ export interface PaginatedPendingMatchesResponse {
   page: number;
   limit: number;
 }
+
+export interface OracleStatsResponse {
+  pending: number;
+  resolved: number;
+  overdue: number;
+}

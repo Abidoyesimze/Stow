@@ -24,7 +24,12 @@ pub fn get_treasury_balance(env: &Env) -> i128 {
 }
 
 /// Withdraw XLM from the treasury to `to` address. Only admin may call.
-pub fn withdraw_fees(env: &Env, caller: Address, to: Address, amount: i128) -> Result<(), FeeError> {
+pub fn withdraw_fees(
+    env: &Env,
+    caller: Address,
+    to: Address,
+    amount: i128,
+) -> Result<(), FeeError> {
     // Verify not paused
     if admin::is_paused(env) {
         return Err(FeeError::Paused);
@@ -58,12 +63,13 @@ pub fn withdraw_fees(env: &Env, caller: Address, to: Address, amount: i128) -> R
         return Err(FeeError::InsufficientBalance);
     }
 
-    TokenHelper::transfer_from(env, &xlm_token, &treasury, &to, amount)
-        .map_err(|err| match err {
+    TokenHelper::transfer_from(env, &xlm_token, &treasury, &to, amount).map_err(
+        |err| match err {
             crate::token::TokenError::InsufficientBalance => FeeError::InsufficientBalance,
             crate::token::TokenError::TransferFailed => FeeError::TransferFailed,
             _ => FeeError::TransferFailed,
-        })?;
+        },
+    )?;
 
     Ok(())
 }

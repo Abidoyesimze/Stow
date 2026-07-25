@@ -1,4 +1,11 @@
-import { Controller, Get, Param, Query, UseInterceptors } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Param,
+  Query,
+  UseInterceptors,
+  ValidationPipe,
+} from '@nestjs/common';
 import { CacheInterceptor, CacheTTL } from '@nestjs/cache-manager';
 import {
   ApiBearerAuth,
@@ -8,6 +15,7 @@ import {
   ApiQuery,
 } from '@nestjs/swagger';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { DateRangeQueryDto } from '../common/dto/date-range-query.dto';
 import { Public } from '../common/decorators/public.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { Role } from '../common/enums/role.enum';
@@ -19,11 +27,31 @@ import { MarketHistoryResponseDto } from './dto/market-history.dto';
 import { UserTrendsDto } from './dto/user-trends.dto';
 import { CategoryAnalyticsResponseDto } from './dto/category-analytics.dto';
 import { RetentionResponseDto, RetentionQueryDto } from './dto/retention.dto';
+import { PlatformStatsDto } from './dto/platform-stats.dto';
 
 @ApiTags('Analytics')
 @Controller('analytics')
 export class AnalyticsController {
   constructor(private readonly analyticsService: AnalyticsService) {}
+
+  @Get('active-users')
+  @Public()
+  @ApiOperation({
+    summary: 'Get real-time active users gauge',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Current active users count',
+    schema: {
+      type: 'object',
+      properties: {
+        count: { type: 'number' },
+      },
+    },
+  })
+  getActiveUsers(): { count: number } {
+    return { count: this.analyticsService.getActiveUsersCount() };
+  }
 
   @Get('dashboard')
   @ApiBearerAuth()
@@ -59,18 +87,6 @@ export class AnalyticsController {
   @Public()
   @ApiOperation({ summary: 'Get historical data for a market over time' })
   @ApiQuery({
-    name: 'from',
-    required: false,
-    type: String,
-    description: 'Start date (ISO string)',
-  })
-  @ApiQuery({
-    name: 'to',
-    required: false,
-    type: String,
-    description: 'End date (ISO string)',
-  })
-  @ApiQuery({
     name: 'interval',
     required: false,
     type: String,
@@ -82,13 +98,15 @@ export class AnalyticsController {
       'Market history with prediction volume, pool size, and participant growth',
     type: MarketHistoryResponseDto,
   })
+  @ApiResponse({ status: 400, description: 'Invalid date range query' })
   @ApiResponse({ status: 404, description: 'Market not found' })
   async getMarketHistory(
     @Param('id') id: string,
-    @Query('from') from?: string,
-    @Query('to') to?: string,
+    @Query(new ValidationPipe({ transform: true, whitelist: true }))
+    query: DateRangeQueryDto,
     @Query('interval') interval?: string, // TODO: Implement interval-based aggregation
   ): Promise<MarketHistoryResponseDto> {
+    const { from, to } = query.resolveRange();
     return this.analyticsService.getMarketHistory(id, from, to, interval);
   }
 
@@ -158,5 +176,20 @@ export class AnalyticsController {
       query.period ?? 'week',
       query.periods ?? 8,
     );
+  }
+
+  @Get('platform')
+  @Public()
+  @UseInterceptors(CacheInterceptor)
+  @CacheTTL(60)
+  @ApiOperation({ summary: 'Get platform-wide public statistics' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Platform statistics: total markets, predictions, volume, active users, and active markets',
+    type: PlatformStatsDto,
+  })
+  async getPlatformStats(): Promise<PlatformStatsDto> {
+    return this.analyticsService.getPlatformStats();
   }
 }

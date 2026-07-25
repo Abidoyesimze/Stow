@@ -12,18 +12,26 @@ import { IndexerCheckpoint } from './entities/indexer-checkpoint.entity';
 import { IndexerMetricsDto } from './dto/indexer-metrics.dto';
 import { Match, WinningTeam } from '../matches/entities/match.entity';
 import { CreatorEvent } from '../matches/entities/creator-event.entity';
+import { CreatorEventLeaderboardEntry } from '../matches/entities/creator-event-leaderboard-entry.entity';
+import { CreatorEventPayout } from '../matches/entities/creator-event-payout.entity';
 import {
   MatchPrediction,
   PredictedOutcome,
 } from '../matches/entities/match-prediction.entity';
 import { User } from '../users/entities/user.entity';
+import { NotificationGeneratorService } from '../notifications/notification-generator.service';
+import { BroadcasterService } from '../websocket/broadcaster.service';
+import { ReconciliationService } from './reconciliation.service';
 
-const CHECKPOINT_LEDGER_KEY = 'indexer:last_processed_ledger';
+export const CHECKPOINT_LEDGER_KEY = 'indexer:last_processed_ledger';
 const CHECKPOINT_LEDGER_KEY_LATEST = 'indexer:latest_contract_ledger';
 const MAX_RETRIES = 5;
 const DLQ_THRESHOLD = 5;
 const BATCH_SIZE = 100;
 const BACKFILL_BATCH_SIZE = 50;
+const DEFAULT_CREATOR_EVENT_CATEGORY = 'general';
+// Matches MAX_EVENT_DURATION_SECONDS in contracts/creator-event-manager.
+const DEFAULT_EVENT_DURATION_SECONDS = 7_776_000;
 
 @Injectable()
 export class IndexerService implements OnModuleInit {
@@ -58,6 +66,16 @@ export class IndexerService implements OnModuleInit {
 
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
+
+    @InjectRepository(CreatorEventLeaderboardEntry)
+    private readonly creatorEventLeaderboardEntryRepository: Repository<CreatorEventLeaderboardEntry>,
+
+    @InjectRepository(CreatorEventPayout)
+    private readonly creatorEventPayoutRepository: Repository<CreatorEventPayout>,
+
+    private readonly notificationGeneratorService: NotificationGeneratorService,
+    private readonly broadcasterService: BroadcasterService,
+    private readonly reconciliationService: ReconciliationService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -116,6 +134,15 @@ export class IndexerService implements OnModuleInit {
       if (events.length === 0) {
         if (latestLedger > lastLedger) {
           await this.saveCheckpoint(CHECKPOINT_LEDGER_KEY, latestLedger);
+          const activeContractId = this.configService.get<string>(
+            'SOROBAN_CONTRACT_ID',
+          );
+          if (activeContractId) {
+            await this.reconciliationService.advanceCheckpoint(
+              activeContractId,
+              latestLedger,
+            );
+          }
         }
         return;
       }
@@ -140,10 +167,18 @@ export class IndexerService implements OnModuleInit {
         }
       }
 
-      await this.saveCheckpoint(
-        CHECKPOINT_LEDGER_KEY,
-        Math.max(maxProcessedLedger, latestLedger),
+      const finalLedger = Math.max(maxProcessedLedger, latestLedger);
+      await this.saveCheckpoint(CHECKPOINT_LEDGER_KEY, finalLedger);
+
+      const activeContractId = this.configService.get<string>(
+        'SOROBAN_CONTRACT_ID',
       );
+      if (activeContractId) {
+        await this.reconciliationService.advanceCheckpoint(
+          activeContractId,
+          finalLedger,
+        );
+      }
 
       const elapsed = Date.now() - batchStart;
       this.processingRate =
@@ -187,6 +222,7 @@ export class IndexerService implements OnModuleInit {
           params: {
             startLedger: fromLedger,
             filters: [{ type: 'contract', contractIds: [contractId] }],
+            xdrFormat: 'json',
             limit: BATCH_SIZE,
           },
         }),
@@ -279,12 +315,8 @@ export class IndexerService implements OnModuleInit {
     if (!Array.isArray(value)) return [];
     return value
       .map((item) => {
-        if (typeof item === 'string') return item;
-        if (item && typeof item === 'object') {
-          const obj = item as Record<string, unknown>;
-          if (typeof obj.symbol === 'string') return obj.symbol;
-          if (typeof obj.value === 'string') return obj.value;
-        }
+        const unwrapped = this.unwrapIndexerValue(item);
+        if (typeof unwrapped === 'string') return unwrapped;
         return null;
       })
       .filter((item): item is string => item !== null);
@@ -296,28 +328,52 @@ export class IndexerService implements OnModuleInit {
   ): string | null {
     const lowerTopics = topic.map((t) => t.toLowerCase());
 
+    const explicitTypeCandidate = this.unwrapIndexerValue(
+      value.event ?? value.event_type,
+    );
     const explicitType =
-      typeof value.event === 'string'
-        ? value.event
-        : typeof value.event_type === 'string'
-          ? value.event_type
-          : null;
+      typeof explicitTypeCandidate === 'string' ? explicitTypeCandidate : null;
 
     if (explicitType) return explicitType;
 
     const topicStr = lowerTopics.join('.');
+    const hasTopicPair = (domain: string, action: string): boolean =>
+      lowerTopics.some(
+        (topic, index) => topic === domain && lowerTopics[index + 1] === action,
+      );
 
-    if (topicStr.includes('eventcreated')) return 'EventCreated';
-    if (topicStr.includes('matchadded')) return 'MatchAdded';
-    if (topicStr.includes('userjoined')) return 'UserJoinedEvent';
-    if (topicStr.includes('predictionsubmitted')) return 'PredictionSubmitted';
+    if (topicStr.includes('eventcreated') || hasTopicPair('event', 'created'))
+      return 'EventCreated';
+    if (topicStr.includes('matchadded') || hasTopicPair('match', 'created'))
+      return 'MatchAdded';
+    if (topicStr.includes('userjoined') || hasTopicPair('event', 'joined'))
+      return 'UserJoinedEvent';
+    if (
+      topicStr.includes('predictionsubmitted') ||
+      hasTopicPair('prediction', 'submitted')
+    )
+      return 'PredictionSubmitted';
     if (
       topicStr.includes('matchresultsubmitted') ||
-      topicStr.includes('reslvd')
+      topicStr.includes('reslvd') ||
+      hasTopicPair('match', 'result_submitted')
     )
       return 'MatchResultSubmitted';
-    if (topicStr.includes('winnersverified')) return 'WinnersVerified';
-    if (topicStr.includes('eventcancelled')) return 'EventCancelled';
+    if (
+      topicStr.includes('winnersverified') ||
+      hasTopicPair('event', 'winners_verified')
+    )
+      return 'WinnersVerified';
+    if (
+      topicStr.includes('eventfinalized') ||
+      hasTopicPair('event', 'finalized')
+    )
+      return 'EventFinalized';
+    if (
+      topicStr.includes('eventcancelled') ||
+      hasTopicPair('event', 'cancelled')
+    )
+      return 'EventCancelled';
     if (topicStr.includes('feeupdated')) return 'FeeUpdated';
     if (topicStr.includes('addressverified')) return 'AddressVerified';
     if (topicStr.includes('addressunverified')) return 'AddressUnverified';
@@ -339,17 +395,36 @@ export class IndexerService implements OnModuleInit {
     const base = { ...rawValue };
 
     switch (eventType) {
-      case 'EventCreated':
+      case 'EventCreated': {
+        const eventCreated = this.readEventCreatedPayload(rawValue);
+
         return {
-          event_id: this.readBigInt(base, 'event_id'),
-          creator: this.readStr(base, 'creator'),
-          title: this.readStr(base, 'title'),
-          description: this.readStr(base, 'description'),
-          creation_fee_paid: this.readBigInt(base, 'creation_fee_paid'),
-          created_at: this.readNum(base, 'created_at'),
-          invite_code: this.readStr(base, 'invite_code'),
-          max_participants: this.readNum(base, 'max_participants'),
+          event_id: this.readBigInt(eventCreated, 'event_id'),
+          creator: this.readStr(eventCreated, 'creator'),
+          title: this.readStr(eventCreated, 'title'),
+          description: this.readStr(eventCreated, 'description'),
+          creation_fee_paid: this.readBigInt(eventCreated, 'creation_fee_paid'),
+          created_at: this.readNum(eventCreated, 'created_at'),
+          start_time: this.readNum(eventCreated, 'start_time'),
+          end_time: this.readNum(eventCreated, 'end_time'),
+          invite_code: this.readStr(eventCreated, 'invite_code'),
+          max_participants: this.readNum(eventCreated, 'max_participants'),
+          prize_pool: this.readUnsignedBigInt(eventCreated, 'prize_pool'),
+          reward_distribution: this.readNumberArray(
+            eventCreated,
+            'reward_distribution',
+          ),
+          entry_fee: this.readUnsignedBigInt(eventCreated, 'entry_fee'),
+          category: this.normalizeCategory(
+            this.readStr(eventCreated, 'category'),
+          ),
+          banner_url: this.normalizeNullableString(
+            this.readStr(eventCreated, 'banner_url'),
+            2048,
+          ),
+          is_finalized: this.readBool(eventCreated, 'is_finalized') ?? false,
         };
+      }
       case 'MatchAdded':
         return {
           match_id: this.readBigInt(base, 'match_id'),
@@ -357,12 +432,14 @@ export class IndexerService implements OnModuleInit {
           team_a: this.readStr(base, 'team_a'),
           team_b: this.readStr(base, 'team_b'),
           match_time: this.readNum(base, 'match_time'),
+          points_multiplier: this.readNum(base, 'points_multiplier'),
         };
       case 'UserJoinedEvent':
         return {
           user_address: this.readStr(base, 'user_address'),
           event_id: this.readBigInt(base, 'event_id'),
           joined_at: this.readNum(base, 'joined_at'),
+          entry_fee_paid: this.readUnsignedBigInt(base, 'entry_fee_paid'),
         };
       case 'PredictionSubmitted':
         return {
@@ -371,6 +448,8 @@ export class IndexerService implements OnModuleInit {
           event_id: this.readBigInt(base, 'event_id'),
           predictor: this.readStr(base, 'predictor'),
           predicted_outcome: this.readStr(base, 'predicted_outcome'),
+          predicted_home_score: this.readNum(base, 'predicted_home_score'),
+          predicted_away_score: this.readNum(base, 'predicted_away_score'),
           predicted_at: this.readNum(base, 'predicted_at'),
         };
       case 'MatchResultSubmitted':
@@ -380,12 +459,23 @@ export class IndexerService implements OnModuleInit {
           winning_team: this.readNum(base, 'winning_team'),
           submitted_by: this.readStr(base, 'submitted_by'),
           submitted_at: this.readNum(base, 'submitted_at'),
+          home_score: this.readNum(base, 'home_score'),
+          away_score: this.readNum(base, 'away_score'),
         };
       case 'WinnersVerified':
         return {
           event_id: this.readBigInt(base, 'event_id'),
           verified_at: this.readNum(base, 'verified_at'),
           winners: Array.isArray(base.winners) ? base.winners : [],
+        };
+      case 'EventFinalized':
+        return {
+          event_id: this.readBigInt(base, 'event_id'),
+          finalized_at: this.readNum(base, 'finalized_at'),
+          // leaderboard is passed through as-is; per-entry unwrapping happens
+          // inside handleEventFinalized to keep extractEventData free of
+          // business logic.
+          leaderboard: Array.isArray(base.leaderboard) ? base.leaderboard : [],
         };
       case 'EventCancelled':
         return {
@@ -493,7 +583,10 @@ export class IndexerService implements OnModuleInit {
         await this.handleMatchResultSubmitted(data);
         break;
       case 'WinnersVerified':
-        this.handleWinnersVerified(data);
+        void this.handleWinnersVerified(data);
+        break;
+      case 'EventFinalized':
+        await this.handleEventFinalized(data);
         break;
       case 'EventCancelled':
         await this.handleEventCancelled(data);
@@ -526,25 +619,46 @@ export class IndexerService implements OnModuleInit {
     });
     if (existing) return;
 
+    const createdAt = this.readUnixTimestamp(data, 'created_at') ?? new Date();
+    const startTime = this.readUnixTimestamp(data, 'start_time') ?? createdAt;
+    const parsedEndTime = this.readUnixTimestamp(data, 'end_time');
+    const endTime =
+      parsedEndTime && parsedEndTime.getTime() > startTime.getTime()
+        ? parsedEndTime
+        : new Date(startTime.getTime() + DEFAULT_EVENT_DURATION_SECONDS * 1000);
+
     const creatorEvent = this.creatorEventRepository.create({
       on_chain_event_id: onChainEventId,
       creator_address: this.readStr(data, 'creator'),
       title: this.readStr(data, 'title') || `Event ${onChainEventId}`,
       description: this.readStr(data, 'description'),
-      creation_fee_paid: this.readStr(data, 'creation_fee_paid') || '0',
-      on_chain_created_at: data.created_at
-        ? new Date(Number(data.created_at) * 1000)
-        : new Date(),
+      creation_fee_paid: this.readUnsignedBigInt(data, 'creation_fee_paid'),
+      on_chain_created_at: createdAt,
+      start_time: startTime,
+      end_time: endTime,
+      prize_pool: this.readUnsignedBigInt(data, 'prize_pool'),
+      reward_distribution: this.readNumberArray(data, 'reward_distribution'),
+      entry_fee: this.readUnsignedBigInt(data, 'entry_fee'),
+      category: this.normalizeCategory(this.readStr(data, 'category')),
+      banner_url: this.normalizeNullableString(
+        this.readStr(data, 'banner_url'),
+        2048,
+      ),
+      is_finalized: this.readBool(data, 'is_finalized') ?? false,
       is_active: true,
       is_cancelled: false,
       invite_code: this.readStr(data, 'invite_code') || null,
-      max_participants: Number(data.max_participants ?? 0),
+      max_participants: this.readNum(data, 'max_participants') ?? 0,
       participant_count: 0,
       match_count: 0,
     });
 
     await this.creatorEventRepository.save(creatorEvent);
     this.logger.log(`Indexed EventCreated: event_id=${onChainEventId}`);
+
+    // Trigger notification
+    await this.notificationGeneratorService.handleEventCreated(data);
+    this.broadcasterService.broadcastEventCreated(data);
   }
 
   private async handleMatchAdded(data: Record<string, unknown>): Promise<void> {
@@ -568,6 +682,16 @@ export class IndexerService implements OnModuleInit {
       return;
     }
 
+    let pointsMultiplier =
+      data.points_multiplier !== undefined ? Number(data.points_multiplier) : 1;
+    if (
+      pointsMultiplier < 1 ||
+      pointsMultiplier > 3 ||
+      isNaN(pointsMultiplier)
+    ) {
+      pointsMultiplier = 1;
+    }
+
     const match = this.matchRepository.create({
       on_chain_match_id: onChainMatchId,
       event,
@@ -576,10 +700,13 @@ export class IndexerService implements OnModuleInit {
       match_time: data.match_time
         ? new Date(Number(data.match_time) * 1000)
         : new Date(),
+      points_multiplier: pointsMultiplier,
       result_submitted: false,
       winning_team: null,
       submitted_by: null,
       submitted_at: null,
+      home_score: null,
+      away_score: null,
     });
 
     await this.matchRepository.save(match);
@@ -589,6 +716,10 @@ export class IndexerService implements OnModuleInit {
     this.logger.log(
       `Indexed MatchAdded: match_id=${onChainMatchId} event_id=${onChainEventId}`,
     );
+
+    // Trigger notification
+    await this.notificationGeneratorService.handleMatchAdded(data);
+    this.broadcasterService.broadcastMatchAdded(data);
   }
 
   private async handleUserJoinedEvent(
@@ -612,7 +743,22 @@ export class IndexerService implements OnModuleInit {
     }
 
     event.participant_count += 1;
+
+    const entryFeePaid = this.readUnsignedBigInt(data, 'entry_fee_paid');
+    if (BigInt(entryFeePaid) > 0n) {
+      event.prize_pool = (
+        BigInt(event.prize_pool ?? '0') + BigInt(entryFeePaid)
+      ).toString();
+      event.total_entry_fees_collected = (
+        BigInt(event.total_entry_fees_collected ?? '0') + BigInt(entryFeePaid)
+      ).toString();
+    }
+
     await this.creatorEventRepository.save(event);
+
+    // Trigger notification
+    await this.notificationGeneratorService.handleUserJoinedEvent(data);
+    this.broadcasterService.broadcastUserJoined(data);
   }
 
   private async handlePredictionSubmitted(
@@ -620,9 +766,8 @@ export class IndexerService implements OnModuleInit {
   ): Promise<void> {
     const matchId = Number(data.match_id);
     const predictorAddress = this.readStr(data, 'predictor');
-    const predictedOutcome = this.readStr(data, 'predicted_outcome');
 
-    if (!matchId || !predictorAddress || !predictedOutcome) {
+    if (!matchId || !predictorAddress) {
       this.logger.warn('PredictionSubmitted skipped: missing data');
       return;
     }
@@ -648,18 +793,6 @@ export class IndexerService implements OnModuleInit {
       return;
     }
 
-    const normalizedOutcome = predictedOutcome.toUpperCase();
-    if (
-      ![PredictedOutcome.TEAM_A, PredictedOutcome.TEAM_B, PredictedOutcome.DRAW]
-        .map((o) => o.toString())
-        .includes(normalizedOutcome)
-    ) {
-      this.logger.warn(
-        `PredictionSubmitted skipped: invalid outcome ${predictedOutcome}`,
-      );
-      return;
-    }
-
     const existing = await this.matchPredictionRepository.findOne({
       where: {
         match: { id: match.id },
@@ -668,10 +801,59 @@ export class IndexerService implements OnModuleInit {
     });
     if (existing) return;
 
+    const predictedHomeScore =
+      data.predicted_home_score !== undefined &&
+      data.predicted_home_score !== null
+        ? Number(data.predicted_home_score)
+        : null;
+    const predictedAwayScore =
+      data.predicted_away_score !== undefined &&
+      data.predicted_away_score !== null
+        ? Number(data.predicted_away_score)
+        : null;
+
+    let predictedOutcome: PredictedOutcome;
+    if (predictedHomeScore !== null && predictedAwayScore !== null) {
+      if (predictedHomeScore > predictedAwayScore) {
+        predictedOutcome = PredictedOutcome.TEAM_A;
+      } else if (predictedHomeScore < predictedAwayScore) {
+        predictedOutcome = PredictedOutcome.TEAM_B;
+      } else {
+        predictedOutcome = PredictedOutcome.DRAW;
+      }
+    } else {
+      const rawOutcome = this.readStr(data, 'predicted_outcome');
+      if (!rawOutcome) {
+        this.logger.warn(
+          'PredictionSubmitted skipped: no scoreline or predicted_outcome',
+        );
+        return;
+      }
+      const normalizedOutcome = rawOutcome.toUpperCase();
+      if (
+        ![
+          PredictedOutcome.TEAM_A,
+          PredictedOutcome.TEAM_B,
+          PredictedOutcome.DRAW,
+        ]
+          .map((o) => o.toString())
+          .includes(normalizedOutcome)
+      ) {
+        this.logger.warn(
+          `PredictionSubmitted skipped: invalid outcome ${rawOutcome}`,
+        );
+        return;
+      }
+      predictedOutcome = normalizedOutcome as PredictedOutcome;
+    }
+
     const prediction = this.matchPredictionRepository.create({
       match,
       user,
-      predicted_outcome: normalizedOutcome as PredictedOutcome,
+      predicted_outcome: predictedOutcome,
+      predicted_home_score: predictedHomeScore,
+      predicted_away_score: predictedAwayScore,
+      points_earned: 0,
       is_correct: null,
     });
 
@@ -679,6 +861,10 @@ export class IndexerService implements OnModuleInit {
     this.logger.log(
       `Indexed PredictionSubmitted: match=${matchId} user=${predictorAddress}`,
     );
+
+    // Trigger notification
+    await this.notificationGeneratorService.handlePredictionSubmitted(data);
+    this.broadcasterService.broadcastPredictionSubmitted(data);
   }
 
   private async handleMatchResultSubmitted(
@@ -723,26 +909,64 @@ export class IndexerService implements OnModuleInit {
     match.submitted_at = data.submitted_at
       ? new Date(Number(data.submitted_at) * 1000)
       : new Date();
+    match.home_score =
+      data.home_score !== undefined ? Number(data.home_score) : null;
+    match.away_score =
+      data.away_score !== undefined ? Number(data.away_score) : null;
 
     await this.matchRepository.save(match);
 
-    await this.gradePredictions(match.id, winningTeam);
+    await this.gradePredictions(match);
     this.logger.log(
       `Indexed MatchResultSubmitted: match=${matchId} winner=${winningTeam}`,
     );
+
+    // Trigger notification
+    await this.notificationGeneratorService.handleMatchResultSubmitted(data);
+    this.broadcasterService.broadcastMatchResolved(data);
   }
 
-  private async gradePredictions(
-    matchId: string,
-    winningTeam: WinningTeam,
-  ): Promise<void> {
+  private async gradePredictions(match: Match): Promise<void> {
     const predictions = await this.matchPredictionRepository.find({
-      where: { match: { id: matchId } },
+      where: { match: { id: match.id } },
     });
 
+    const { home_score, away_score, winning_team, points_multiplier } = match;
+
     for (const prediction of predictions) {
-      prediction.is_correct =
-        String(prediction.predicted_outcome) === String(winningTeam);
+      const outcomeCorrect =
+        String(prediction.predicted_outcome) === String(winning_team);
+      prediction.is_correct = outcomeCorrect;
+
+      if (!outcomeCorrect) {
+        prediction.points_earned = 0;
+        continue;
+      }
+
+      if (
+        home_score !== null &&
+        away_score !== null &&
+        prediction.predicted_home_score !== null &&
+        prediction.predicted_away_score !== null
+      ) {
+        const exactScore =
+          prediction.predicted_home_score === home_score &&
+          prediction.predicted_away_score === away_score;
+
+        const goalDiffCorrect =
+          prediction.predicted_home_score - prediction.predicted_away_score ===
+          home_score - away_score;
+
+        if (exactScore) {
+          prediction.points_earned = 4 * points_multiplier;
+        } else if (goalDiffCorrect) {
+          prediction.points_earned = 3 * points_multiplier;
+        } else {
+          prediction.points_earned = 1 * points_multiplier;
+        }
+      } else {
+        prediction.points_earned = 1 * points_multiplier;
+      }
     }
 
     if (predictions.length > 0) {
@@ -750,10 +974,159 @@ export class IndexerService implements OnModuleInit {
     }
   }
 
-  private handleWinnersVerified(data: Record<string, unknown>): void {
+  private async handleWinnersVerified(
+    data: Record<string, unknown>,
+  ): Promise<void> {
     this.logger.log(
       `WinnersVerified event received for event_id=${String(data.event_id)}`,
     );
+
+    // Trigger notification
+    await this.notificationGeneratorService.handleWinnersVerified(data);
+    this.broadcasterService.broadcastWinnersVerified(data);
+  }
+
+  private async handleEventFinalized(
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    const onChainEventId = Number(data.event_id);
+    if (!onChainEventId) {
+      this.logger.warn('EventFinalized skipped: missing event_id');
+      return;
+    }
+
+    const event = await this.creatorEventRepository.findOne({
+      where: { on_chain_event_id: onChainEventId },
+    });
+    if (!event) {
+      this.logger.warn(
+        `EventFinalized skipped: event ${onChainEventId} not found in DB`,
+      );
+      return;
+    }
+
+    const eventIdStr = String(onChainEventId);
+
+    // Idempotency guard: if any payout rows already exist for this event the
+    // entire EventFinalized payload has already been processed (payouts are
+    // created atomically per entry in the loop below). An early exit here is
+    // safe because the creation path uses the same event_id string key.
+    const existingCount = await this.creatorEventPayoutRepository.count({
+      where: { event_id: eventIdStr },
+    });
+    if (existingCount > 0) {
+      this.logger.log(
+        `EventFinalized idempotent skip: payouts already exist for event ${onChainEventId}`,
+      );
+      return;
+    }
+
+    // Mark finalized in DB in case this event was finalized by a third party
+    // (contract is permissionless) and the finalizer service has not yet run.
+    if (!event.is_finalized) {
+      event.is_finalized = true;
+      await this.creatorEventRepository.save(event);
+    }
+
+    const leaderboard: unknown[] = Array.isArray(data.leaderboard)
+      ? data.leaderboard
+      : [];
+
+    let successCount = 0;
+    for (const rawEntry of leaderboard) {
+      try {
+        await this.processLeaderboardEntry(eventIdStr, rawEntry);
+        successCount++;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Unknown error';
+        this.logger.warn(
+          `EventFinalized: failed to persist entry for event ${onChainEventId}: ${message}`,
+        );
+      }
+    }
+
+    this.logger.log(
+      `Indexed EventFinalized: event_id=${onChainEventId} entries=${successCount}/${leaderboard.length}`,
+    );
+
+    this.broadcasterService.broadcastEventFinalized(data);
+  }
+
+  /**
+   * Upserts one CreatorEventLeaderboardEntry and creates the linked
+   * CreatorEventPayout for a single participant in an EventFinalized payload.
+   *
+   * Time complexity: O(1) per entry — two indexed point-lookups + two writes.
+   * Space complexity: O(1).
+   */
+  private async processLeaderboardEntry(
+    eventIdStr: string,
+    raw: unknown,
+  ): Promise<void> {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
+
+    const entry = raw as Record<string, unknown>;
+    const userAddress = this.readStr(entry, 'address');
+    const rank = this.readNum(entry, 'rank');
+    const payoutAmountStroops = this.readUnsignedBigInt(entry, 'payout_amount');
+    const totalPredictions = this.readNum(entry, 'total_predictions') ?? 0;
+    const correctPredictions = this.readNum(entry, 'correct_predictions') ?? 0;
+
+    if (!userAddress || rank === null) {
+      this.logger.warn(
+        `processLeaderboardEntry: skipping entry with missing address or rank`,
+      );
+      return;
+    }
+
+    const accuracyPercentage =
+      totalPredictions > 0
+        ? Math.round((correctPredictions / totalPredictions) * 10000) / 100
+        : 0;
+
+    const isWinner = BigInt(payoutAmountStroops) > 0n;
+
+    // Upsert leaderboard entry — the contract is the source of truth for final
+    // rankings, so we overwrite any pre-existing DB values.
+    let leaderboardEntry =
+      await this.creatorEventLeaderboardEntryRepository.findOne({
+        where: { event_id: eventIdStr, user_address: userAddress },
+      });
+
+    if (!leaderboardEntry) {
+      leaderboardEntry = this.creatorEventLeaderboardEntryRepository.create({
+        event_id: eventIdStr,
+        user_address: userAddress,
+        rank,
+        total_predictions: totalPredictions,
+        correct_predictions: correctPredictions,
+        accuracy_percentage: accuracyPercentage,
+        is_winner: isWinner,
+        completion_time: null,
+      });
+    } else {
+      leaderboardEntry.rank = rank;
+      leaderboardEntry.total_predictions = totalPredictions;
+      leaderboardEntry.correct_predictions = correctPredictions;
+      leaderboardEntry.accuracy_percentage = accuracyPercentage;
+      leaderboardEntry.is_winner = isWinner;
+    }
+
+    leaderboardEntry =
+      await this.creatorEventLeaderboardEntryRepository.save(leaderboardEntry);
+
+    // Create the payout row linked to the leaderboard entry.
+    // The idempotency check at the top of handleEventFinalized ensures we only
+    // reach this point once per event, so we use a plain insert here.
+    const payout = this.creatorEventPayoutRepository.create({
+      event_id: eventIdStr,
+      user_address: userAddress,
+      payout_amount_stroops: payoutAmountStroops,
+      is_claimed: false,
+      leaderboard_entry_id: leaderboardEntry.id,
+    });
+
+    await this.creatorEventPayoutRepository.save(payout);
   }
 
   private async handleEventCancelled(
@@ -779,6 +1152,10 @@ export class IndexerService implements OnModuleInit {
     event.is_cancelled = true;
     await this.creatorEventRepository.save(event);
     this.logger.log(`Indexed EventCancelled: event_id=${onChainEventId}`);
+
+    // Trigger notification
+    await this.notificationGeneratorService.handleEventCancelled(data);
+    this.broadcasterService.broadcastEventCancelled(data);
   }
 
   private async handleFeeUpdated(data: Record<string, unknown>): Promise<void> {
@@ -1072,11 +1449,187 @@ export class IndexerService implements OnModuleInit {
     await this.checkpointRepository.upsert({ key, value, meta: null }, ['key']);
   }
 
+  private readEventCreatedPayload(rawValue: unknown): Record<string, unknown> {
+    const base =
+      rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue)
+        ? { ...(rawValue as Record<string, unknown>) }
+        : {};
+    const positional = this.readPositionalValues(rawValue);
+
+    const readValue = (key: string, positionalIndex: number): unknown => {
+      if (base[key] !== undefined) return base[key];
+      return positional[positionalIndex];
+    };
+
+    if (positional.length > 0 && positional.length <= 3) {
+      return {
+        ...base,
+        event_id: readValue('event_id', 0),
+        creator: readValue('creator', 1),
+        invite_code: readValue('invite_code', 2),
+      };
+    }
+
+    if (positional.length > 0 && positional.length <= 8) {
+      return {
+        ...base,
+        event_id: readValue('event_id', 0),
+        creator: readValue('creator', 1),
+        title: readValue('title', 2),
+        description: readValue('description', 3),
+        creation_fee_paid: readValue('creation_fee_paid', 4),
+        created_at: readValue('created_at', 5),
+        invite_code: readValue('invite_code', 6),
+        max_participants: readValue('max_participants', 7),
+      };
+    }
+
+    return {
+      ...base,
+      event_id: readValue('event_id', 0),
+      creator: readValue('creator', 1),
+      title: readValue('title', 2),
+      description: readValue('description', 3),
+      creation_fee_paid: readValue('creation_fee_paid', 4),
+      created_at: readValue('created_at', 5),
+      start_time: readValue('start_time', 6),
+      end_time: readValue('end_time', 7),
+      invite_code: readValue('invite_code', 8),
+      max_participants: readValue('max_participants', 9),
+      prize_pool: readValue('prize_pool', 10),
+      reward_distribution: readValue('reward_distribution', 11),
+      entry_fee: readValue('entry_fee', 12),
+      category: readValue('category', 13),
+      banner_url: readValue('banner_url', 14),
+      is_finalized: readValue('is_finalized', 15),
+    };
+  }
+
+  private readPositionalValues(rawValue: unknown): unknown[] {
+    const value = this.unwrapIndexerValue(rawValue);
+    if (Array.isArray(value)) return value;
+    if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      if (Array.isArray(record.vec)) return record.vec;
+      if (Array.isArray(record.values)) return record.values;
+    }
+    return [];
+  }
+
+  private readBool(data: Record<string, unknown>, key: string): boolean | null {
+    const val = this.unwrapIndexerValue(data[key]);
+    if (val === null || val === undefined) return null;
+    if (typeof val === 'boolean') return val;
+    if (typeof val === 'number') {
+      if (val === 1) return true;
+      if (val === 0) return false;
+      return null;
+    }
+    if (typeof val === 'bigint') {
+      if (val === 1n) return true;
+      if (val === 0n) return false;
+      return null;
+    }
+    if (typeof val === 'string') {
+      const normalized = val.trim().toLowerCase();
+      if (['true', '1', 'yes'].includes(normalized)) return true;
+      if (['false', '0', 'no'].includes(normalized)) return false;
+    }
+    return null;
+  }
+
+  private readNumberArray(
+    data: Record<string, unknown>,
+    key: string,
+  ): number[] {
+    const unwrapped = this.unwrapIndexerValue(data[key]);
+    const val =
+      unwrapped &&
+      typeof unwrapped === 'object' &&
+      !Array.isArray(unwrapped) &&
+      Array.isArray((unwrapped as Record<string, unknown>).vec)
+        ? (unwrapped as Record<string, unknown>).vec
+        : unwrapped;
+
+    if (Array.isArray(val)) return this.normalizeNumberArray(val);
+    if (typeof val === 'string') {
+      const trimmed = val.trim();
+      if (!trimmed) return [];
+
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        if (Array.isArray(parsed)) return this.normalizeNumberArray(parsed);
+      } catch {
+        // Fall through to comma-separated parsing for legacy/manual payloads.
+      }
+
+      return this.normalizeNumberArray(trimmed.split(','));
+    }
+
+    return [];
+  }
+
+  private normalizeNumberArray(values: unknown[]): number[] {
+    return values
+      .map((item) => this.toNumber(item))
+      .filter(
+        (item): item is number =>
+          item !== null && Number.isSafeInteger(item) && item >= 0,
+      );
+  }
+
+  private readUnixTimestamp(
+    data: Record<string, unknown>,
+    key: string,
+  ): Date | null {
+    const seconds = this.readNum(data, key);
+    if (seconds === null || seconds <= 0 || !Number.isSafeInteger(seconds)) {
+      return null;
+    }
+
+    const milliseconds = seconds * 1000;
+    if (!Number.isFinite(milliseconds)) return null;
+
+    const date = new Date(milliseconds);
+    return Number.isFinite(date.getTime()) ? date : null;
+  }
+
+  private readUnsignedBigInt(
+    data: Record<string, unknown>,
+    key: string,
+  ): string {
+    const normalized = this.readBigInt(data, key);
+    return normalized.startsWith('-') ? '0' : normalized;
+  }
+
+  private normalizeCategory(category: string): string {
+    const normalized = category
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 100)
+      .replace(/^-+|-+$/g, '');
+
+    return normalized || DEFAULT_CREATOR_EVENT_CATEGORY;
+  }
+
+  private normalizeNullableString(
+    value: string,
+    maxLength: number,
+  ): string | null {
+    const normalized = value.trim();
+    if (!normalized) return null;
+    return normalized.slice(0, maxLength);
+  }
+
   private readStr(data: Record<string, unknown>, key: string): string {
-    const val = data[key];
+    const val = this.unwrapIndexerValue(data[key]);
     if (val === null || val === undefined) return '';
     if (typeof val === 'string') return val;
     if (typeof val === 'number' || typeof val === 'boolean') return String(val);
+    if (typeof val === 'bigint' || typeof val === 'symbol') return String(val);
     if (typeof val === 'object') {
       try {
         return JSON.stringify(val);
@@ -1084,42 +1637,78 @@ export class IndexerService implements OnModuleInit {
         return '';
       }
     }
-    if (typeof val === 'symbol' || typeof val === 'bigint') {
-      return String(val);
-    }
     return '';
   }
 
   private readNum(data: Record<string, unknown>, key: string): number | null {
-    const val = data[key];
-    if (typeof val === 'number' && Number.isFinite(val)) return val;
-    if (typeof val === 'string') {
-      const n = Number(val);
-      return Number.isFinite(n) ? n : null;
-    }
-    return null;
+    return this.toNumber(data[key]);
   }
 
   private readBigInt(data: Record<string, unknown>, key: string): string {
-    const val = data[key];
-    if (val == null) return '0';
+    const val = this.unwrapIndexerValue(data[key]);
+    if (val === null || val === undefined || val === '') return '0';
+
+    if (typeof val === 'bigint') return val.toString();
+    if (typeof val === 'number') {
+      if (!Number.isSafeInteger(val)) return '0';
+      return BigInt(val).toString();
+    }
     if (typeof val === 'string') {
+      const trimmed = val.trim();
+      if (!trimmed) return '0';
+
       try {
-        return BigInt(val).toString();
+        return BigInt(trimmed).toString();
       } catch {
         return '0';
       }
     }
-    if (typeof val === 'number') return BigInt(val).toString();
+
     return '0';
   }
 
   private toNumber(value: unknown): number | null {
-    if (typeof value === 'number' && Number.isFinite(value)) return value;
-    if (typeof value === 'string') {
-      const parsed = Number(value);
+    const val = this.unwrapIndexerValue(value);
+    if (typeof val === 'number' && Number.isFinite(val)) return val;
+    if (typeof val === 'bigint') {
+      const parsed = Number(val);
+      return Number.isSafeInteger(parsed) ? parsed : null;
+    }
+    if (typeof val === 'string') {
+      const trimmed = val.trim();
+      if (!trimmed) return null;
+      const parsed = Number(trimmed);
       return Number.isFinite(parsed) ? parsed : null;
     }
     return null;
+  }
+
+  private unwrapIndexerValue(value: unknown): unknown {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return value;
+    }
+
+    const record = value as Record<string, unknown>;
+    if ('value' in record) return this.unwrapIndexerValue(record.value);
+
+    for (const key of [
+      'symbol',
+      'sym',
+      'string',
+      'str',
+      'address',
+      'u64',
+      'i64',
+      'u32',
+      'i32',
+      'u128',
+      'i128',
+      'bool',
+      'boolean',
+    ]) {
+      if (key in record) return this.unwrapIndexerValue(record[key]);
+    }
+
+    return value;
   }
 }

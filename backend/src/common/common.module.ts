@@ -2,7 +2,12 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { FilteringService } from './filtering.service';
+import { IdempotencyKey } from './idempotency/idempotency-key.entity';
+import { IdempotencyService } from './idempotency/idempotency.service';
+import { IdempotencyInterceptor } from './idempotency/idempotency.interceptor';
+import { OptionalIdempotencyInterceptor } from './idempotency/optional-idempotency.interceptor';
 
 @Module({
   imports: [
@@ -17,8 +22,20 @@ import { FilteringService } from './filtering.service';
         },
       }),
     }),
+    TypeOrmModule.forFeature([IdempotencyKey]),
   ],
-  providers: [FilteringService],
-  exports: [JwtModule, FilteringService],
+  providers: [
+    FilteringService,
+    IdempotencyService,
+    IdempotencyInterceptor,
+    OptionalIdempotencyInterceptor,
+  ],
+  exports: [
+    JwtModule,
+    FilteringService,
+    IdempotencyService,
+    IdempotencyInterceptor,
+    OptionalIdempotencyInterceptor,
+  ],
 })
 export class CommonModule {}

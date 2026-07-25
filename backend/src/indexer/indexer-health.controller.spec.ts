@@ -1,6 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { ConfigService } from '@nestjs/config';
 import { IndexerHealthController } from './indexer-health.controller';
 import { IndexerHealthService } from './health.service';
+import { ReconciliationService } from './reconciliation.service';
 
 describe('IndexerHealthController', () => {
   let controller: IndexerHealthController;
@@ -13,6 +15,9 @@ describe('IndexerHealthController', () => {
       | 'triggerManualSync'
     >
   >;
+  let reconciliationService: jest.Mocked<
+    Pick<ReconciliationService, 'getStatus' | 'getCheckpointForContract'>
+  >;
 
   beforeEach(async () => {
     healthService = {
@@ -22,9 +27,31 @@ describe('IndexerHealthController', () => {
       triggerManualSync: jest.fn(),
     };
 
+    reconciliationService = {
+      getStatus: jest.fn().mockReturnValue({
+        enabled: true,
+        is_running: false,
+        last_run_at: null,
+        last_backfill_count: 0,
+      }),
+      getCheckpointForContract: jest.fn().mockResolvedValue(null),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       controllers: [IndexerHealthController],
-      providers: [{ provide: IndexerHealthService, useValue: healthService }],
+      providers: [
+        { provide: IndexerHealthService, useValue: healthService },
+        { provide: ReconciliationService, useValue: reconciliationService },
+        {
+          provide: ConfigService,
+          useValue: {
+            get: jest.fn((key: string) => {
+              if (key === 'SOROBAN_CONTRACT_ID') return 'contract-123';
+              return undefined;
+            }),
+          },
+        },
+      ],
     }).compile();
 
     controller = module.get<IndexerHealthController>(IndexerHealthController);

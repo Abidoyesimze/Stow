@@ -5,13 +5,16 @@ use soroban_sdk::{token::Client as TokenClient, Address, Env};
 pub enum TokenError {
     InsufficientBalance,
     TransferFailed,
+    #[allow(dead_code)]
     UnauthorizedTransfer,
+    #[allow(dead_code)]
     InvalidTokenAddress,
 }
 
 /// XLM token helper functions for the CreatorEventManager contract
 pub struct TokenHelper;
 
+#[allow(dead_code)]
 impl TokenHelper {
     /// Create a new token client for the given token address
     pub fn new_client<'a>(env: &'a Env, token_address: &'a Address) -> TokenClient<'a> {

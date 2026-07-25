@@ -1,8 +1,9 @@
-use soroban_sdk::{Address, Env, Symbol, Vec};
+use soroban_sdk::{token::Client as TokenClient, Address, Env, Symbol, Vec};
 
 use crate::admin;
 use crate::storage::{self};
 use crate::storage_types::{DataKey, Event, Match, Prediction};
+use crate::token::TokenHelper;
 
 /// Errors returned by event joining and prediction operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,11 +22,12 @@ pub enum PredictionError {
     AlreadyPredicted = 11,
     PredictionNotFound = 12,
     Overflow = 13,
+    InsufficientEntryFeeBalance = 14,
 }
 
 fn emit_user_joined(env: &Env, event_id: u64, user: &Address) {
     env.events().publish(
-        (Symbol::new(env, "event"), Symbol::new(env, "joined")),
+        (Symbol::new(env, "participant"), Symbol::new(env, "joined")),
         (event_id, user.clone()),
     );
 }
@@ -51,13 +53,6 @@ fn emit_prediction_submitted(
             predicted_outcome.clone(),
         ),
     );
-}
-
-fn is_valid_outcome(env: &Env, predicted_outcome: &Symbol) -> bool {
-    let team_a = Symbol::new(env, crate::storage_types::OUTCOME_TEAM_A);
-    let team_b = Symbol::new(env, crate::storage_types::OUTCOME_TEAM_B);
-    let draw = Symbol::new(env, crate::storage_types::OUTCOME_DRAW);
-    *predicted_outcome == team_a || *predicted_outcome == team_b || *predicted_outcome == draw
 }
 
 fn user_already_predicted_match(
@@ -109,6 +104,33 @@ pub fn join_event(env: &Env, user: Address, invite_code: Symbol) -> Result<(), P
         return Err(PredictionError::EventFull);
     }
 
+    // Collect the entry fee (if any) before mutating any state, so a user who
+    // cannot cover the fee is rejected without a partial join.
+    let entry_fee = event.entry_fee;
+    if entry_fee > 0 {
+        let xlm_token = admin::get_xlm_token(env).unwrap_or_else(|| panic!("not_initialized"));
+
+        if !TokenHelper::has_sufficient_balance(env, &xlm_token, &user, entry_fee) {
+            return Err(PredictionError::InsufficientEntryFeeBalance);
+        }
+
+        // Compute the grown pool before moving funds so an (effectively
+        // unreachable) overflow aborts before any transfer occurs.
+        let new_prize_pool = event
+            .prize_pool
+            .checked_add(entry_fee)
+            .ok_or(PredictionError::Overflow)?;
+
+        // Escrow the fee from the user into the contract address.
+        TokenClient::new(env, &xlm_token).transfer(
+            &user,
+            &env.current_contract_address(),
+            &entry_fee,
+        );
+
+        event.prize_pool = new_prize_pool;
+    }
+
     storage::add_event_participant(env, event_id, &user);
     event.participant_count = event
         .participant_count
@@ -122,11 +144,15 @@ pub fn join_event(env: &Env, user: Address, invite_code: Symbol) -> Result<(), P
 }
 
 /// Submit a prediction for a match inside a joined event.
+///
+/// Takes a predicted scoreline (home_score, away_score) and derives the
+/// predicted outcome (1X2 result) from it.
 pub fn submit_prediction(
     env: &Env,
     predictor: Address,
     match_id: u64,
-    predicted_outcome: Symbol,
+    predicted_home_score: u32,
+    predicted_away_score: u32,
 ) -> Result<u64, PredictionError> {
     predictor.require_auth();
 
@@ -156,10 +182,6 @@ pub fn submit_prediction(
         return Err(PredictionError::MatchStarted);
     }
 
-    if !is_valid_outcome(env, &predicted_outcome) {
-        return Err(PredictionError::InvalidOutcome);
-    }
-
     if user_already_predicted_match(env, &predictor, event.event_id, match_id) {
         return Err(PredictionError::AlreadyPredicted);
     }
@@ -170,8 +192,10 @@ pub fn submit_prediction(
         match_id,
         event.event_id,
         predictor.clone(),
-        predicted_outcome.clone(),
+        predicted_home_score,
+        predicted_away_score,
         now,
+        env,
     );
 
     storage::set_prediction(env, prediction_id, &prediction);
@@ -184,7 +208,7 @@ pub fn submit_prediction(
         match_id,
         event.event_id,
         &predictor,
-        &predicted_outcome,
+        &prediction.predicted_outcome,
     );
 
     Ok(prediction_id)
@@ -232,6 +256,28 @@ pub fn get_user_predictions(env: &Env, user: Address, event_id: u64) -> Vec<Pred
             } else {
                 break;
             }
+        }
+    }
+
+    predictions
+}
+
+/// Retrieve every prediction submitted for a specific match.
+///
+/// Reads the `MatchPredictions(match_id)` index of prediction IDs, loads each
+/// `Prediction` struct, and returns them as a `Vec<Prediction>` in submission
+/// order (the order in which predictions were placed).
+///
+/// Returns an empty `Vec` when the match has no predictions — including for a
+/// `match_id` that does not exist, since no prediction index is stored for it.
+/// Useful for analytics and displaying a match's full prediction distribution.
+pub fn get_match_predictions(env: &Env, match_id: u64) -> Vec<Prediction> {
+    let prediction_ids = storage::get_match_predictions(env, match_id);
+
+    let mut predictions: Vec<Prediction> = Vec::new(env);
+    for prediction_id in prediction_ids.iter() {
+        if let Ok(prediction) = storage::get_prediction(env, prediction_id) {
+            predictions.push_back(prediction);
         }
     }
 

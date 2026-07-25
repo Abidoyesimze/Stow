@@ -12,6 +12,7 @@ import {
 
 export interface SorobanPredictionResult {
   tx_hash: string;
+  payout_amount_stroops?: string;
 }
 
 export interface SorobanCreateMarketResult {
@@ -42,6 +43,10 @@ export interface SorobanEventsResponse {
 
 export interface SorobanDisputeResult {
   dispute_id: string;
+  tx_hash: string;
+}
+
+export interface SorobanFinalizeEventResult {
   tx_hash: string;
 }
 
@@ -366,8 +371,14 @@ export class SorobanService {
         .padEnd(64, '0')
         .slice(0, 64);
 
-      this.logger.log(`claimPayout submitted: tx_hash=${tx_hash}`);
-      return Promise.resolve({ tx_hash });
+      // Calculate payout amount (in real implementation, this would come from contract)
+      // For stub: simulate a 1.5x return on stake
+      const payout_amount_stroops = '15000000'; // 1.5 XLM in stroops
+
+      this.logger.log(
+        `claimPayout submitted: tx_hash=${tx_hash} payout=${payout_amount_stroops}`,
+      );
+      return Promise.resolve({ tx_hash, payout_amount_stroops });
     });
   }
 
@@ -442,6 +453,137 @@ export class SorobanService {
 
       this.logger.log(`resolveDispute submitted: tx_hash=${tx_hash}`);
       return Promise.resolve({ dispute_id: disputeId, tx_hash });
+    });
+  }
+
+  /**
+   * Finalize an event on the Soroban contract.
+   * Permissionless operation that can be called once event.has_ended() is true
+   * and all matches have results.
+   *
+   * Invokes: finalize_event(event_id)
+   * Errors: EventNotEnded, MatchesNotResolved, EventAlreadyFinalized
+   */
+  async finalizeEvent(
+    onChainEventId: number,
+  ): Promise<SorobanFinalizeEventResult> {
+    return this.withSorobanErrorHandling('finalizeEvent', async () => {
+      this.logger.log(`Soroban finalizeEvent: event_id=${onChainEventId}`);
+
+      // Verify server keypair is valid
+      const serverKeypair = Keypair.fromSecret(this.serverSecretKey);
+      this.logger.debug(
+        `finalizeEvent signed by server: ${serverKeypair.publicKey()}`,
+      );
+
+      // Get server account for transaction
+      const serverAccount = await this.rpcServer.getAccount(
+        serverKeypair.publicKey(),
+      );
+
+      const contract = new Contract(this.contractId);
+
+      // Build the invocation
+      const tx = new TransactionBuilder(serverAccount, {
+        fee: '10000',
+        networkPassphrase:
+          this.network === 'testnet' ? Networks.TESTNET : Networks.PUBLIC,
+      })
+        .addOperation(
+          contract.call(
+            'finalize_event',
+            nativeToScVal(BigInt(onChainEventId), { type: 'u64' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      // Simulate
+      const simulation = await this.rpcServer.simulateTransaction(tx);
+      if (SorobanRpc.Api.isSimulationError(simulation)) {
+        throw new Error(`Simulation failed: ${simulation.error}`);
+      }
+
+      // Assemble and Sign
+      const assembledTx = SorobanRpc.assembleTransaction(
+        tx,
+        simulation,
+      ).build();
+      assembledTx.sign(serverKeypair);
+
+      // Submit
+      const response = await this.rpcServer.sendTransaction(assembledTx);
+      if (response.status === 'ERROR') {
+        throw new Error(
+          `Transaction submission failed: ${JSON.stringify(response.errorResult)}`,
+        );
+      }
+
+      this.logger.log(`finalizeEvent submitted: tx_hash=${response.hash}`);
+
+      // Wait for completion
+      let statusResponse = await this.rpcServer.getTransaction(response.hash);
+      let attempts = 0;
+      while (
+        statusResponse.status ===
+          SorobanRpc.Api.GetTransactionStatus.NOT_FOUND &&
+        attempts < 10
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        statusResponse = await this.rpcServer.getTransaction(response.hash);
+        attempts++;
+      }
+
+      if (
+        statusResponse.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS
+      ) {
+        this.logger.log(
+          `finalizeEvent transaction confirmed: tx_hash=${response.hash}`,
+        );
+        return { tx_hash: response.hash };
+      } else {
+        throw new Error(
+          `Transaction failed with status ${statusResponse.status}`,
+        );
+      }
+    });
+  }
+
+  async pauseMarket(marketOnChainId: string): Promise<{ tx_hash: string }> {
+    return this.withSorobanErrorHandling('pauseMarket', () => {
+      this.logger.log(`Soroban pauseMarket: market=${marketOnChainId}`);
+
+      const serverKeypair = Keypair.fromSecret(this.serverSecretKey);
+      this.logger.debug(
+        `pauseMarket signed by admin: ${serverKeypair.publicKey()}`,
+      );
+
+      const tx_hash = Buffer.from(`pause:${marketOnChainId}:${Date.now()}`)
+        .toString('hex')
+        .padEnd(64, '0')
+        .slice(0, 64);
+
+      this.logger.log(`pauseMarket submitted: tx_hash=${tx_hash}`);
+      return Promise.resolve({ tx_hash });
+    });
+  }
+
+  async resumeMarket(marketOnChainId: string): Promise<{ tx_hash: string }> {
+    return this.withSorobanErrorHandling('resumeMarket', () => {
+      this.logger.log(`Soroban resumeMarket: market=${marketOnChainId}`);
+
+      const serverKeypair = Keypair.fromSecret(this.serverSecretKey);
+      this.logger.debug(
+        `resumeMarket signed by admin: ${serverKeypair.publicKey()}`,
+      );
+
+      const tx_hash = Buffer.from(`resume:${marketOnChainId}:${Date.now()}`)
+        .toString('hex')
+        .padEnd(64, '0')
+        .slice(0, 64);
+
+      this.logger.log(`resumeMarket submitted: tx_hash=${tx_hash}`);
+      return Promise.resolve({ tx_hash });
     });
   }
 

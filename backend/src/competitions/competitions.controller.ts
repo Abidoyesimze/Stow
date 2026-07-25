@@ -2,6 +2,7 @@ import {
   Controller,
   Post,
   Get,
+  Patch,
   Delete,
   Param,
   Body,
@@ -20,6 +21,7 @@ import {
 } from '@nestjs/swagger';
 import { CompetitionsService } from './competitions.service';
 import { CreateCompetitionDto } from './dto/create-competition.dto';
+import { UpdateCompetitionDto } from './dto/update-competition.dto';
 import {
   ListCompetitionsDto,
   PaginatedCompetitionsResponse,
@@ -70,6 +72,29 @@ export class CompetitionsController {
     @Query() query: ListCompetitionsDto,
   ): Promise<PaginatedCompetitionsResponse> {
     return this.competitionsService.list(query);
+  }
+
+  @Patch(':id')
+  @UseGuards(BanGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Update a competition before it starts (creator only)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Competition updated',
+    type: Competition,
+  })
+  @ApiResponse({ status: 400, description: 'Competition already started' })
+  @ApiResponse({ status: 403, description: 'Only the creator can update' })
+  @ApiResponse({ status: 404, description: 'Competition not found' })
+  async updateCompetition(
+    @Param('id') id: string,
+    @Body() dto: UpdateCompetitionDto,
+    @CurrentUser() user: User,
+  ): Promise<Competition> {
+    return this.competitionsService.update(id, dto, user.id);
   }
 
   @Get(':id')

@@ -7,6 +7,7 @@ import {
   ListPendingMatchesQueryDto,
   PendingMatchResponse,
   PaginatedPendingMatchesResponse,
+  OracleStatsResponse,
 } from './dto/list-pending-matches-query.dto';
 
 @Injectable()
@@ -75,5 +76,30 @@ export class OracleService {
     });
 
     return { data, total, page, limit };
+  }
+
+  async getStats(): Promise<OracleStatsResponse> {
+    const now = new Date();
+    const overdueThreshold = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+    const [pending, resolved, overdue] = await Promise.all([
+      this.matchRepository
+        .createQueryBuilder('m')
+        .where('m.match_time < :now', { now })
+        .andWhere('m.result_submitted = :submitted', { submitted: false })
+        .andWhere('m.match_time >= :threshold', { threshold: overdueThreshold })
+        .getCount(),
+      this.matchRepository
+        .createQueryBuilder('m')
+        .where('m.result_submitted = :submitted', { submitted: true })
+        .getCount(),
+      this.matchRepository
+        .createQueryBuilder('m')
+        .where('m.match_time < :threshold', { threshold: overdueThreshold })
+        .andWhere('m.result_submitted = :submitted', { submitted: false })
+        .getCount(),
+    ]);
+
+    return { pending, resolved, overdue };
   }
 }

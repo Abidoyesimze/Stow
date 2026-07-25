@@ -1,4 +1,4 @@
-use soroban_sdk::{symbol_short, Address, Env};
+use soroban_sdk::{symbol_short, Address, Env, Vec};
 
 use crate::config;
 use crate::errors::InsightArenaError;
@@ -11,6 +11,14 @@ fn bump_dispute(env: &Env, market_id: u64) {
     config::extend_market_ttl(env, market_id);
     env.storage().persistent().extend_ttl(
         &DataKey::Dispute(market_id),
+        config::PERSISTENT_THRESHOLD,
+        config::PERSISTENT_BUMP,
+    );
+}
+
+fn bump_active_dispute_list(env: &Env) {
+    env.storage().persistent().extend_ttl(
+        &DataKey::ActiveDisputeList,
         config::PERSISTENT_THRESHOLD,
         config::PERSISTENT_BUMP,
     );
@@ -87,7 +95,26 @@ pub fn raise_dispute(
     env.storage()
         .persistent()
         .set(&DataKey::Dispute(market_id), &dispute);
+
+    // Add market_id to active dispute list
+    let mut active_list: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::ActiveDisputeList)
+        .unwrap_or_else(|| Vec::new(&env));
+    if !active_list.contains(&market_id) {
+        active_list.push_back(market_id);
+    }
+    env.storage()
+        .persistent()
+        .set(&DataKey::ActiveDisputeList, &active_list);
+    bump_active_dispute_list(&env);
+
     bump_dispute(&env, market_id);
+
+    // Increment open dispute count
+    let current_count = get_open_dispute_count(&env);
+    set_open_dispute_count(&env, current_count + 1);
 
     // Update creator's dispute count and reputation
     reputation::on_dispute_raised(&env, &market.creator);
@@ -129,11 +156,64 @@ pub fn resolve_dispute(
         escrow::add_to_treasury_balance(&env, dispute.bond);
     }
 
+    // Remove market_id from active dispute list
+    let active_list: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::ActiveDisputeList)
+        .unwrap_or_else(|| Vec::new(&env));
+    let mut new_list: Vec<u64> = Vec::new(&env);
+    for id in active_list.iter() {
+        if id != market_id {
+            new_list.push_back(id);
+        }
+    }
+    env.storage()
+        .persistent()
+        .set(&DataKey::ActiveDisputeList, &new_list);
+    bump_active_dispute_list(&env);
+
     env.storage()
         .persistent()
         .remove(&DataKey::Dispute(market_id));
 
+    // Decrement open dispute count
+    let current_count = get_open_dispute_count(&env);
+    if current_count > 0 {
+        set_open_dispute_count(&env, current_count - 1);
+    }
+
     emit_dispute_resolved(&env, market_id, &admin, uphold);
 
     Ok(())
+}
+
+pub fn list_active_disputes(env: &Env) -> Vec<u64> {
+    let list: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::ActiveDisputeList)
+        .unwrap_or_else(|| Vec::new(env));
+    if env.storage().persistent().has(&DataKey::ActiveDisputeList) {
+        bump_active_dispute_list(env);
+    }
+    list
+}
+
+pub fn get_open_dispute_count(env: &Env) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::DisputeCount)
+        .unwrap_or(0)
+}
+
+fn set_open_dispute_count(env: &Env, count: u32) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::DisputeCount, &count);
+    env.storage().persistent().extend_ttl(
+        &DataKey::DisputeCount,
+        config::PERSISTENT_THRESHOLD,
+        config::PERSISTENT_BUMP,
+    );
 }

@@ -1,11 +1,16 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { getDataSourceToken } from '@nestjs/typeorm';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { ConfigService } from '@nestjs/config';
+import { NotFoundException } from '@nestjs/common';
 import { LeaderboardService } from './leaderboard.service';
 import { LeaderboardEntry } from './entities/leaderboard-entry.entity';
 import { LeaderboardHistory } from './entities/leaderboard-history.entity';
+import { LeaderboardSnapshot } from './entities/leaderboard-snapshot.entity';
 import { User } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
+import { SeasonsService } from '../seasons/seasons.service';
 import { LeaderboardQueryDto } from './dto/leaderboard-query.dto';
 
 describe('LeaderboardService', () => {
@@ -43,11 +48,14 @@ describe('LeaderboardService', () => {
     skip: jest.fn().mockReturnThis(),
     take: jest.fn().mockReturnThis(),
     getManyAndCount: jest.fn(),
+    getMany: jest.fn(),
     getOne: jest.fn(),
   };
 
   const mockEntryRepository = {
     createQueryBuilder: jest.fn(() => mockQb),
+    findOne: jest.fn(),
+    find: jest.fn(),
   };
 
   const mockHistoryRepository = {
@@ -56,12 +64,44 @@ describe('LeaderboardService', () => {
     find: jest.fn(),
   };
 
+  const mockSnapshotQb = {
+    distinctOn: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockReturnThis(),
+    addOrderBy: jest.fn().mockReturnThis(),
+    getMany: jest.fn().mockResolvedValue([]),
+  };
+
+  const mockSnapshotRepository = {
+    createQueryBuilder: jest.fn(() => mockSnapshotQb),
+    create: jest.fn((entry) => entry),
+    save: jest.fn(),
+    find: jest.fn(),
+    delete: jest.fn().mockResolvedValue({ affected: 0 }),
+  };
+
   const mockUsersService = {
     findAll: jest.fn(),
+    findByAddress: jest.fn(),
+  };
+
+  const mockSeasonsService = {
+    findActive: jest.fn(),
   };
 
   const mockDataSource = {
     transaction: jest.fn(),
+  };
+
+  const mockCacheManager = {
+    get: jest.fn().mockResolvedValue(null),
+    set: jest.fn().mockResolvedValue(undefined),
+    del: jest.fn().mockResolvedValue(undefined),
+  };
+
+  const mockConfigService = {
+    get: jest.fn((_key: string, defaultValue?: unknown) => defaultValue),
   };
 
   beforeEach(async () => {
@@ -77,12 +117,28 @@ describe('LeaderboardService', () => {
           useValue: mockHistoryRepository,
         },
         {
+          provide: getRepositoryToken(LeaderboardSnapshot),
+          useValue: mockSnapshotRepository,
+        },
+        {
           provide: UsersService,
           useValue: mockUsersService,
         },
         {
+          provide: SeasonsService,
+          useValue: mockSeasonsService,
+        },
+        {
           provide: getDataSourceToken(),
           useValue: mockDataSource,
+        },
+        {
+          provide: ConfigService,
+          useValue: mockConfigService,
+        },
+        {
+          provide: CACHE_MANAGER,
+          useValue: mockCacheManager,
         },
       ],
     }).compile();
@@ -96,6 +152,16 @@ describe('LeaderboardService', () => {
     mockQb.addOrderBy.mockReturnThis();
     mockQb.skip.mockReturnThis();
     mockQb.take.mockReturnThis();
+    mockSnapshotRepository.createQueryBuilder.mockReturnValue(mockSnapshotQb);
+    mockSnapshotQb.distinctOn.mockReturnThis();
+    mockSnapshotQb.where.mockReturnThis();
+    mockSnapshotQb.andWhere.mockReturnThis();
+    mockSnapshotQb.orderBy.mockReturnThis();
+    mockSnapshotQb.addOrderBy.mockReturnThis();
+    mockSnapshotQb.getMany.mockResolvedValue([]);
+    mockConfigService.get.mockImplementation(
+      (_key: string, defaultValue?: unknown) => defaultValue,
+    );
   });
 
   it('should be defined', () => {
@@ -171,6 +237,66 @@ describe('LeaderboardService', () => {
 
       expect(mockQb.take).toHaveBeenCalledWith(100);
     });
+
+    it('should compute rank_delta from the latest prior snapshot', async () => {
+      mockQb.getManyAndCount.mockResolvedValue([[mockEntry], 1]);
+      mockSnapshotQb.getMany.mockResolvedValue([
+        { user_id: 'user-uuid-1', rank: 4 },
+      ]);
+
+      const result = await service.getLeaderboard({ page: 1, limit: 20 });
+
+      // prior rank 4 -> current rank 1 means moved up 3 places
+      expect(result.data[0].rank_delta).toBe(3);
+      expect(mockSnapshotQb.andWhere).toHaveBeenCalledWith(
+        'snap.season_id IS NULL',
+      );
+    });
+
+    it('should return null rank_delta when the user has no prior snapshot', async () => {
+      mockQb.getManyAndCount.mockResolvedValue([[mockEntry], 1]);
+      mockSnapshotQb.getMany.mockResolvedValue([]);
+
+      const result = await service.getLeaderboard({ page: 1, limit: 20 });
+
+      expect(result.data[0].rank_delta).toBeNull();
+    });
+
+    it('should scope prior snapshot lookup to the requested season', async () => {
+      mockQb.getManyAndCount.mockResolvedValue([[mockEntry], 1]);
+      mockSnapshotQb.getMany.mockResolvedValue([]);
+
+      await service.getLeaderboard({
+        page: 1,
+        limit: 20,
+        season_id: 'season-1',
+      });
+
+      expect(mockSnapshotQb.andWhere).toHaveBeenCalledWith(
+        'snap.season_id = :seasonId',
+        { seasonId: 'season-1' },
+      );
+    });
+  });
+
+  describe('getTopLeaderboard', () => {
+    it('should return top entries for the active season and cap at 20', async () => {
+      mockSeasonsService.findActive.mockResolvedValue({ id: 'season-1' });
+      mockQb.getManyAndCount.mockResolvedValue([[mockEntry], 1]);
+
+      const result = await service.getTopLeaderboard(50);
+
+      expect(mockSeasonsService.findActive).toHaveBeenCalled();
+      expect(mockQb.where).toHaveBeenCalledWith(
+        'entry.season_id = :season_id',
+        {
+          season_id: 'season-1',
+        },
+      );
+      expect(mockQb.take).toHaveBeenCalledWith(20);
+      expect(result).toHaveLength(1);
+      expect(result[0].rank).toBe(1);
+    });
   });
 
   describe('recalculateRanks', () => {
@@ -186,6 +312,52 @@ describe('LeaderboardService', () => {
 
       expect(mockUsersService.findAll).toHaveBeenCalled();
       expect(mockDataSource.transaction).toHaveBeenCalled();
+    });
+  });
+
+  describe('getTopN', () => {
+    it('should return top N entries and cap at 20', async () => {
+      const entries = Array.from({ length: 20 }, (_, i) => ({
+        ...mockEntry,
+        rank: i + 1,
+      }));
+      mockQb.getMany.mockResolvedValue(entries);
+      mockCacheManager.get.mockResolvedValue(null);
+
+      const result = await service.getTopN(25);
+
+      expect(result).toHaveLength(20);
+      expect(result[0].rank).toBe(1);
+      expect(result[19].rank).toBe(20);
+      expect(mockQb.take).toHaveBeenCalledWith(20);
+      expect(mockCacheManager.set).toHaveBeenCalledWith(
+        'leaderboard:top:20:all',
+        expect.any(Array),
+        expect.any(Number),
+      );
+    });
+
+    it('should return cache hit without DB query', async () => {
+      const cached = [{ rank: 1 }] as any[];
+      mockCacheManager.get.mockResolvedValue(cached);
+
+      const result = await service.getTopN(5);
+
+      expect(result).toBe(cached);
+      expect(mockEntryRepository.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('should filter by season_id when provided', async () => {
+      const entries = [{ ...mockEntry, rank: 1 }];
+      mockQb.getMany.mockResolvedValue(entries);
+      mockCacheManager.get.mockResolvedValue(null);
+
+      const result = await service.getTopN(5, 'season-1');
+
+      expect(result).toHaveLength(1);
+      expect(mockQb.where).toHaveBeenCalledWith('entry.season_id = :seasonId', {
+        seasonId: 'season-1',
+      });
     });
   });
 
@@ -244,6 +416,101 @@ describe('LeaderboardService', () => {
       );
 
       expect(result.accuracy_rate).toBe('70.0');
+    });
+  });
+
+  describe('createRankSnapshot', () => {
+    it('should save a snapshot for every current leaderboard entry', async () => {
+      mockEntryRepository.find = jest
+        .fn()
+        .mockResolvedValue([
+          { ...mockEntry, season_id: null, reputation_score: 100 },
+        ]);
+
+      await service.createRankSnapshot();
+
+      expect(mockSnapshotRepository.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          user_id: 'user-uuid-1',
+          season_id: null,
+          rank: 1,
+          score: 100,
+        }),
+      );
+      expect(mockSnapshotRepository.save).toHaveBeenCalled();
+    });
+
+    it('should use season_points as the score for season entries', async () => {
+      mockEntryRepository.find = jest.fn().mockResolvedValue([
+        {
+          ...mockEntry,
+          season_id: 'season-1',
+          season_points: 42,
+        },
+      ]);
+
+      await service.createRankSnapshot();
+
+      expect(mockSnapshotRepository.create).toHaveBeenCalledWith(
+        expect.objectContaining({ season_id: 'season-1', score: 42 }),
+      );
+    });
+
+    it('should do nothing when there are no leaderboard entries', async () => {
+      mockEntryRepository.find = jest.fn().mockResolvedValue([]);
+
+      await service.createRankSnapshot();
+
+      expect(mockSnapshotRepository.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('pruneSnapshots', () => {
+    it('should delete snapshots older than the configured retention window', async () => {
+      mockConfigService.get.mockReturnValue(30);
+      mockSnapshotRepository.delete.mockResolvedValue({ affected: 5 });
+
+      await service.pruneSnapshots();
+
+      expect(mockConfigService.get).toHaveBeenCalledWith(
+        'LEADERBOARD_SNAPSHOT_RETENTION_DAYS',
+        30,
+      );
+      expect(mockSnapshotRepository.delete).toHaveBeenCalledWith(
+        expect.objectContaining({ captured_at: expect.anything() }),
+      );
+    });
+  });
+
+  describe('getRankHistory', () => {
+    it('should throw NotFoundException if user not found', async () => {
+      mockUsersService.findByAddress = jest.fn().mockResolvedValue(null);
+
+      await expect(
+        service.getRankHistory('INVALID_ADDRESS', {}),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('should return snapshots ordered ascending with signed rank_delta', async () => {
+      mockUsersService.findByAddress = jest
+        .fn()
+        .mockResolvedValue(mockUser as User);
+      const capturedAt1 = new Date('2026-07-01T00:00:00Z');
+      const capturedAt2 = new Date('2026-07-02T00:00:00Z');
+      mockSnapshotRepository.find = jest.fn().mockResolvedValue([
+        { captured_at: capturedAt1, rank: 5, score: 10 },
+        { captured_at: capturedAt2, rank: 2, score: 20 },
+      ]);
+
+      const result = await service.getRankHistory(
+        'GBRPYHIL2CI3WHZDTOOQFC6EB4RRJC3XNRBF7XN',
+        {},
+      );
+
+      expect(result.user_id).toBe('user-uuid-1');
+      expect(result.data[0].rank_delta).toBeNull();
+      // rank improved from 5 to 2 -> delta of +3
+      expect(result.data[1].rank_delta).toBe(3);
     });
   });
 });

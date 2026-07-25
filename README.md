@@ -1,4 +1,5 @@
-InsightArena is a next-generation decentralized prediction market platform built natively on the **[Stellar network](https://stellar.org/)**. By leveraging Stellar's high-throughput consensus protocol and the robust **Soroban** smart contract environment, InsightArena provides users with a lightning-fast, highly secure, and incredibly cost-effective way to participate in global prediction events and competitive leaderboard challenges.
+InsightArena is a next-generation decentralized prediction market platform built natively on the **[Stellar network](https://stellar.org/)**.
+ By leveraging Stellar's high-throughput consensus protocol and the robust **Soroban** smart contract environment, InsightArena provides users with a lightning-fast, highly secure, and incredibly cost-effective way to participate in global prediction events and competitive leaderboard challenges.
 
 Users can submit predictions on real-world outcomes such as sports results, crypto prices, or other measurable events. Thanks to Stellar's nearly instant transaction finality and fraction-of-a-cent fees, participants can interact with markets seamlessly without the friction found on other blockchains. All predictions, outcomes, and payouts are automatically resolved and recorded transparently through secure Soroban smart contracts.
 
@@ -6,18 +7,9 @@ In addition to regular global markets, **any user can easily create their own cu
 
 By fusing traditional prediction markets with gamified competition, and powering it all with Stellar's enterprise-grade infrastructure, InsightArena creates an engaging, transparent, and trust-minimized ecosystem where users can test their insights, host private challenges, compete globally, and earn rewards based on their accuracy.
 
-InsightArena is a next-generation decentralized prediction market platform built natively on the **[Stellar network](https://stellar.org/)**. By leveraging Stellar's high-throughput consensus protocol and the robust **Soroban** smart contract environment, InsightArena provides users with a lightning-fast, highly secure, and incredibly cost-effective way to participate in global prediction events and competitive leaderboard challenges.
 
-Users can submit predictions on real-world outcomes such as sports results, crypto prices, or other measurable events. Thanks to Stellar's nearly instant transaction finality and fraction-of-a-cent fees, participants can interact with markets seamlessly without the friction found on other blockchains. All predictions, outcomes, and payouts are automatically resolved and recorded transparently through secure Soroban smart contracts.
 
-In addition to regular global markets, **any user can easily create their own custom prediction events and leaderboards**. Creators can open these events to the public or make them private competitions, generating special invite codes that friends can use to join in. Whether public or private, participants earn points based on performance and compete for top rewards.
 
-By fusing traditional prediction markets with gamified competition, and powering it all with Stellar's enterprise-grade infrastructure, InsightArena creates an engaging, transparent, and trust-minimized ecosystem where users can test their insights, host private challenges, compete globally, and earn rewards based on their accuracy.
-
-## Live Platform
-
-- **Frontend**: https://insightarena.com
-- **API Docs**: https://api.insightarena.com/docs
 
 ## Repository Structure
 
@@ -99,13 +91,13 @@ make test    # run unit tests
 
 ## Core Features
 
-- Decentralized prediction markets
-- On-chain escrow and automated payouts
-- Transparent leaderboard rankings
-- Seasonal competitions with reward pools
-- Low transaction fees via Stellar
-- Fast settlement and finality
-- Built with Soroban smart contracts
+- **AI Agent competes on the leaderboard** — the platform's own AI enters every market as a ranked user, giving every participant a live benchmark to beat
+- **Two-source oracle validation** — match results are cross-checked across two independent sports APIs before being written to Soroban smart contracts, eliminating single-point-of-failure corruptions
+- **Self-populating markets** — an autonomous fixture sync pulls live schedules every hour and creates prediction markets with zero admin input, so the platform never goes stale
+- **Personalised Leaderboard Coach** — the AI analyses each user's prediction history and delivers tailored weekly insights to help them improve and stay engaged
+- **Private competitions with invite codes** — any user can host their own closed leaderboard and share a unique invite link with friends or communities
+- **AI-assisted market creation** — when creators build their own custom events, the AI recommends the best match selections, optimal deadlines, and competition structures to maximise engagement
+- **Trustless settlement on Stellar** — all escrow, payouts, and outcome resolution run through auditable Soroban smart contracts with sub-second finality and near-zero fees
 
 ## Technology Stack
 
@@ -125,17 +117,6 @@ make test    # run unit tests
 - Frontend: [frontend/CONTRIBUTING.md](frontend/CONTRIBUTING.md)
 - Root guide: [CONTRIBUTING.md](CONTRIBUTING.md)
 
-## Community
-
-Join our community:
-- **Telegram**: https://t.me/+hR9dZKau8f84YTk0
-- **Twitter**: https://twitter.com/InsightArena
-- **Discord**: https://discord.gg/InsightArena
-- **GitHub Issues**: https://github.com/Arena1X/InsightArena/issues
-
-## License
-
-MIT
 
 ---
 

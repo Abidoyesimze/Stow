@@ -3,17 +3,27 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
+  forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import type { Cache } from 'cache-manager';
 import { DataSource, Repository } from 'typeorm';
+import { CACHE_WARMING_KEYS } from '../cache/cache-warming.keys';
+
 import { SorobanService } from '../soroban/soroban.service';
 import { User } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
+import { MarketSettlementScheduler } from './market-settlement.scheduler';
+import { ChallengeResolutionDto } from './dto/challenge-resolution.dto';
 import { CreateCommentDto } from './dto/create-comment.dto';
 import { CreateMarketDto } from './dto/create-market.dto';
+import { ProposeResolutionDto } from './dto/propose-resolution.dto';
+import { ResolveChallengeDto } from './dto/resolve-challenge.dto';
 import { UpdateMarketDto } from './dto/update-market.dto';
 import {
   ListMarketsDto,
@@ -28,9 +38,10 @@ import {
 } from './dto/trending-markets.dto';
 import { Comment } from './entities/comment.entity';
 import { MarketTemplate } from './entities/market-template.entity';
-import { Market } from './entities/market.entity';
+import { Market, MarketSettlementState } from './entities/market.entity';
 import { UserBookmark } from './entities/user-bookmark.entity';
 import { Prediction } from '../predictions/entities/prediction.entity';
+import { WebhookDispatcherService } from '../webhooks/services/webhook-dispatcher.service';
 
 @Injectable()
 export class MarketsService {
@@ -44,6 +55,7 @@ export class MarketsService {
     string,
     { data: PredictionStatsDto[]; cachedAt: number }
   > = new Map();
+
   private readonly PREDICTION_STATS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
   constructor(
@@ -60,7 +72,26 @@ export class MarketsService {
     private readonly usersService: UsersService,
     private readonly sorobanService: SorobanService,
     private readonly dataSource: DataSource,
+    private readonly webhookDispatcher: WebhookDispatcherService,
+    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+    @Inject(forwardRef(() => MarketSettlementScheduler))
+    private readonly settlementScheduler: MarketSettlementScheduler,
   ) {}
+
+  /**
+   * Centralized cache invalidation for any market state mutation.
+   * Clears the in-memory trending cache plus the trending/active list-level
+   * keys and the per-market detail key so stale reads can't occur after
+   * update/pause/resume/cancel/resolve.
+   */
+  private async invalidateMarketCaches(marketId: string): Promise<void> {
+    this.trendingCache = null;
+    await Promise.all([
+      this.cacheManager.del(CACHE_WARMING_KEYS.trendingEvents),
+      this.cacheManager.del(CACHE_WARMING_KEYS.activeEvents),
+      this.cacheManager.del(CACHE_WARMING_KEYS.popularEventDetail(marketId)),
+    ]);
+  }
 
   /**
    * Get prediction statistics for a market - anonymous outcome counts only
@@ -247,7 +278,23 @@ export class MarketsService {
         participant_count: 0,
       });
 
-      return await this.marketsRepository.save(market);
+      const saved = await this.marketsRepository.save(market);
+
+      await this.webhookDispatcher.emit('market.created', {
+        id: saved.id,
+        on_chain_market_id: saved.on_chain_market_id,
+        title: saved.title,
+        description: saved.description,
+        category: saved.category,
+        outcome_options: saved.outcome_options,
+        end_time: saved.end_time,
+        resolution_time: saved.resolution_time,
+        is_public: saved.is_public,
+        creator_id: saved.creator?.id,
+        created_at: saved.created_at,
+      });
+
+      return saved;
     } catch (err) {
       this.logger.error(
         'Failed to save market to DB after Soroban success',
@@ -296,7 +343,9 @@ export class MarketsService {
       market.category = dto.category;
     }
 
-    return await this.marketsRepository.save(market);
+    const saved = await this.marketsRepository.save(market);
+    await this.invalidateMarketCaches(saved.id);
+    return saved;
   }
 
   async resolveMarket(id: string, outcome: string): Promise<Market> {
@@ -324,7 +373,195 @@ export class MarketsService {
 
     market.is_resolved = true;
     market.resolved_outcome = outcome;
-    return this.marketsRepository.save(market);
+    market.resolved_at = new Date();
+    const saved = await this.marketsRepository.save(market);
+
+    // Invalidate caches immediately after market state changes
+    await this.invalidateMarketCaches(saved.id);
+
+    await this.webhookDispatcher.emit('market.resolved', {
+      id: saved.id,
+      on_chain_market_id: saved.on_chain_market_id,
+      title: saved.title,
+      description: saved.description,
+      category: saved.category,
+      outcome_options: saved.outcome_options,
+      resolved_outcome: saved.resolved_outcome,
+      creator_id: saved.creator?.id,
+      resolved_at: new Date(),
+    });
+
+    return saved;
+  }
+
+  /**
+   * Propose a resolution outcome for an ended market. Starts the
+   * configurable grace/challenge window instead of resolving immediately —
+   * the market only reaches SETTLED once MarketSettlementScheduler sweeps it
+   * (or an admin resolves a challenge) after the window elapses.
+   */
+  async proposeResolution(
+    id: string,
+    dto: ProposeResolutionDto,
+    user: User,
+  ): Promise<Market> {
+    const market = await this.findByIdOrOnChainId(id);
+
+    const isAdmin = user.role === 'admin';
+    const isCreator = market.creator.id === user.id;
+    if (!isAdmin && !isCreator) {
+      throw new ForbiddenException(
+        'Only the market creator or an admin can propose a resolution',
+      );
+    }
+
+    if (market.is_cancelled) {
+      throw new BadRequestException(
+        'Cannot propose a resolution for a cancelled market',
+      );
+    }
+
+    if (market.is_resolved) {
+      throw new ConflictException('Market is already resolved');
+    }
+
+    if (market.settlement_state !== MarketSettlementState.PENDING) {
+      throw new ConflictException(
+        `Cannot propose a resolution while market is in "${market.settlement_state}" state`,
+      );
+    }
+
+    if (new Date() < market.end_time) {
+      throw new BadRequestException(
+        'Cannot propose a resolution before end_time has passed',
+      );
+    }
+
+    if (!market.outcome_options.includes(dto.outcome)) {
+      throw new BadRequestException(
+        `Invalid outcome "${dto.outcome}". Valid options: ${market.outcome_options.join(', ')}`,
+      );
+    }
+
+    market.settlement_state = MarketSettlementState.PROPOSED;
+    market.proposed_outcome = dto.outcome;
+    market.resolution_proposed_at = new Date();
+    if (dto.grace_period_seconds !== undefined) {
+      market.grace_period_seconds = dto.grace_period_seconds;
+    }
+
+    const saved = await this.marketsRepository.save(market);
+    await this.invalidateMarketCaches(saved.id);
+
+    await this.webhookDispatcher.emit('market.resolution_proposed', {
+      id: saved.id,
+      on_chain_market_id: saved.on_chain_market_id,
+      proposed_outcome: saved.proposed_outcome,
+      resolution_proposed_at: saved.resolution_proposed_at,
+      grace_period_seconds: saved.grace_period_seconds,
+      proposed_by: user.id,
+    });
+
+    return saved;
+  }
+
+  /**
+   * Raise a challenge against a proposed resolution while its grace window
+   * is still open. Freezes MarketSettlementScheduler from auto-settling the
+   * market until an admin resolves the challenge.
+   */
+  async challengeResolution(
+    id: string,
+    dto: ChallengeResolutionDto,
+    user: User,
+  ): Promise<Market> {
+    const market = await this.findByIdOrOnChainId(id);
+
+    if (market.settlement_state !== MarketSettlementState.PROPOSED) {
+      throw new BadRequestException(
+        'Market does not have a resolution pending challenge',
+      );
+    }
+
+    const graceDeadline =
+      market.resolution_proposed_at!.getTime() +
+      market.grace_period_seconds * 1000;
+    if (Date.now() > graceDeadline) {
+      throw new BadRequestException('Challenge window has closed');
+    }
+
+    market.settlement_state = MarketSettlementState.CHALLENGED;
+    const saved = await this.marketsRepository.save(market);
+    await this.invalidateMarketCaches(saved.id);
+
+    await this.webhookDispatcher.emit('market.resolution_challenged', {
+      id: saved.id,
+      on_chain_market_id: saved.on_chain_market_id,
+      challenged_by: user.id,
+      reason: dto.reason,
+      challenged_at: new Date(),
+    });
+
+    return saved;
+  }
+
+  /**
+   * Admin adjudication of a challenged market. Settles immediately on-chain
+   * and in the DB — a challenged market has already lost its grace window,
+   * so there's nothing left for the scheduler to wait on.
+   */
+  async resolveChallenge(
+    id: string,
+    dto: ResolveChallengeDto,
+    adminUser: User,
+  ): Promise<Market> {
+    if (adminUser.role !== 'admin') {
+      throw new ForbiddenException('Only admin can resolve a challenge');
+    }
+
+    const market = await this.findByIdOrOnChainId(id);
+
+    if (market.settlement_state !== MarketSettlementState.CHALLENGED) {
+      throw new BadRequestException('Market does not have an active challenge');
+    }
+
+    if (!market.outcome_options.includes(dto.outcome)) {
+      throw new BadRequestException(
+        `Invalid outcome "${dto.outcome}". Valid options: ${market.outcome_options.join(', ')}`,
+      );
+    }
+
+    try {
+      await this.sorobanService.resolveMarket(
+        market.on_chain_market_id,
+        dto.outcome,
+      );
+    } catch (err) {
+      this.logger.error(
+        'Soroban resolveMarket failed while resolving challenge',
+        err,
+      );
+      throw new BadGatewayException('Failed to settle market on Soroban');
+    }
+
+    market.settlement_state = MarketSettlementState.SETTLED;
+    market.proposed_outcome = dto.outcome;
+    market.is_resolved = true;
+    market.resolved_outcome = dto.outcome;
+    market.resolved_at = new Date();
+
+    const saved = await this.marketsRepository.save(market);
+    await this.invalidateMarketCaches(saved.id);
+
+    await this.webhookDispatcher.emit('market.settled', {
+      id: saved.id,
+      on_chain_market_id: saved.on_chain_market_id,
+      resolved_outcome: saved.resolved_outcome,
+      resolved_by_admin: adminUser.id,
+      settled_at: saved.resolved_at,
+    });
+
+    return saved;
   }
 
   /**
@@ -421,7 +658,8 @@ export class MarketsService {
     dto: ListMarketsDto,
   ): Promise<PaginatedMarketsResponse> {
     const page = dto.page ?? 1;
-    const limit = Math.min(dto.limit ?? 20, 50);
+    // PaginationQueryDto already enforces max 100; guard with Math.min for safety
+    const limit = Math.min(dto.limit ?? 20, 100);
     const skip = (page - 1) * limit;
 
     const qb = this.marketsRepository
@@ -467,8 +705,9 @@ export class MarketsService {
       .take(limit);
 
     const [data, total] = await qb.getManyAndCount();
+    const totalPages = Math.ceil(total / limit) || 0;
 
-    return { data, total, page, limit };
+    return { data, total, page, limit, totalPages };
   }
 
   async findAll(): Promise<Market[]> {
@@ -531,7 +770,12 @@ export class MarketsService {
 
     try {
       market.is_cancelled = true;
-      return await this.marketsRepository.save(market);
+      const saved = await this.marketsRepository.save(market);
+
+      // Invalidate caches immediately after market state changes
+      await this.invalidateMarketCaches(saved.id);
+
+      return saved;
     } catch (err) {
       this.logger.error(
         'Failed to update market in DB after Soroban success',
@@ -576,43 +820,34 @@ export class MarketsService {
   }
 
   /**
-   * Get all comments for a market, including nested replies
+   * Get paginated comments for a market
    */
-  async getComments(marketId: string): Promise<Comment[]> {
+  async getComments(
+    marketId: string,
+    page = 1,
+    limit = 20,
+  ): Promise<{
+    data: Comment[];
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  }> {
     const market = await this.findByIdOrOnChainId(marketId);
+    // Enforce shared max of 100 rows
+    const take = Math.min(limit, 100);
+    const skip = (page - 1) * take;
 
-    // Fetch all comments for this market
-    const comments = await this.commentsRepository.find({
+    const [data, total] = await this.commentsRepository.findAndCount({
       where: { market: { id: market.id } },
       relations: ['author', 'parent'],
       order: { created_at: 'ASC' },
+      skip,
+      take,
     });
 
-    // Build nested structure
-    const commentMap = new Map<string, Comment & { replies: Comment[] }>();
-    const roots: Comment[] = [];
-
-    comments.forEach((c) => {
-      const commentWithReplies = { ...c, replies: [] };
-      commentMap.set(c.id, commentWithReplies);
-    });
-
-    comments.forEach((c) => {
-      const commentWithReplies = commentMap.get(c.id)!;
-      if (c.parent) {
-        const parent = commentMap.get(c.parent.id);
-        if (parent) {
-          parent.replies.push(commentWithReplies);
-        } else {
-          // Parent might not be in this market, which shouldn't happen
-          roots.push(commentWithReplies);
-        }
-      } else {
-        roots.push(commentWithReplies);
-      }
-    });
-
-    return roots;
+    const totalPages = Math.ceil(total / take) || 0;
+    return { data, total, page, limit: take, totalPages };
   }
 
   /**
@@ -642,10 +877,10 @@ export class MarketsService {
       .orderBy('market.featured_at', 'DESC')
       .skip(skip)
       .take(limit);
-
     const [data, total] = await qb.getManyAndCount();
+    const totalPages = Math.ceil(total / limit) || 0;
 
-    return { data, total, page, limit };
+    return { data, total, page, limit, totalPages };
   }
 
   /**
@@ -729,6 +964,77 @@ export class MarketsService {
     return await this.userBookmarksRepository.save(bookmark);
   }
 
+  async pauseMarket(id: string, user: User): Promise<Market> {
+    const market = await this.findByIdOrOnChainId(id);
+
+    if (user.role !== 'admin') {
+      throw new ForbiddenException('Only admin can pause markets');
+    }
+
+    if (market.is_resolved) {
+      throw new BadRequestException('Resolved markets cannot be paused');
+    }
+
+    if (market.is_cancelled) {
+      throw new BadRequestException('Cancelled markets cannot be paused');
+    }
+
+    if (market.is_paused) {
+      throw new ConflictException('Market is already paused');
+    }
+
+    try {
+      await this.sorobanService.pauseMarket(market.on_chain_market_id);
+    } catch (err) {
+      this.logger.error('Soroban pauseMarket failed', err);
+      throw new BadGatewayException('Failed to pause market on Soroban');
+    }
+
+    market.is_paused = true;
+    const saved = await this.marketsRepository.save(market);
+    await this.invalidateMarketCaches(saved.id);
+    return saved;
+  }
+
+  async resumeMarket(id: string, user: User): Promise<Market> {
+    const market = await this.findByIdOrOnChainId(id);
+
+    if (user.role !== 'admin') {
+      throw new ForbiddenException('Only admin can resume markets');
+    }
+
+    if (market.is_resolved) {
+      throw new BadRequestException('Resolved markets cannot be resumed');
+    }
+
+    if (market.is_cancelled) {
+      throw new BadRequestException('Cancelled markets cannot be resumed');
+    }
+
+    if (!market.is_paused) {
+      throw new ConflictException('Market is not paused');
+    }
+
+    // Optional: don't allow resuming after end_time has passed
+    if (new Date() > market.end_time) {
+      throw new BadRequestException(
+        'Cannot resume market after end_time has passed',
+      );
+    }
+
+    try {
+      await this.sorobanService.resumeMarket(market.on_chain_market_id);
+    } catch (err) {
+      this.logger.error('Soroban resumeMarket failed', err);
+      throw new BadGatewayException('Failed to resume market on Soroban');
+    }
+
+    market.is_paused = false;
+    const saved = await this.marketsRepository.save(market);
+    await this.invalidateMarketCaches(saved.id);
+    return saved;
+  }
+
   async removeBookmark(marketId: string, user: User): Promise<void> {
     const market = await this.findByIdOrOnChainId(marketId);
 
@@ -736,5 +1042,19 @@ export class MarketsService {
       user: { id: user.id },
       market: { id: market.id },
     });
+  }
+
+  /**
+   * Get failed settlement items from dead-letter queue (admin only)
+   */
+  async getSettlementFailures() {
+    return this.settlementScheduler.getDeadLetterQueue();
+  }
+
+  /**
+   * Manually retry a failed settlement (admin only)
+   */
+  async retrySettlement(marketId: string): Promise<boolean> {
+    return this.settlementScheduler.retrySettlement(marketId);
   }
 }

@@ -1,8 +1,9 @@
 use soroban_sdk::{Address, Env, Symbol, Vec};
 
 use crate::admin;
+use crate::leaderboard;
 use crate::storage::{self, StorageError};
-use crate::storage_types::{DataKey, Event, Match, Winner};
+use crate::storage_types::{DataKey, Event, Match, MatchResult, OracleSubmission};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -16,13 +17,34 @@ pub enum OracleError {
     /// No event found for the given event_id.
     EventNotFound = 2,
     /// Event has been cancelled and cannot be processed.
+    #[allow(dead_code)]
     EventCancelled = 3,
     /// Not all matches in the event have been resolved yet.
+    #[allow(dead_code)]
     MatchesNotComplete = 4,
     /// No creation fee has been set (should not happen after init).
+    #[allow(dead_code)]
     CreationFeeNotSet = 5,
     /// Arithmetic overflow occurred during calculation.
     Overflow = 6,
+    /// Caller is not the authorized AI agent. (#810)
+    Unauthorized = 7,
+    /// No match found for the given match_id. (#810)
+    MatchNotFound = 8,
+    /// A result has already been submitted for this match. (#810)
+    ResultAlreadySubmitted = 9,
+    /// The match has not started yet (current time < match_time). (#810)
+    MatchNotStarted = 10,
+    /// Caller is not a configured oracle source. (#1347)
+    NotAnOracleSource = 11,
+    /// This source has already submitted a value for this match. (#1347)
+    DuplicateOracleSubmission = 12,
+    /// Fewer sources have reported than the configured minimum. (#1347)
+    InsufficientOracleSources = 13,
+    /// The oracle-source configuration is invalid: zero sources, a threshold
+    /// of zero or greater than the source count, or a duplicate source
+    /// address. (#1347)
+    InvalidOracleConfig = 14,
 }
 
 impl From<StorageError> for OracleError {
@@ -35,187 +57,162 @@ impl From<StorageError> for OracleError {
 // Event emission
 // ---------------------------------------------------------------------------
 
-fn emit_winners_verified(env: &Env, event_id: u64, winner_count: u32) {
+fn emit_match_result_submitted(
+    env: &Env,
+    match_id: u64,
+    winning_team: &Symbol,
+    submitted_by: &Address,
+) {
     env.events().publish(
         (
-            Symbol::new(env, "event"),
-            Symbol::new(env, "winners_verified"),
+            Symbol::new(env, "match"),
+            Symbol::new(env, "result_submitted"),
         ),
-        (event_id, winner_count),
+        (match_id, winning_team.clone(), submitted_by.clone()),
+    );
+}
+
+fn emit_oracle_sources_configured(env: &Env, source_count: u32, min_sources: u32) {
+    env.events().publish(
+        (Symbol::new(env, "oracle"), Symbol::new(env, "sources_set")),
+        (source_count, min_sources),
+    );
+}
+
+fn emit_oracle_value_submitted(env: &Env, match_id: u64, source: &Address, value: i128) {
+    env.events().publish(
+        (
+            Symbol::new(env, "oracle"),
+            Symbol::new(env, "value_submitted"),
+        ),
+        (match_id, source.clone(), value),
     );
 }
 
 // ---------------------------------------------------------------------------
-// verify_event_winners (#798)
+// submit_match_result (#810, #966)
 // ---------------------------------------------------------------------------
 
-/// Verify and record all perfect scorers for an event.
+/// Submit a match result as the authorized AI oracle agent (#810, #966).
+///
+/// This is the core oracle function that resolves a match and grades every
+/// prediction made for it. Accepts a final scoreline and derives the 1X2 result.
 ///
 /// # Flow
-/// 1. Require caller authorization (public function, anyone can call).
+/// 1. Require caller authorization.
 /// 2. Reject if the contract is paused.
-/// 3. Retrieve the event and verify it exists.
-/// 4. Verify the event is active (not cancelled).
-/// 5. Retrieve all matches for the event.
-/// 6. Verify all matches have results submitted (is_resolved == true).
-/// 7. Retrieve all event participants.
-/// 8. For each participant:
-///    - Get their predictions for the event.
-///    - Count correct predictions.
-///    - If correct_count == total_matches, add to winners list.
-/// 9. Create Winner structs for perfect scorers.
-/// 10. Store winners in EventWinners(event_id).
-/// 11. Emit WinnersVerified event with winner count.
-/// 12. Return winner count.
+/// 3. Reject if the caller is not the stored AI agent address.
+/// 4. Retrieve the match and verify it exists.
+/// 5. Verify a result has not already been submitted.
+/// 6. Verify the match has started (`now >= match_time`).
+/// 7. Store home_score, away_score, and derive winning_team from the scores.
+/// 8. Update the match.
+/// 9. Grade every prediction for the match (is_correct, points_earned).
+/// 10. Emit a `MatchResultSubmitted` event.
 ///
-/// # Returns
-/// The number of winners identified (u32).
-pub fn verify_event_winners(env: &Env, caller: Address, event_id: u64) -> Result<u32, OracleError> {
+/// # Errors
+/// * [`OracleError::Paused`] — the contract is paused.
+/// * [`OracleError::Unauthorized`] — caller is not the AI agent.
+/// * [`OracleError::MatchNotFound`] — no match with the given id.
+/// * [`OracleError::ResultAlreadySubmitted`] — result already recorded.
+/// * [`OracleError::MatchNotStarted`] — match has not started yet.
+pub fn submit_match_result(
+    env: &Env,
+    caller: Address,
+    match_id: u64,
+    home_score: u32,
+    away_score: u32,
+) -> Result<(), OracleError> {
     caller.require_auth();
 
+    // 1. Contract must not be paused.
     if admin::is_paused(env) {
         return Err(OracleError::Paused);
     }
 
-    // Retrieve event and verify it exists
-    let event: Event = storage::get_event(env, event_id)?;
-
-    // Verify event is active (not cancelled)
-    if !event.is_active || event.is_cancelled {
-        return Err(OracleError::EventCancelled);
+    // 2. Caller must be the authorized AI agent.
+    let ai_agent = admin::get_ai_agent(env).ok_or(OracleError::Unauthorized)?;
+    if caller != ai_agent {
+        return Err(OracleError::Unauthorized);
     }
 
-    // Retrieve all matches for the event
-    let match_ids = storage::get_event_matches(env, event_id);
-    let total_matches = event.match_count;
+    // 3. Match must exist.
+    let mut match_record: Match =
+        storage::get_match(env, match_id).map_err(|_| OracleError::MatchNotFound)?;
 
-    // Verify all matches have results submitted
-    for match_id in match_ids.iter() {
-        let m: Match = storage::get_match(env, match_id)?;
-        if !m.result_submitted {
-            return Err(OracleError::MatchesNotComplete);
-        }
+    // 4. Result must not already be submitted.
+    if match_record.result_submitted {
+        return Err(OracleError::ResultAlreadySubmitted);
     }
 
-    // Retrieve all event participants
-    let participants = storage::get_event_participants(env, event_id);
-
-    let mut winners: Vec<Winner> = Vec::new(env);
+    // 5. Match must have started.
     let now = env.ledger().timestamp();
+    if now < match_record.match_time {
+        return Err(OracleError::MatchNotStarted);
+    }
 
-    // For each participant, check if they predicted all matches correctly
-    for participant in participants.iter() {
-        let user_predictions = storage::get_user_predictions(env, &participant, event_id);
+    // 6. Derive result from scores and record it on the match.
+    let result = MatchResult::from_scores(home_score, away_score);
+    match_record
+        .submit_result(result.clone(), caller.clone(), now)
+        .map_err(|_| OracleError::ResultAlreadySubmitted)?;
 
-        // Count correct predictions
-        let mut correct_count: u32 = 0;
-        let mut last_prediction_time: u64 = 0;
+    // 7. Store the actual scores.
+    match_record.home_score = Some(home_score);
+    match_record.away_score = Some(away_score);
+    storage::set_match(env, match_id, &match_record);
 
-        for prediction_id in user_predictions.iter() {
-            if let Ok(prediction) = storage::get_prediction(env, prediction_id) {
-                // Grade the prediction against the match result
-                let m: Match = storage::get_match(env, prediction.match_id)?;
-                if let Some(actual_winner) = m.winning_team {
-                    let is_correct = prediction_outcome_matches(
-                        env,
-                        &prediction.predicted_outcome,
-                        actual_winner,
-                    );
-                    if is_correct {
-                        correct_count =
-                            correct_count.checked_add(1).ok_or(OracleError::Overflow)?;
-                    }
-                }
-                // Track the latest prediction time for tiebreaker
-                if prediction.predicted_at > last_prediction_time {
-                    last_prediction_time = prediction.predicted_at;
-                }
-            }
-        }
-
-        // If correct_count == total_matches, add to winners list
-        if correct_count == total_matches && total_matches > 0 {
-            let winner = Winner::new(
-                participant.clone(),
-                event_id,
-                correct_count,
-                total_matches,
-                last_prediction_time,
-                now,
-            );
-            winners.push_back(winner);
+    // 8. Grade every prediction submitted for this match.
+    let prediction_ids = storage::get_match_predictions(env, match_id);
+    for prediction_id in prediction_ids.iter() {
+        if let Ok(mut prediction) = storage::get_prediction(env, prediction_id) {
+            prediction.grade(home_score, away_score, match_record.points_multiplier);
+            storage::set_prediction(env, prediction_id, &prediction);
         }
     }
 
-    let winner_count = winners.len() as u32;
+    // 8b. Recompute and persist the event's weighted standings (#1311).
+    leaderboard::recompute_standings(env, match_record.event_id).map_err(|e| match e {
+        leaderboard::LeaderboardError::Overflow => OracleError::Overflow,
+        _ => OracleError::EventNotFound,
+    })?;
 
-    // Store winners in EventWinners(event_id)
-    let winners_key = DataKey::EventWinners(event_id);
-    env.storage().persistent().set(&winners_key, &winners);
-    env.storage()
-        .persistent()
-        .extend_ttl(&winners_key, storage::TTL_LEDGERS, storage::TTL_LEDGERS);
+    // 9. Emit the result event using the derived outcome symbol.
+    let outcome_symbol = match result {
+        MatchResult::TeamA => Symbol::new(env, crate::storage_types::OUTCOME_TEAM_A),
+        MatchResult::TeamB => Symbol::new(env, crate::storage_types::OUTCOME_TEAM_B),
+        MatchResult::Draw => Symbol::new(env, crate::storage_types::OUTCOME_DRAW),
+    };
+    emit_match_result_submitted(env, match_id, &outcome_symbol, &caller);
 
-    // Emit WinnersVerified event
-    emit_winners_verified(env, event_id, winner_count);
-
-    Ok(winner_count)
-}
-
-// ---------------------------------------------------------------------------
-// get_event_winners (#799)
-// ---------------------------------------------------------------------------
-
-/// Retrieve the list of winners for an event.
-///
-/// # Flow
-/// 1. Retrieve EventWinners(event_id) from storage.
-/// 2. Return Vec<Winner> sorted by completion_time (earliest first).
-/// 3. Return empty Vec if no winners exist.
-///
-/// # Returns
-/// A `Vec<Winner>` sorted by completion_time ascending (earliest first).
-pub fn get_event_winners(env: &Env, event_id: u64) -> Result<Vec<Winner>, OracleError> {
-    let mut winners = storage::get_event_winners(env, event_id);
-
-    // Sort by completion_time ascending (earliest first)
-    // Using insertion sort since the list is typically small
-    let len = winners.len();
-    for i in 1..len {
-        let mut j = i;
-        while j > 0 {
-            let prev = winners.get(j - 1).unwrap();
-            let curr = winners.get(j).unwrap();
-            if prev.completion_time > curr.completion_time {
-                winners.set(j - 1, curr);
-                winners.set(j, prev);
-                j -= 1;
-            } else {
-                break;
-            }
-        }
-    }
-
-    Ok(winners)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // get_user_score (#800)
 // ---------------------------------------------------------------------------
 
-/// Calculate a user's score (correct predictions) for an event.
+/// Calculate a user's score (points and statistics) for an event.
 ///
 /// # Flow
 /// 1. Retrieve user's predictions for the event.
-/// 2. Count predictions where the user predicted correctly.
-/// 3. Get total match count for the event.
-/// 4. Return tuple: (correct_count: u32, total_matches: u32).
+/// 2. Sum total_points earned from all predictions.
+/// 3. Count predictions where the result (1X2) was correct.
+/// 4. Count predictions where the exact score was correct.
+/// 5. Get total match count for the event.
+/// 6. Return tuple: (total_points, correct_results, exact_scores, total_matches).
 ///
 /// # Returns
-/// A tuple `(correct_count, total_matches)` where:
-/// - `correct_count`: Number of matches the user predicted correctly.
+/// A tuple `(total_points, correct_results, exact_scores, total_matches)` where:
+/// - `total_points`: Sum of points_earned from all predictions.
+/// - `correct_results`: Number of matches with correct 1X2 result.
+/// - `exact_scores`: Number of matches with exact scoreline prediction.
 /// - `total_matches`: Total number of matches in the event.
-pub fn get_user_score(env: &Env, user: Address, event_id: u64) -> Result<(u32, u32), OracleError> {
+pub fn get_user_score(
+    env: &Env,
+    user: Address,
+    event_id: u64,
+) -> Result<(u32, u32, u32, u32), OracleError> {
     // Retrieve event to get total match count
     let event: Event = storage::get_event(env, event_id)?;
     let total_matches = event.match_count;
@@ -223,23 +220,43 @@ pub fn get_user_score(env: &Env, user: Address, event_id: u64) -> Result<(u32, u
     // Retrieve user's predictions for the event
     let user_predictions = storage::get_user_predictions(env, &user, event_id);
 
-    // Count correct predictions
-    let mut correct_count: u32 = 0;
+    // Calculate scores and stats
+    let mut total_points: u32 = 0;
+    let mut correct_results: u32 = 0;
+    let mut exact_scores: u32 = 0;
+
     for prediction_id in user_predictions.iter() {
         if let Ok(prediction) = storage::get_prediction(env, prediction_id) {
-            // Grade the prediction against the match result
-            let m: Match = storage::get_match(env, prediction.match_id)?;
-            if let Some(actual_winner) = m.winning_team {
-                let is_correct =
-                    prediction_outcome_matches(env, &prediction.predicted_outcome, actual_winner);
-                if is_correct {
-                    correct_count = correct_count.checked_add(1).ok_or(OracleError::Overflow)?;
+            // Add earned points
+            if let Some(points) = prediction.points_earned {
+                total_points = total_points
+                    .checked_add(points)
+                    .ok_or(OracleError::Overflow)?;
+            }
+            // Count correct results
+            if prediction.is_correct == Some(true) {
+                correct_results = correct_results
+                    .checked_add(1)
+                    .ok_or(OracleError::Overflow)?;
+            }
+            // Count exact scores: load the match to compare actual vs predicted scores.
+            // This is multiplier-agnostic — an exact score is one where both predicted
+            // scores match the actual scores, regardless of the points multiplier.
+            if let Ok(match_record) = storage::get_match(env, prediction.match_id) {
+                if let (Some(actual_home), Some(actual_away)) =
+                    (match_record.home_score, match_record.away_score)
+                {
+                    if prediction.predicted_home_score == actual_home
+                        && prediction.predicted_away_score == actual_away
+                    {
+                        exact_scores = exact_scores.checked_add(1).ok_or(OracleError::Overflow)?;
+                    }
                 }
             }
         }
     }
 
-    Ok((correct_count, total_matches))
+    Ok((total_points, correct_results, exact_scores, total_matches))
 }
 
 // ---------------------------------------------------------------------------
@@ -255,35 +272,178 @@ pub fn get_user_score(env: &Env, user: Address, event_id: u64) -> Result<(u32, u
 ///
 /// # Returns
 /// The creation fee in stroops (i128).
+#[allow(dead_code)]
 pub fn get_creation_fee(env: &Env) -> Result<i128, OracleError> {
     admin::get_creation_fee(env).ok_or(OracleError::CreationFeeNotSet)
+}
+
+// ---------------------------------------------------------------------------
+// Multi-source oracle median aggregation (#1347)
+// ---------------------------------------------------------------------------
+
+/// Configure the set of authorized oracle sources and the minimum number of
+/// distinct sources required before their submissions can be aggregated.
+///
+/// Only the admin may call this. Replaces any previously configured source
+/// set and threshold atomically.
+///
+/// # Errors
+/// * [`OracleError::Unauthorized`] — caller is not the admin.
+/// * [`OracleError::InvalidOracleConfig`] — `min_sources` is `0` or exceeds
+///   `sources.len()`, or `sources` contains a duplicate address.
+pub fn configure_oracle_sources(
+    env: &Env,
+    caller: Address,
+    sources: Vec<Address>,
+    min_sources: u32,
+) -> Result<(), OracleError> {
+    caller.require_auth();
+
+    let is_admin = env
+        .storage()
+        .persistent()
+        .get::<DataKey, Address>(&DataKey::Admin(caller.clone()))
+        .is_some();
+    if !is_admin {
+        return Err(OracleError::Unauthorized);
+    }
+
+    let source_count = sources.len();
+    if min_sources == 0 || min_sources > source_count {
+        return Err(OracleError::InvalidOracleConfig);
+    }
+
+    for i in 0..sources.len() {
+        for j in (i + 1)..sources.len() {
+            if sources.get(i) == sources.get(j) {
+                return Err(OracleError::InvalidOracleConfig);
+            }
+        }
+    }
+
+    storage::set_oracle_sources(env, &sources);
+    storage::set_oracle_min_sources(env, min_sources);
+
+    emit_oracle_sources_configured(env, source_count, min_sources);
+
+    Ok(())
+}
+
+/// Submit a numeric resolution value for a match as an authorized oracle
+/// source.
+///
+/// # Errors
+/// * [`OracleError::Paused`] — the contract is paused.
+/// * [`OracleError::MatchNotFound`] — no match with the given id.
+/// * [`OracleError::NotAnOracleSource`] — `source` is not in the configured
+///   oracle source set.
+/// * [`OracleError::DuplicateOracleSubmission`] — `source` has already
+///   submitted a value for this match.
+pub fn submit_oracle_value(
+    env: &Env,
+    source: Address,
+    match_id: u64,
+    value: i128,
+) -> Result<(), OracleError> {
+    source.require_auth();
+
+    if admin::is_paused(env) {
+        return Err(OracleError::Paused);
+    }
+
+    let sources = storage::get_oracle_sources(env);
+    if !sources.contains(source.clone()) {
+        return Err(OracleError::NotAnOracleSource);
+    }
+
+    // Match must exist.
+    storage::get_match(env, match_id).map_err(|_| OracleError::MatchNotFound)?;
+
+    let existing = storage::get_oracle_submissions(env, match_id);
+    for submission in existing.iter() {
+        if submission.source == source {
+            return Err(OracleError::DuplicateOracleSubmission);
+        }
+    }
+
+    let submission = OracleSubmission {
+        source: source.clone(),
+        match_id,
+        value,
+        submitted_at: env.ledger().timestamp(),
+    };
+    storage::add_oracle_submission(env, match_id, &submission);
+
+    emit_oracle_value_submitted(env, match_id, &source, value);
+
+    Ok(())
+}
+
+/// Return every oracle submission recorded for a match, for auditability.
+///
+/// Returns an empty `Vec` when no source has submitted a value yet.
+pub fn get_oracle_submissions(env: &Env, match_id: u64) -> Vec<OracleSubmission> {
+    storage::get_oracle_submissions(env, match_id)
+}
+
+/// Compute the median of the numeric values submitted for a match by
+/// authorized oracle sources.
+///
+/// # Errors
+/// * [`OracleError::InsufficientOracleSources`] — fewer sources have
+///   reported than the configured minimum.
+/// * [`OracleError::Overflow`] — averaging the two middle values (even
+///   submission count) overflowed i128.
+pub fn compute_oracle_median(env: &Env, match_id: u64) -> Result<i128, OracleError> {
+    let submissions = storage::get_oracle_submissions(env, match_id);
+    let min_sources = storage::get_oracle_min_sources(env);
+
+    if submissions.len() < min_sources {
+        return Err(OracleError::InsufficientOracleSources);
+    }
+
+    let mut values: Vec<i128> = Vec::new(env);
+    for submission in submissions.iter() {
+        values.push_back(submission.value);
+    }
+
+    // Simple insertion sort — submission counts are small, bounded by the
+    // configured oracle source set.
+    let n = values.len();
+    for i in 1..n {
+        let mut j = i;
+        while j > 0 {
+            let a = values.get(j).unwrap();
+            let b = values.get(j - 1).unwrap();
+            if a < b {
+                values.set(j, b);
+                values.set(j - 1, a);
+                j -= 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    let mid = n / 2;
+    let median = if n % 2 == 1 {
+        values.get(mid).unwrap()
+    } else {
+        let a = values.get(mid - 1).unwrap();
+        let b = values.get(mid).unwrap();
+        a.checked_add(b).ok_or(OracleError::Overflow)? / 2
+    };
+
+    Ok(median)
 }
 
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
 
-/// Check if a predicted outcome matches the actual match result.
-///
-/// The actual_winner encoding is:
-/// - 0 = Team A
-/// - 1 = Team B
-/// - 2 = Draw
-fn prediction_outcome_matches(env: &Env, predicted_outcome: &Symbol, actual_winner: u32) -> bool {
-    let team_a_sym = Symbol::new(env, crate::storage_types::OUTCOME_TEAM_A);
-    let team_b_sym = Symbol::new(env, crate::storage_types::OUTCOME_TEAM_B);
-    let draw_sym = Symbol::new(env, crate::storage_types::OUTCOME_DRAW);
-
-    match actual_winner {
-        0 => *predicted_outcome == team_a_sym,
-        1 => *predicted_outcome == team_b_sym,
-        2 => *predicted_outcome == draw_sym,
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     // Note: Unit tests for oracle functions require Soroban contract context.

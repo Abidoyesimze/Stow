@@ -14,15 +14,32 @@ import { ActivityLog } from './entities/activity-log.entity';
 import { MarketHistory } from './entities/market-history.entity';
 
 describe('predictorTierFromReputation', () => {
-  it('maps thresholds to tier labels', () => {
+  it('maps 0 to Bronze Predictor', () => {
     expect(predictorTierFromReputation(0)).toBe('Bronze Predictor');
+  });
+
+  it('maps 199 to Bronze Predictor', () => {
     expect(predictorTierFromReputation(199)).toBe('Bronze Predictor');
+  });
+
+  it('maps 200 to Silver Predictor', () => {
     expect(predictorTierFromReputation(200)).toBe('Silver Predictor');
+  });
+
+  it('maps 499 to Silver Predictor', () => {
     expect(predictorTierFromReputation(499)).toBe('Silver Predictor');
+  });
+
+  it('maps 500 to Gold Predictor', () => {
     expect(predictorTierFromReputation(500)).toBe('Gold Predictor');
+  });
+
+  it('maps 999 to Gold Predictor', () => {
     expect(predictorTierFromReputation(999)).toBe('Gold Predictor');
+  });
+
+  it('maps 1000 to Platinum Predictor', () => {
     expect(predictorTierFromReputation(1000)).toBe('Platinum Predictor');
-    expect(predictorTierFromReputation(840)).toBe('Gold Predictor');
   });
 });
 
@@ -277,7 +294,9 @@ describe('AnalyticsService', () => {
         .spyOn(marketHistoryRepository, 'createQueryBuilder')
         .mockReturnValue(qb as any);
 
-      const result = await service.getMarketHistory('market-1');
+      const from = new Date('2026-05-01T00:00:00.000Z');
+      const to = new Date('2026-06-01T00:00:00.000Z');
+      const result = await service.getMarketHistory('market-1', from, to);
 
       expect(result.market_id).toBe('market-1');
       expect(result.history).toHaveLength(1);
@@ -288,19 +307,83 @@ describe('AnalyticsService', () => {
         participant_count: 5,
         outcome_probabilities: [60, 40],
       });
-      expect(qb.andWhere).toHaveBeenCalledWith(
-        'history.recorded_at >= :from',
-        expect.any(Object),
-      );
+      expect(qb.andWhere).toHaveBeenCalledWith('history.recorded_at >= :from', {
+        from,
+      });
+      expect(qb.andWhere).toHaveBeenCalledWith('history.recorded_at <= :to', {
+        to,
+      });
     });
 
     it('should throw NotFoundException for invalid market', async () => {
       const marketsRepository = module.get(getRepositoryToken(Market));
       jest.spyOn(marketsRepository, 'findOne').mockResolvedValue(null);
 
-      await expect(service.getMarketHistory('invalid')).rejects.toThrow(
-        'Market "invalid" not found',
+      await expect(
+        service.getMarketHistory(
+          'invalid',
+          new Date('2026-05-01T00:00:00.000Z'),
+          new Date('2026-06-01T00:00:00.000Z'),
+        ),
+      ).rejects.toThrow('Market "invalid" not found');
+    });
+  });
+
+  describe('getDashboardKPIs active predictions count', () => {
+    it('All active test: mock the QB to return 3 predictions on open markets -> active_predictions_count = 3', async () => {
+      usersRepository.findOne.mockResolvedValue(baseUser);
+      leaderboardRepository.createQueryBuilder.mockReturnValue(
+        mockLeaderboardQb(null) as any,
       );
+      const qb = mockQb({ getCount: 3 });
+      predictionsRepository.createQueryBuilder.mockReturnValue(qb as any);
+
+      const res = await service.getDashboardKPIs(baseUser);
+
+      expect(res.active_predictions_count).toBe(3);
+      expect(qb.andWhere).toHaveBeenCalledWith('market.is_resolved = false');
+      expect(qb.andWhere).toHaveBeenCalledWith('market.is_cancelled = false');
+    });
+
+    it('Mix test: 2 open, 1 resolved, 1 cancelled -> active_predictions_count = 2', async () => {
+      usersRepository.findOne.mockResolvedValue(baseUser);
+      leaderboardRepository.createQueryBuilder.mockReturnValue(
+        mockLeaderboardQb(null) as any,
+      );
+      const qb = mockQb({ getCount: 2 });
+      predictionsRepository.createQueryBuilder.mockReturnValue(qb as any);
+
+      const res = await service.getDashboardKPIs(baseUser);
+
+      expect(res.active_predictions_count).toBe(2);
+      expect(qb.andWhere).toHaveBeenCalledWith('market.is_resolved = false');
+      expect(qb.andWhere).toHaveBeenCalledWith('market.is_cancelled = false');
+    });
+  });
+
+  describe('Active Sessions', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+    });
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it('tracks active sessions and decays idle ones', () => {
+      service.trackActiveSession('user1');
+      service.trackActiveSession('user2');
+
+      expect(service.getActiveUsersCount()).toBe(2);
+
+      jest.advanceTimersByTime(200_000);
+      service.trackActiveSession('user2');
+
+      jest.advanceTimersByTime(200_000);
+      // user1 is now idle for 400s (decay threshold is 300s)
+      expect(service.getActiveUsersCount()).toBe(1);
+
+      service.removeActiveSession('user2');
+      expect(service.getActiveUsersCount()).toBe(0);
     });
   });
 });

@@ -4,8 +4,8 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export enum CreatorEventSearchStatus {
   Active = 'active',
-  Cancelled = 'cancelled',
-  Inactive = 'inactive',
+  Finished = 'finished',
+  Upcoming = 'upcoming',
   All = 'all',
 }
 

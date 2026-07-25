@@ -34,6 +34,29 @@ export class UserEventResponseDto {
   @ApiProperty({ description: 'Is event active' })
   isActive: boolean;
 
+  @ApiPropertyOptional({ description: 'Total prize pool in stroops' })
+  prizePool?: string;
+
+  @ApiPropertyOptional({ description: 'Entry fee in stroops' })
+  entryFee?: string;
+
+  @ApiPropertyOptional({ description: 'Campaign category slug' })
+  category?: string;
+
+  @ApiPropertyOptional({ description: 'Campaign banner URL' })
+  bannerUrl?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Whether the campaign has been finalized',
+  })
+  isFinalized?: boolean;
+
+  @ApiPropertyOptional({
+    type: [Number],
+    description: 'Reward split percentages',
+  })
+  rewardDistribution?: number[];
+
   @ApiPropertyOptional({
     description: 'User score (correct predictions / total matches)',
   })

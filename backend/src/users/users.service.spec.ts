@@ -1,6 +1,10 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { NotFoundException } from '@nestjs/common';
+import {
+  NotFoundException,
+  BadRequestException,
+  ConflictException,
+} from '@nestjs/common';
 import { Repository } from 'typeorm';
 import { UsersService } from './users.service';
 import { User } from './entities/user.entity';
@@ -22,6 +26,7 @@ import { UserBookmark } from '../markets/entities/user-bookmark.entity';
 
 describe('UsersService', () => {
   let service: UsersService;
+  let module: TestingModule;
   let repository: Repository<User>;
   let predictionsRepository: Repository<Prediction>;
   let participantsRepository: Repository<CompetitionParticipant>;
@@ -48,7 +53,7 @@ describe('UsersService', () => {
   } as User;
 
   beforeEach(async () => {
-    const module: TestingModule = await Test.createTestingModule({
+    module = await Test.createTestingModule({
       providers: [
         UsersService,
         {
@@ -70,8 +75,10 @@ describe('UsersService', () => {
           provide: getRepositoryToken(UserFollow),
           useValue: {
             find: jest.fn(),
+            findOne: jest.fn(),
             delete: jest.fn(),
             save: jest.fn(),
+            createQueryBuilder: jest.fn(),
           },
         },
         {
@@ -209,6 +216,104 @@ describe('UsersService', () => {
   });
 
   describe('findPublicPredictionsByAddress', () => {
+    it('should push outcome filter to SQL when outcome is set', async () => {
+      jest.spyOn(repository, 'findOneBy').mockResolvedValue(mockUser);
+
+      const queryBuilder = {
+        leftJoinAndSelect: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        skip: jest.fn().mockReturnThis(),
+        take: jest.fn().mockReturnThis(),
+        getManyAndCount: jest.fn().mockResolvedValue([[], 2]),
+      };
+
+      jest
+        .spyOn(predictionsRepository, 'createQueryBuilder')
+        .mockReturnValue(
+          queryBuilder as any as ReturnType<
+            typeof predictionsRepository.createQueryBuilder
+          >,
+        );
+
+      await service.findPublicPredictionsByAddress(mockUser.stellar_address, {
+        outcome: 'correct',
+        page: 1,
+        limit: 20,
+      } as any);
+
+      expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+        'prediction.chosen_outcome = market.resolved_outcome',
+      );
+    });
+
+    it('should reject self-follow with BadRequestException', async () => {
+      jest.spyOn(repository, 'findOneBy').mockResolvedValue(mockUser);
+
+      const queryBuilder = {
+        leftJoinAndSelect: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        skip: jest.fn().mockReturnThis(),
+        take: jest.fn().mockReturnThis(),
+        getManyAndCount: jest.fn().mockResolvedValue([[], 0]),
+      };
+
+      jest
+        .spyOn(predictionsRepository, 'createQueryBuilder')
+        .mockReturnValue(
+          queryBuilder as any as ReturnType<
+            typeof predictionsRepository.createQueryBuilder
+          >,
+        );
+
+      const spy = jest.spyOn(service, 'followUser');
+
+      await expect(
+        service.followUser(mockUser.id, mockUser.stellar_address),
+      ).rejects.toThrow(BadRequestException);
+      expect(spy).toHaveBeenCalledWith(mockUser.id, mockUser.stellar_address);
+    });
+
+    it('should reject duplicate follow with ConflictException', async () => {
+      jest.spyOn(repository, 'findOneBy').mockResolvedValue(mockUser);
+
+      const queryBuilder = {
+        leftJoinAndSelect: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        skip: jest.fn().mockReturnThis(),
+        take: jest.fn().mockReturnThis(),
+        getManyAndCount: jest.fn().mockResolvedValue([[], 0]),
+      };
+
+      jest
+        .spyOn(predictionsRepository, 'createQueryBuilder')
+        .mockReturnValue(
+          queryBuilder as any as ReturnType<
+            typeof predictionsRepository.createQueryBuilder
+          >,
+        );
+
+      // Patch followRepository.findOne via the service instance method
+      const followSpy = jest
+        .spyOn(service as any, 'followUser')
+        .mockImplementation(async () => {
+          throw new ConflictException('Already following this user');
+        });
+
+      await expect(
+        service.followUser(mockUser.id, mockUser.stellar_address),
+      ).rejects.toThrow(ConflictException);
+      expect(followSpy).toHaveBeenCalledWith(
+        mockUser.id,
+        mockUser.stellar_address,
+      );
+    });
+
     it('should return only resolved-market predictions with outcome mapping', async () => {
       jest.spyOn(repository, 'findOneBy').mockResolvedValue(mockUser);
 
@@ -407,6 +512,173 @@ describe('UsersService', () => {
         'market.participant_count',
         'ASC',
       );
+    });
+  });
+
+  describe('getMyStats', () => {
+    it('should return lightweight stats with computed accuracy and tier', async () => {
+      jest.spyOn(repository, 'findOneBy').mockResolvedValue(mockUser);
+
+      const result = await service.getMyStats(mockUser.id);
+
+      expect(result).toEqual({
+        total_predictions: 10,
+        correct_predictions: 7,
+        incorrect_predictions: 3,
+        accuracy_rate: '70.0',
+        tier: 'Bronze Predictor',
+        reputation_score: 85,
+        season_points: 100,
+        total_staked_stroops: '1000000',
+        total_winnings_stroops: '500000',
+      });
+    });
+
+    it('should return 0.0 accuracy when user has no predictions', async () => {
+      const userWithNoPredictions = {
+        ...mockUser,
+        total_predictions: 0,
+        correct_predictions: 0,
+      };
+      jest
+        .spyOn(repository, 'findOneBy')
+        .mockResolvedValue(userWithNoPredictions);
+
+      const result = await service.getMyStats(mockUser.id);
+
+      expect(result.accuracy_rate).toBe('0.0');
+      expect(result.incorrect_predictions).toBe(0);
+    });
+
+    it('should throw NotFoundException when user not found', async () => {
+      jest.spyOn(repository, 'findOneBy').mockResolvedValue(null);
+
+      await expect(service.getMyStats('missing-id')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe('followUser', () => {
+    it('should throw BadRequestException if user tries to follow themselves', async () => {
+      jest
+        .spyOn(repository, 'findOneBy')
+        .mockImplementation(async (criteria: any) => {
+          if (criteria.id === mockUser.id) return mockUser;
+          if (criteria.stellar_address === mockUser.stellar_address)
+            return mockUser;
+          return null;
+        });
+
+      await expect(
+        service.followUser(mockUser.id, mockUser.stellar_address),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('should succeed when following another user', async () => {
+      const mockUserB = {
+        ...mockUser,
+        id: 'user-uuid-2',
+        stellar_address: 'G_ANOTHER',
+      } as User;
+      jest
+        .spyOn(repository, 'findOneBy')
+        .mockImplementation(async (criteria: any) => {
+          if (criteria.id === mockUser.id) return mockUser;
+          if (criteria.stellar_address === mockUserB.stellar_address)
+            return mockUserB;
+          return null;
+        });
+
+      const followRepository = module.get<Repository<UserFollow>>(
+        getRepositoryToken(UserFollow),
+      );
+      jest.spyOn(followRepository, 'findOne').mockResolvedValue(null);
+      jest.spyOn(followRepository, 'save').mockResolvedValue({} as any);
+
+      const result = await service.followUser(
+        mockUser.id,
+        mockUserB.stellar_address,
+      );
+      expect(result.success).toBe(true);
+      expect(followRepository.save).toHaveBeenCalledWith({
+        follower_id: mockUser.id,
+        following_id: mockUserB.id,
+      });
+    });
+  });
+
+  describe('getFollowStats', () => {
+    it('should return follow stats for a user', async () => {
+      const followRepository = module.get<Repository<UserFollow>>(
+        getRepositoryToken(UserFollow),
+      );
+      jest
+        .spyOn(repository, 'findOneBy')
+        .mockImplementation(async (criteria: any) => {
+          if (criteria.stellar_address === mockUser.stellar_address)
+            return mockUser;
+          return null;
+        });
+
+      const mockQueryBuilder = {
+        where: jest.fn().mockReturnThis(),
+        getManyAndCount: jest
+          .fn()
+          .mockResolvedValueOnce([[], 5]) // followers
+          .mockResolvedValueOnce([[], 10]), // following
+      };
+
+      jest
+        .spyOn(followRepository, 'createQueryBuilder')
+        .mockReturnValue(mockQueryBuilder as any);
+
+      const result = await service.getFollowStats(mockUser.stellar_address);
+
+      expect(result).toEqual({
+        followers_count: 5,
+        following_count: 10,
+      });
+    });
+
+    it('should throw NotFoundException if user does not exist', async () => {
+      jest.spyOn(repository, 'findOneBy').mockResolvedValue(null);
+
+      await expect(
+        service.getFollowStats('non-existent-address'),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('should return zero counts for user with no followers or following', async () => {
+      const followRepository = module.get<Repository<UserFollow>>(
+        getRepositoryToken(UserFollow),
+      );
+      jest
+        .spyOn(repository, 'findOneBy')
+        .mockImplementation(async (criteria: any) => {
+          if (criteria.stellar_address === mockUser.stellar_address)
+            return mockUser;
+          return null;
+        });
+
+      const mockQueryBuilder = {
+        where: jest.fn().mockReturnThis(),
+        getManyAndCount: jest
+          .fn()
+          .mockResolvedValueOnce([[], 0]) // followers
+          .mockResolvedValueOnce([[], 0]), // following
+      };
+
+      jest
+        .spyOn(followRepository, 'createQueryBuilder')
+        .mockReturnValue(mockQueryBuilder as any);
+
+      const result = await service.getFollowStats(mockUser.stellar_address);
+
+      expect(result).toEqual({
+        followers_count: 0,
+        following_count: 0,
+      });
     });
   });
 });

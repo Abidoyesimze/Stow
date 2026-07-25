@@ -59,6 +59,22 @@ fn resolve_market_success() {
 }
 
 #[test]
+fn resolve_market_fails_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, oracle) = deploy(&env);
+    let creator = Address::generate(&env);
+
+    let id = client.create_market(&creator, &default_params(&env));
+    env.ledger().set_timestamp(env.ledger().timestamp() + 2000);
+
+    client.set_paused(&true, &1u32);
+
+    let result = client.try_resolve_market(&oracle, &id, &symbol_short!("yes"));
+    assert!(matches!(result, Err(Ok(InsightArenaError::Paused))));
+}
+
+#[test]
 fn resolve_market_unauthorized() {
     let env = Env::default();
     env.mock_all_auths();
@@ -165,6 +181,61 @@ fn update_oracle_unauthorized() {
     assert!(matches!(result, Err(Ok(InsightArenaError::Unauthorized))));
 }
 
+// ── Issue #534: three additional named tests ──────────────────────────────────
+
+#[test]
+fn test_resolve_market_invalid_outcome() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, oracle) = deploy(&env);
+    let creator = Address::generate(&env);
+
+    // default_params has outcomes ["yes", "no"]
+    let id = client.create_market(&creator, &default_params(&env));
+    env.ledger().set_timestamp(env.ledger().timestamp() + 2000);
+
+    let result = client.try_resolve_market(&oracle, &id, &symbol_short!("maybe"));
+    assert!(matches!(result, Err(Ok(InsightArenaError::InvalidOutcome))));
+}
+
+#[test]
+fn test_resolve_already_resolved_market() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, oracle) = deploy(&env);
+    let creator = Address::generate(&env);
+
+    let id = client.create_market(&creator, &default_params(&env));
+    env.ledger().set_timestamp(env.ledger().timestamp() + 2000);
+
+    // First resolution succeeds.
+    client.resolve_market(&oracle, &id, &symbol_short!("yes"));
+
+    // Second attempt on the same market must fail.
+    let result = client.try_resolve_market(&oracle, &id, &symbol_short!("yes"));
+    assert!(matches!(
+        result,
+        Err(Ok(InsightArenaError::MarketAlreadyResolved))
+    ));
+}
+
+#[test]
+fn test_resolve_market_too_early() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, oracle) = deploy(&env);
+    let creator = Address::generate(&env);
+
+    // resolution_time = now + 2000; do not advance time at all.
+    let id = client.create_market(&creator, &default_params(&env));
+
+    let result = client.try_resolve_market(&oracle, &id, &symbol_short!("yes"));
+    assert!(matches!(
+        result,
+        Err(Ok(InsightArenaError::MarketStillOpen))
+    ));
+}
+
 // New test: ensure oracle cannot resolve before resolution_time
 #[test]
 fn test_resolve_market_before_resolution_time() {
@@ -181,4 +252,25 @@ fn test_resolve_market_before_resolution_time() {
         result,
         Err(Ok(InsightArenaError::MarketStillOpen))
     ));
+}
+
+#[test]
+fn resolve_market_rejects_one_second_before_and_succeeds_at_resolution_time() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, oracle) = deploy(&env);
+    let creator = Address::generate(&env);
+    let now = env.ledger().timestamp();
+    let mut params = default_params(&env);
+    params.resolution_time = now + 3600;
+
+    let id = client.create_market(&creator, &params);
+
+    env.ledger().set_timestamp(now + 3599);
+    let early = client.try_resolve_market(&oracle, &id, &symbol_short!("yes"));
+    assert!(matches!(early, Err(Ok(InsightArenaError::MarketStillOpen))));
+
+    env.ledger().set_timestamp(now + 3600);
+    client.resolve_market(&oracle, &id, &symbol_short!("yes"));
+    assert!(client.get_market(&id).is_resolved);
 }

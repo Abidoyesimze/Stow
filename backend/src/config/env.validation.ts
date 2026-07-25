@@ -3,6 +3,7 @@ import {
   IsEnum,
   IsNotEmpty,
   IsNumber,
+  IsOptional,
   IsString,
   MinLength,
   validateSync,
@@ -43,6 +44,74 @@ class EnvironmentVariables {
 
   @IsNumber()
   PORT: number = 3000;
+
+  @IsNumber()
+  WEBHOOK_MAX_ATTEMPTS: number = 5;
+
+  @IsNumber()
+  WEBHOOK_TIMEOUT_MS: number = 5000;
+
+  @IsNumber()
+  WEBHOOK_BATCH_SIZE: number = 50;
+
+  @IsOptional()
+  @IsString()
+  RECONCILE_ENABLED?: string;
+
+  @IsOptional()
+  @IsNumber()
+  RECONCILE_INTERVAL_MS?: number;
+
+  @IsOptional()
+  @IsNumber()
+  RECONCILE_WINDOW?: number;
+
+  @IsString()
+  EXPORT_DIR: string = './exports';
+
+  @IsNumber()
+  EXPORT_TTL_HOURS: number = 48;
+
+  @IsString()
+  LEADERBOARD_SNAPSHOT_CRON: string = '0 * * * *';
+
+  @IsNumber()
+  LEADERBOARD_SNAPSHOT_RETENTION_DAYS: number = 30;
+
+  // Oracle submission anomaly detection (#1364)
+  @IsOptional()
+  @IsNumber()
+  ORACLE_ANOMALY_THRESHOLD?: number;
+
+  @IsOptional()
+  @IsNumber()
+  ORACLE_ANOMALY_MIN_SAMPLES?: number;
+
+  @IsOptional()
+  @IsNumber()
+  ORACLE_ANOMALY_WINDOW?: number;
+
+  @IsOptional()
+  @IsString()
+  ORACLE_ANOMALY_HOLD?: string;
+
+  // Dispute evidence attachments (#1363)
+  @IsOptional()
+  @IsNumber()
+  DISPUTE_EVIDENCE_MAX_SIZE_BYTES?: number;
+
+  @IsOptional()
+  @IsString()
+  DISPUTE_EVIDENCE_ALLOWED_MIME_TYPES?: string;
+
+  // Incoming webhook signature verification & replay protection (#1376)
+  @IsOptional()
+  @IsString()
+  WEBHOOK_HMAC_SECRET?: string;
+
+  @IsOptional()
+  @IsNumber()
+  WEBHOOK_REPLAY_WINDOW_SECONDS?: number;
 }
 
 export function validate(config: Record<string, unknown>) {

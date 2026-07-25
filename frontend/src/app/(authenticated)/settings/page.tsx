@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   User,
   Bell,
@@ -344,6 +344,37 @@ function SidebarNav({ active }: { active: string }) {
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function SettingsPage() {
+  const [activeSection, setActiveSection] = useState("profile");
+
+  useEffect(() => {
+    // Create IntersectionObserver to track which section is visible
+    const observerOptions: IntersectionObserverInit = {
+      root: null,
+      rootMargin: "-50% 0px -50% 0px", // Trigger when section is in the middle of the viewport
+      threshold: 0,
+    };
+
+    const observer = new IntersectionObserver((entries) => {
+      // Find the section that's currently most visible
+      const visibleEntry = entries.find((entry) => entry.isIntersecting);
+      if (visibleEntry) {
+        setActiveSection(visibleEntry.target.id);
+      }
+    }, observerOptions);
+
+    // Observe all section elements
+    const sections = document.querySelectorAll(
+      "section[id='profile'], section[id='notifications'], section[id='privacy'], section[id='danger']",
+    );
+    sections.forEach((section) => observer.observe(section));
+
+    // Cleanup observer on unmount
+    return () => {
+      sections.forEach((section) => observer.unobserve(section));
+      observer.disconnect();
+    };
+  }, []);
+
   return (
     <div className="space-y-6 p-4 sm:p-6">
       <h1 className="text-white text-2xl font-bold">Settings</h1>
@@ -354,7 +385,7 @@ export default function SettingsPage() {
       <div className="pt-4 flex gap-8 items-start">
         {/* Sticky sidebar — desktop only */}
         <aside className="hidden lg:block w-44 flex-shrink-0 sticky top-6">
-          <SidebarNav active="profile" />
+          <SidebarNav active={activeSection} />
         </aside>
 
         {/* Mobile tab bar */}

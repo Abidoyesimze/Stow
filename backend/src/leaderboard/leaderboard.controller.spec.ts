@@ -1,7 +1,9 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { LeaderboardController } from './leaderboard.controller';
 import { LeaderboardService } from './leaderboard.service';
 import {
+  LeaderboardEntryResponse,
   LeaderboardQueryDto,
   PaginatedLeaderboardResponse,
 } from './dto/leaderboard-query.dto';
@@ -33,12 +35,22 @@ describe('LeaderboardController', () => {
       controllers: [LeaderboardController],
       providers: [
         {
+          provide: CACHE_MANAGER,
+          useValue: {
+            get: jest.fn(),
+            set: jest.fn(),
+            del: jest.fn(),
+          },
+        },
+        {
           provide: LeaderboardService,
           useValue: {
+            getTopLeaderboard: jest.fn(),
             getLeaderboard: jest.fn(),
             getUserRank: jest.fn(),
             getHistory: jest.fn(),
             getHistoryForAddress: jest.fn(),
+            getRankHistory: jest.fn(),
           },
         },
       ],
@@ -80,6 +92,20 @@ describe('LeaderboardController', () => {
       expect(spy).toHaveBeenCalledWith(
         expect.objectContaining({ season_id: 'season-1' }),
       );
+    });
+  });
+
+  describe('getTopLeaderboard', () => {
+    it('should return top N leaderboard entries', async () => {
+      const mockTop: LeaderboardEntryResponse[] = [mockResponse.data[0]];
+      const spy = jest
+        .spyOn(service, 'getTopLeaderboard')
+        .mockResolvedValue(mockTop);
+
+      const result = await controller.getTopLeaderboard(1);
+
+      expect(spy).toHaveBeenCalledWith(1);
+      expect(result).toEqual(mockTop);
     });
   });
 
@@ -168,6 +194,41 @@ describe('LeaderboardController', () => {
 
       await expect(controller.getUserRank('INVALID_ADDRESS')).rejects.toThrow();
       expect(spy).toHaveBeenCalledWith('INVALID_ADDRESS');
+    });
+  });
+
+  describe('getRankHistory', () => {
+    it('should return rank history for a stellar address', async () => {
+      const mockRankHistory = {
+        user_id: 'user-uuid-1',
+        data: [
+          { captured_at: new Date(), rank: 3, score: 100, rank_delta: null },
+        ],
+      };
+      const spy = jest
+        .spyOn(service, 'getRankHistory')
+        .mockResolvedValue(mockRankHistory);
+
+      const result = await controller.getRankHistory(
+        'GBRPYHIL2CI3WHZDTOOQFC6EB4RRJC3XNRBF7XN',
+        {},
+      );
+
+      expect(spy).toHaveBeenCalledWith(
+        'GBRPYHIL2CI3WHZDTOOQFC6EB4RRJC3XNRBF7XN',
+        {},
+      );
+      expect(result).toEqual(mockRankHistory);
+    });
+
+    it('should propagate NotFoundException for unknown address', async () => {
+      jest
+        .spyOn(service, 'getRankHistory')
+        .mockRejectedValue(new Error('User not found'));
+
+      await expect(
+        controller.getRankHistory('INVALID_ADDRESS', {}),
+      ).rejects.toThrow();
     });
   });
 });

@@ -35,4 +35,7 @@ export class UserScoreResponseDto {
     description: 'Whether user is a winner (all predictions correct)',
   })
   isWinner: boolean;
+
+  @ApiProperty({ description: 'Total points earned by the user' })
+  totalPoints: number;
 }

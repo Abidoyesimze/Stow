@@ -24,11 +24,17 @@ import { CreatorEventsService } from './creator-events.service';
 import { EventByCodeResponseDto } from './dto/event-by-code-response.dto';
 import { ListMatchesQueryDto } from './dto/list-matches-query.dto';
 import { ListParticipantsQueryDto } from './dto/list-participants-query.dto';
+import { LeaderboardQueryDto } from './dto/leaderboard-query.dto';
 import { SearchEventsQueryDto } from './dto/search-events-query.dto';
 import { SearchEventsResponseDto } from './dto/search-events-response.dto';
 import { UserScoreResponseDto } from './dto/user-score-response.dto';
 import { UserPredictionsResponseDto } from './dto/user-predictions-response.dto';
 import { EventStatsResponseDto } from './dto/event-stats-response.dto';
+import {
+  PaginatedPayoutsDto,
+  PayoutEntryDto,
+  PayoutsQueryDto,
+} from './dto/payouts.dto';
 
 @ApiTags('creator-events')
 @Controller('creator-events')
@@ -102,6 +108,27 @@ export class CreatorEventsController {
   }
 
   /**
+   * GET /api/creator-events/:id/leaderboard
+   * Ranked event leaderboard. Reads from DB cache for finalized events,
+   * falls back to live contract view otherwise.
+   */
+  @Get(':id/leaderboard')
+  @UseInterceptors(CacheInterceptor)
+  @CacheTTL(30) // 30 seconds
+  @ApiOperation({ summary: 'Get ranked leaderboard for an event' })
+  @ApiQuery({ name: 'page', required: false, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, example: 20 })
+  @ApiResponse({ status: 200, description: 'Paginated leaderboard entries' })
+  @ApiResponse({ status: 404, description: 'Event not found' })
+  getLeaderboard(
+    @Param('id') id: string,
+    @Query(new ValidationPipe({ transform: true, whitelist: true }))
+    query: LeaderboardQueryDto,
+  ) {
+    return this.creatorEventsService.getLeaderboard(id, query);
+  }
+
+  /**
    * GET /api/creator-events/:id/matches
    * #728 — Fetch all matches for an event with filtering and sorting.
    */
@@ -116,6 +143,25 @@ export class CreatorEventsController {
     @Query() query: ListMatchesQueryDto,
   ) {
     return this.creatorEventsService.getEventMatches(id, query);
+  }
+
+  /**
+   * GET /api/creator-events/:id/matches/upcoming
+   * #1131 — Fetch only future, unresolved matches ordered by match_time ASC.
+   */
+  @Get(':id/matches/upcoming')
+  @UseInterceptors(CacheInterceptor)
+  @CacheTTL(60)
+  @ApiOperation({
+    summary: 'Get upcoming (unresolved, future) matches for an event',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Upcoming matches ordered by match time',
+  })
+  @ApiResponse({ status: 404, description: 'Event not found' })
+  getUpcomingMatches(@Param('id') id: string) {
+    return this.creatorEventsService.getUpcomingMatches(id);
   }
 
   /**
@@ -176,6 +222,58 @@ export class CreatorEventsController {
     @Param('address') address: string,
   ): Promise<UserScoreResponseDto> {
     return this.creatorEventsService.getUserScore(id, address);
+  }
+
+  /**
+   * GET /api/creator-events/:id/payouts
+   * #958 — Paginated list of all prize payouts for a finalized event,
+   * ordered by rank ascending. Returns 404 when the event does not exist
+   * or has not been finalized yet.
+   */
+  @Get(':id/payouts')
+  @UseInterceptors(CacheInterceptor)
+  @CacheTTL(60) // 1 minute — payouts are immutable once created
+  @ApiOperation({ summary: 'List all prize payouts for a finalized event' })
+  @ApiQuery({ name: 'page', required: false, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, example: 20 })
+  @ApiResponse({
+    status: 200,
+    description: 'Paginated payout list ordered by rank',
+    type: PaginatedPayoutsDto,
+  })
+  @ApiResponse({ status: 404, description: 'Event not found or not finalized' })
+  getPayouts(
+    @Param('id') id: string,
+    @Query(new ValidationPipe({ transform: true, whitelist: true }))
+    query: PayoutsQueryDto,
+  ): Promise<PaginatedPayoutsDto> {
+    return this.creatorEventsService.getPayouts(id, query);
+  }
+
+  /**
+   * GET /api/creator-events/:id/payouts/:address
+   * #958 — Returns the payout record for a single address.
+   * Returns 404 when the address did not participate or the event has not
+   * been finalized.
+   */
+  @Get(':id/payouts/:address')
+  @UseInterceptors(CacheInterceptor)
+  @CacheTTL(60)
+  @ApiOperation({ summary: 'Get prize payout for a specific address' })
+  @ApiResponse({
+    status: 200,
+    description: 'Payout record for the address',
+    type: PayoutEntryDto,
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Address has no payout in this event',
+  })
+  getPayoutByAddress(
+    @Param('id') id: string,
+    @Param('address') address: string,
+  ): Promise<PayoutEntryDto> {
+    return this.creatorEventsService.getPayoutByAddress(id, address);
   }
 }
 

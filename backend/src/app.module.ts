@@ -33,6 +33,10 @@ import { SorobanModule } from './soroban/soroban.module';
 import { UsersModule } from './users/users.module';
 import { DisputesModule } from './disputes/disputes.module';
 import { ContractModule } from './contract/contract.module';
+import { CacheWarmingModule } from './cache/cache-warming.module';
+import { WebsocketModule } from './websocket/websocket.module';
+import { WebhooksModule } from './webhooks/webhooks.module';
+import { AccountModule } from './account/account.module';
 
 @Module({
   imports: [
@@ -96,6 +100,10 @@ import { ContractModule } from './contract/contract.module';
     MatchesModule,
     IndexerModule,
     ContractModule,
+    CacheWarmingModule,
+    WebsocketModule,
+    WebhooksModule,
+    AccountModule,
   ],
 
   controllers: [AppController],

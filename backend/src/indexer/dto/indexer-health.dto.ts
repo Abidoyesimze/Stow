@@ -68,6 +68,23 @@ export class IndexerHealthResponseDto {
   alerts: IndexerAlertDto[];
 }
 
+export class ReconciliationStatusDto {
+  @ApiProperty()
+  enabled: boolean;
+
+  @ApiProperty()
+  is_running: boolean;
+
+  @ApiProperty({ nullable: true })
+  last_run_at: string | null;
+
+  @ApiProperty()
+  last_backfill_count: number;
+
+  @ApiProperty()
+  lag_in_ledgers: number;
+}
+
 export class IndexerDashboardDto extends IndexerHealthResponseDto {
   @ApiProperty()
   events_per_second: number;

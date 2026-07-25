@@ -1,4 +1,5 @@
 import { Controller, Get, Header, Post, UseGuards } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -12,15 +13,21 @@ import { Role } from '../common/enums/role.enum';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { IndexerHealthService } from './health.service';
+import { ReconciliationService } from './reconciliation.service';
 import {
   IndexerDashboardDto,
   IndexerHealthResponseDto,
+  ReconciliationStatusDto,
 } from './dto/indexer-health.dto';
 
 @ApiTags('Indexer')
 @Controller('indexer')
 export class IndexerHealthController {
-  constructor(private readonly healthService: IndexerHealthService) {}
+  constructor(
+    private readonly healthService: IndexerHealthService,
+    private readonly reconciliationService: ReconciliationService,
+    private readonly configService: ConfigService,
+  ) {}
 
   /**
    * GET /api/indexer/health
@@ -69,6 +76,37 @@ export class IndexerHealthController {
   })
   getPrometheusMetrics(): Promise<string> {
     return this.healthService.getPrometheusMetrics();
+  }
+
+  @Get('health/reconciliation')
+  @Public()
+  @ApiOperation({ summary: 'Get reconciliation status and lag' })
+  @ApiResponse({
+    status: 200,
+    description: 'Reconciliation status with non-negative lag',
+    type: ReconciliationStatusDto,
+  })
+  async getReconciliationStatus(): Promise<ReconciliationStatusDto> {
+    const status = this.reconciliationService.getStatus();
+    const contractId = this.configService.get<string>('SOROBAN_CONTRACT_ID');
+    let lag = 0;
+
+    if (contractId && contractId !== 'your-contract-id-here') {
+      const checkpoint =
+        await this.reconciliationService.getCheckpointForContract(contractId);
+      if (checkpoint) {
+        lag = Math.max(
+          0,
+          Number(checkpoint.chain_head_ledger) -
+            Number(checkpoint.last_indexed_ledger),
+        );
+      }
+    }
+
+    return {
+      ...status,
+      lag_in_ledgers: lag,
+    };
   }
 
   /**

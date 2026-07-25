@@ -6,6 +6,11 @@ import {
   ContractService,
 } from '../contract/contract.service';
 import { CreatorEvent } from '../matches/entities/creator-event.entity';
+import { CreatorEventLeaderboardEntry } from '../matches/entities/creator-event-leaderboard-entry.entity';
+import { CreatorEventPayout } from '../matches/entities/creator-event-payout.entity';
+import { Match } from '../matches/entities/match.entity';
+import { MatchPrediction } from '../matches/entities/match-prediction.entity';
+import { User } from '../users/entities/user.entity';
 import { CreatorEventsService } from './creator-events.service';
 
 describe('CreatorEventsService predictions and stats', () => {
@@ -21,6 +26,10 @@ describe('CreatorEventsService predictions and stats', () => {
       | 'getPredictionDistribution'
     >
   >;
+  let creatorEventRepository: {
+    createQueryBuilder: jest.Mock;
+    findOne: jest.Mock;
+  };
 
   const mockEvent = {
     eventId: '1',
@@ -66,13 +75,38 @@ describe('CreatorEventsService predictions and stats', () => {
       getPredictionDistribution: jest.fn(),
     };
 
+    creatorEventRepository = {
+      createQueryBuilder: jest.fn(),
+      findOne: jest.fn(),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         CreatorEventsService,
         { provide: ContractService, useValue: contractService },
         {
           provide: getRepositoryToken(CreatorEvent),
-          useValue: { createQueryBuilder: jest.fn() },
+          useValue: creatorEventRepository,
+        },
+        {
+          provide: getRepositoryToken(CreatorEventLeaderboardEntry),
+          useValue: {},
+        },
+        {
+          provide: getRepositoryToken(Match),
+          useValue: {},
+        },
+        {
+          provide: getRepositoryToken(MatchPrediction),
+          useValue: {},
+        },
+        {
+          provide: getRepositoryToken(User),
+          useValue: {},
+        },
+        {
+          provide: getRepositoryToken(CreatorEventPayout),
+          useValue: {},
         },
       ],
     }).compile();
@@ -153,6 +187,11 @@ describe('CreatorEventsService predictions and stats', () => {
     });
 
     it('calculates event statistics with distribution and completion rate', async () => {
+      creatorEventRepository.findOne.mockResolvedValue({
+        prize_pool: '5010000000',
+        total_entry_fees_collected: '10000000',
+      });
+
       const result = await service.getEventStats('1');
 
       expect(result.totalParticipants).toBe(3);
@@ -165,6 +204,17 @@ describe('CreatorEventsService predictions and stats', () => {
       expect(result.averagePredictionsPerUser).toBe(1.67);
       expect(result.completionRate).toBe(67);
       expect(result.winnersVerified).toBe(false);
+      expect(result.prizePool).toBe('5010000000');
+      expect(result.totalEntryFeesCollected).toBe('10000000');
+    });
+
+    it('defaults prize pool and entry fees to "0" when no cached event exists', async () => {
+      creatorEventRepository.findOne.mockResolvedValue(null);
+
+      const result = await service.getEventStats('1');
+
+      expect(result.prizePool).toBe('0');
+      expect(result.totalEntryFeesCollected).toBe('0');
     });
 
     it('throws when event is not found', async () => {

@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Search, ChevronDown } from "lucide-react";
 import EventCard, { CreatorEventStatus } from "@/component/creator-events/EventCard";
 import { Button } from "@/component/ui/button";
@@ -17,6 +18,8 @@ interface CreatorEvent {
   endsAt: string;
   joined: boolean;
   createdAt: string;
+  category?: string;
+  bannerUrl?: string;
 }
 
 const eventData: CreatorEvent[] = [
@@ -32,6 +35,8 @@ const eventData: CreatorEvent[] = [
     endsAt: "Jun 4, 2026",
     joined: true,
     createdAt: "2026-05-18",
+    category: "Football",
+    bannerUrl: "/creator-events/apollo-banner.jpg",
   },
   {
     id: "event-002",
@@ -45,6 +50,8 @@ const eventData: CreatorEvent[] = [
     endsAt: "May 12, 2026",
     joined: false,
     createdAt: "2026-05-06",
+    category: "Crypto",
+    bannerUrl: "/creator-events/finals-banner.jpg",
   },
   {
     id: "event-003",
@@ -58,6 +65,8 @@ const eventData: CreatorEvent[] = [
     endsAt: "Jun 14, 2026",
     joined: false,
     createdAt: "2026-05-22",
+    category: "Football",
+    bannerUrl: "/creator-events/rising-stars-banner.jpg",
   },
   {
     id: "event-004",
@@ -71,6 +80,7 @@ const eventData: CreatorEvent[] = [
     endsAt: "May 29, 2026",
     joined: false,
     createdAt: "2026-05-09",
+    category: "Esports",
   },
 ];
 
@@ -87,16 +97,32 @@ const sortOptions = [
   { label: "Ending Soon", value: "ending" },
 ] as const;
 
+const ALL_CATEGORIES = "All";
+
+function deriveCategories(events: CreatorEvent[]): string[] {
+  const seen = new Set<string>();
+  for (const event of events) {
+    if (event.category) seen.add(event.category);
+  }
+  return Array.from(seen).sort();
+}
+
 export default function CreatorEventsPage() {
+  const router = useRouter();
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState<CreatorEventStatus | "All">("All");
+  const [categoryFilter, setCategoryFilter] = useState<string>(ALL_CATEGORIES);
   const [sortKey, setSortKey] = useState<typeof sortOptions[number]["value"]>("newest");
+
+  const categories = useMemo(() => deriveCategories(eventData), []);
 
   const visibleEvents = useMemo(() => {
     const filtered = eventData.filter((event) => {
       const matchesTitle = event.title.toLowerCase().includes(searchTerm.toLowerCase());
       const matchesStatus = statusFilter === "All" || event.status === statusFilter;
-      return matchesTitle && matchesStatus;
+      const matchesCategory =
+        categoryFilter === ALL_CATEGORIES || event.category === categoryFilter;
+      return matchesTitle && matchesStatus && matchesCategory;
     });
 
     return [...filtered].sort((a, b) => {
@@ -108,7 +134,7 @@ export default function CreatorEventsPage() {
       }
       return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
     });
-  }, [searchTerm, statusFilter, sortKey]);
+  }, [searchTerm, statusFilter, categoryFilter, sortKey]);
 
   const totalActiveEvents = eventData.filter((event) => event.status === "Active").length;
   const totalParticipants = eventData.reduce((sum, event) => sum + event.participants, 0);
@@ -188,6 +214,33 @@ export default function CreatorEventsPage() {
             </div>
           </div>
 
+          {/* Category filter row */}
+          {categories.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 rounded-3xl border border-white/10 bg-slate-900/80 px-6 py-4 shadow-xl shadow-black/20">
+              <span className="mr-1 text-xs uppercase tracking-[0.22em] text-slate-500">Category</span>
+              <Button
+                key={ALL_CATEGORIES}
+                variant={categoryFilter === ALL_CATEGORIES ? "default" : "outline"}
+                size="sm"
+                onClick={() => setCategoryFilter(ALL_CATEGORIES)}
+                className="rounded-full border-white/10 px-4 text-xs font-semibold uppercase tracking-[0.18em]"
+              >
+                All
+              </Button>
+              {categories.map((cat) => (
+                <Button
+                  key={cat}
+                  variant={categoryFilter === cat ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setCategoryFilter(cat)}
+                  className="rounded-full border-white/10 px-4 text-xs font-semibold uppercase tracking-[0.18em]"
+                >
+                  {cat}
+                </Button>
+              ))}
+            </div>
+          )}
+
           {visibleEvents.length > 0 ? (
             <div className="grid gap-6 xl:grid-cols-2">
               {visibleEvents.map((event) => (
@@ -202,9 +255,9 @@ export default function CreatorEventsPage() {
                   status={event.status}
                   endsAt={event.endsAt}
                   joined={event.joined}
-                  onViewDetails={() => {
-                    /* Navigation placeholder for future detail page */
-                  }}
+                  category={event.category}
+                  bannerUrl={event.bannerUrl}
+                  onViewDetails={() => router.push(`/creator-events/${event.id}`)}
                 />
               ))}
             </div>

@@ -1,4 +1,4 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class SearchHighlightsDto {
   @ApiProperty({ required: false })
@@ -41,6 +41,23 @@ export class SearchEventResultDto {
 
   @ApiProperty()
   rank: number;
+
+  @ApiPropertyOptional({ description: 'Total prize pool in stroops' })
+  prize_pool?: string;
+
+  @ApiPropertyOptional({ description: 'Entry fee in stroops' })
+  entry_fee?: string;
+
+  @ApiPropertyOptional({ description: 'Campaign category slug' })
+  category?: string;
+
+  @ApiPropertyOptional({ description: 'Campaign banner URL' })
+  banner_url?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Whether the campaign has been finalized',
+  })
+  is_finalized?: boolean;
 
   @ApiProperty({ type: SearchHighlightsDto })
   highlights: SearchHighlightsDto;

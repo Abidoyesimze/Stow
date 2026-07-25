@@ -112,6 +112,26 @@ fn conditional_params(
 }
 
 #[test]
+fn test_create_conditional_market_fails_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    let parent_id = client.create_market(&creator, &default_params(&env));
+
+    client.set_paused(&true, &1u32);
+
+    let result = client.try_create_conditional_market(
+        &creator,
+        &parent_id,
+        &symbol_short!("yes"),
+        &conditional_params(&env, &client, parent_id),
+    );
+    assert!(matches!(result, Err(Ok(InsightArenaError::Paused))));
+}
+
+#[test]
 fn test_create_conditional_market_invalid_parent_fails() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1791,7 +1811,10 @@ fn test_conditional_market_deactivates_on_parent_cancel() {
     assert!(!conditional.is_activated, "child should be deactivated");
 
     let child_market = read_market(&env, &client, child_id);
-    assert!(child_market.is_cancelled, "child market should be cancelled");
+    assert!(
+        child_market.is_cancelled,
+        "child market should be cancelled"
+    );
 }
 
 #[test]
@@ -1830,7 +1853,10 @@ fn test_conditional_market_deactivates_on_wrong_outcome() {
     let no_cond = read_conditional(&env, &client, no_child_id);
     assert!(!no_cond.is_activated, "no child should be deactivated");
     let no_market = read_market(&env, &client, no_child_id);
-    assert!(no_market.is_cancelled, "no child market should be cancelled");
+    assert!(
+        no_market.is_cancelled,
+        "no child market should be cancelled"
+    );
 }
 
 #[test]
@@ -1897,6 +1923,92 @@ fn test_calculate_depth_first_level_is_one() {
     assert_eq!(client.calculate_conditional_depth(&child_id), 1);
 }
 
+// ── Issue #581: three named creation tests ────────────────────────────────────
+
+#[test]
+fn test_create_conditional_market_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    let parent_id = client.create_market(&creator, &default_params(&env));
+    let child_id = client.create_conditional_market(
+        &creator,
+        &parent_id,
+        &symbol_short!("yes"),
+        &conditional_params(&env, &client, parent_id),
+    );
+
+    // Market is accessible via get_market.
+    let child_market = client.get_market(&child_id);
+    assert_eq!(child_market.market_id, child_id);
+
+    // ConditionalMarket metadata is stored correctly.
+    let cond = read_conditional(&env, &client, child_id);
+    assert_eq!(cond.parent_market_id, parent_id);
+    assert_eq!(cond.required_outcome, symbol_short!("yes"));
+    assert!(!cond.is_activated);
+    assert_eq!(cond.activation_time, None);
+}
+
+#[test]
+fn test_create_conditional_market_depth_limit_enforced() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    // Build a chain at maximum depth (5 levels deep from root).
+    let mut parent = client.create_market(&creator, &default_params(&env));
+    for _ in 0..5 {
+        parent = client.create_conditional_market(
+            &creator,
+            &parent,
+            &symbol_short!("yes"),
+            &conditional_params(&env, &client, parent),
+        );
+    }
+
+    // Depth is now 5; any further nesting must be rejected.
+    let result = client.try_create_conditional_market(
+        &creator,
+        &parent,
+        &symbol_short!("yes"),
+        &conditional_params(&env, &client, parent),
+    );
+    assert!(matches!(
+        result,
+        Err(Ok(InsightArenaError::ConditionalDepthExceeded))
+    ));
+}
+
+#[test]
+fn test_create_conditional_market_stores_parent_reference() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    let parent_id = client.create_market(&creator, &default_params(&env));
+    let child_id = client.create_conditional_market(
+        &creator,
+        &parent_id,
+        &symbol_short!("yes"),
+        &conditional_params(&env, &client, parent_id),
+    );
+
+    // The ConditionalParent storage key must point back to the parent.
+    let contract_id = client.address.clone();
+    let stored_parent: u64 = env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ConditionalParent(child_id))
+            .unwrap()
+    });
+    assert_eq!(stored_parent, parent_id);
+}
+
 #[test]
 fn test_calculate_depth_nested_three_levels() {
     let env = Env::default();
@@ -1928,4 +2040,270 @@ fn test_calculate_depth_nested_three_levels() {
     assert_eq!(client.calculate_conditional_depth(&c1), 1);
     assert_eq!(client.calculate_conditional_depth(&c2), 2);
     assert_eq!(client.calculate_conditional_depth(&c3), 3);
+}
+
+// ── Issue #xxx: Cascading Activation Through Conditional Chain ─────────────────
+
+#[test]
+fn test_cascading_activation_through_full_chain_on_matching_outcomes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, oracle) = deploy_with_oracle(&env);
+    let creator = Address::generate(&env);
+
+    // Build a 4-level deep chain: root -> c1 -> c2 -> c3
+    let root = client.create_market(&creator, &default_params(&env));
+    let c1 = client.create_conditional_market(
+        &creator,
+        &root,
+        &symbol_short!("yes"),
+        &conditional_params(&env, &client, root),
+    );
+    let c2 = client.create_conditional_market(
+        &creator,
+        &c1,
+        &symbol_short!("yes"),
+        &conditional_params(&env, &client, c1),
+    );
+    let c3 = client.create_conditional_market(
+        &creator,
+        &c2,
+        &symbol_short!("yes"),
+        &conditional_params(&env, &client, c2),
+    );
+
+    // All should start inactive with no activation time
+    assert!(!read_conditional(&env, &client, c1).is_activated);
+    assert!(!read_conditional(&env, &client, c2).is_activated);
+    assert!(!read_conditional(&env, &client, c3).is_activated);
+    assert_eq!(read_conditional(&env, &client, c1).activation_time, None);
+    assert_eq!(read_conditional(&env, &client, c2).activation_time, None);
+    assert_eq!(read_conditional(&env, &client, c3).activation_time, None);
+
+    // Resolve root with "yes" — should activate c1 only
+    set_timestamp(&env, 25_000);
+    client.resolve_market(&oracle, &root, &symbol_short!("yes"));
+
+    assert!(read_conditional(&env, &client, c1).is_activated);
+    assert_eq!(
+        read_conditional(&env, &client, c1).activation_time,
+        Some(25_000)
+    );
+    assert!(!read_conditional(&env, &client, c2).is_activated);
+    assert!(!read_conditional(&env, &client, c3).is_activated);
+    assert_eq!(read_conditional(&env, &client, c2).activation_time, None);
+    assert_eq!(read_conditional(&env, &client, c3).activation_time, None);
+
+    // Resolve c1 with "yes" — should activate c2 only
+    set_timestamp(&env, 26_000);
+    client.resolve_market(&oracle, &c1, &symbol_short!("yes"));
+
+    assert!(read_conditional(&env, &client, c2).is_activated);
+    assert_eq!(
+        read_conditional(&env, &client, c2).activation_time,
+        Some(26_000)
+    );
+    assert!(!read_conditional(&env, &client, c3).is_activated);
+    assert_eq!(read_conditional(&env, &client, c3).activation_time, None);
+
+    // Resolve c2 with "yes" — should activate c3 only
+    set_timestamp(&env, 27_000);
+    client.resolve_market(&oracle, &c2, &symbol_short!("yes"));
+
+    assert!(read_conditional(&env, &client, c3).is_activated);
+    assert_eq!(
+        read_conditional(&env, &client, c3).activation_time,
+        Some(27_000)
+    );
+
+    // Verify parent markets are resolved
+    assert!(read_market(&env, &client, root).is_resolved);
+    assert!(read_market(&env, &client, c1).is_resolved);
+    assert!(read_market(&env, &client, c2).is_resolved);
+
+    // Verify the chain is correct
+    let chain = client.get_conditional_chain(&c3);
+    assert_eq!(chain.depth, 4);
+    assert_eq!(chain.market_ids.len(), 4);
+    assert_eq!(chain.market_ids.get(0), Some(c3));
+    assert_eq!(chain.market_ids.get(1), Some(c2));
+    assert_eq!(chain.market_ids.get(2), Some(c1));
+    assert_eq!(chain.market_ids.get(3), Some(root));
+}
+
+// ── Issue #1357: resolution ordering (child before parent) ──────────────────
+
+#[test]
+fn test_resolve_child_before_parent_resolves_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, oracle) = deploy_with_oracle(&env);
+    let creator = Address::generate(&env);
+
+    let parent_id = client.create_market(&creator, &default_params(&env));
+    let child_id = client.create_conditional_market(
+        &creator,
+        &parent_id,
+        &symbol_short!("yes"),
+        &conditional_params(&env, &client, parent_id),
+    );
+
+    let child = read_market(&env, &client, child_id);
+    set_timestamp(&env, child.resolution_time);
+
+    let result = client.try_resolve_market(&oracle, &child_id, &symbol_short!("yes"));
+    assert!(matches!(
+        result,
+        Err(Ok(InsightArenaError::ParentNotResolved))
+    ));
+}
+
+#[test]
+fn test_resolve_child_after_parent_resolves_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, oracle) = deploy_with_oracle(&env);
+    let creator = Address::generate(&env);
+
+    let parent_id = client.create_market(&creator, &default_params(&env));
+    let child_id = client.create_conditional_market(
+        &creator,
+        &parent_id,
+        &symbol_short!("yes"),
+        &conditional_params(&env, &client, parent_id),
+    );
+
+    let parent = read_market(&env, &client, parent_id);
+    set_timestamp(&env, parent.resolution_time);
+    client.resolve_market(&oracle, &parent_id, &symbol_short!("yes"));
+
+    let child = read_market(&env, &client, child_id);
+    set_timestamp(&env, child.resolution_time);
+    client.resolve_market(&oracle, &child_id, &symbol_short!("yes"));
+
+    assert!(read_market(&env, &client, child_id).is_resolved);
+}
+
+#[test]
+fn test_resolve_grandchild_before_immediate_parent_fails_even_if_root_resolved() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, oracle) = deploy_with_oracle(&env);
+    let creator = Address::generate(&env);
+
+    let root_id = client.create_market(&creator, &default_params(&env));
+    let child_id = client.create_conditional_market(
+        &creator,
+        &root_id,
+        &symbol_short!("yes"),
+        &conditional_params(&env, &client, root_id),
+    );
+    let grandchild_id = client.create_conditional_market(
+        &creator,
+        &child_id,
+        &symbol_short!("yes"),
+        &conditional_params(&env, &client, child_id),
+    );
+
+    let root = read_market(&env, &client, root_id);
+    set_timestamp(&env, root.resolution_time);
+    client.resolve_market(&oracle, &root_id, &symbol_short!("yes"));
+
+    // child (grandchild's immediate parent) is still unresolved.
+    let grandchild = read_market(&env, &client, grandchild_id);
+    set_timestamp(&env, grandchild.resolution_time);
+
+    let result = client.try_resolve_market(&oracle, &grandchild_id, &symbol_short!("yes"));
+    assert!(matches!(
+        result,
+        Err(Ok(InsightArenaError::ParentNotResolved))
+    ));
+}
+
+#[test]
+fn test_resolve_root_market_has_no_parent_dependency() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, oracle) = deploy_with_oracle(&env);
+    let creator = Address::generate(&env);
+
+    let root_id = client.create_market(&creator, &default_params(&env));
+    let root = read_market(&env, &client, root_id);
+    set_timestamp(&env, root.resolution_time);
+
+    client.resolve_market(&oracle, &root_id, &symbol_short!("yes"));
+    assert!(read_market(&env, &client, root_id).is_resolved);
+}
+
+// ── Issue #1357: get_dependency_status ───────────────────────────────────────
+
+#[test]
+fn test_dependency_status_root_market_has_no_parent() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    let root_id = client.create_market(&creator, &default_params(&env));
+    let status = client.get_dependency_status(&root_id);
+
+    assert_eq!(status.market_id, root_id);
+    assert!(!status.is_conditional);
+    assert_eq!(status.parent_market_id, None);
+    assert!(status.parent_resolved);
+}
+
+#[test]
+fn test_dependency_status_child_reflects_unresolved_parent() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    let parent_id = client.create_market(&creator, &default_params(&env));
+    let child_id = client.create_conditional_market(
+        &creator,
+        &parent_id,
+        &symbol_short!("yes"),
+        &conditional_params(&env, &client, parent_id),
+    );
+
+    let status = client.get_dependency_status(&child_id);
+    assert_eq!(status.market_id, child_id);
+    assert!(status.is_conditional);
+    assert_eq!(status.parent_market_id, Some(parent_id));
+    assert!(!status.parent_resolved);
+}
+
+#[test]
+fn test_dependency_status_child_reflects_resolved_parent() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, oracle) = deploy_with_oracle(&env);
+    let creator = Address::generate(&env);
+
+    let parent_id = client.create_market(&creator, &default_params(&env));
+    let child_id = client.create_conditional_market(
+        &creator,
+        &parent_id,
+        &symbol_short!("yes"),
+        &conditional_params(&env, &client, parent_id),
+    );
+
+    let parent = read_market(&env, &client, parent_id);
+    set_timestamp(&env, parent.resolution_time);
+    client.resolve_market(&oracle, &parent_id, &symbol_short!("yes"));
+
+    let status = client.get_dependency_status(&child_id);
+    assert!(status.parent_resolved);
+}
+
+#[test]
+fn test_dependency_status_unknown_market_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+
+    let result = client.try_get_dependency_status(&999_u64);
+    assert!(matches!(result, Err(Ok(InsightArenaError::MarketNotFound))));
 }

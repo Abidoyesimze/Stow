@@ -3,7 +3,9 @@ import {
   NotFoundException,
   BadRequestException,
   ConflictException,
+  ForbiddenException,
 } from '@nestjs/common';
+import * as crypto from 'crypto';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, SelectQueryBuilder } from 'typeorm';
 import {
@@ -12,6 +14,7 @@ import {
 } from './entities/competition.entity';
 import { CompetitionParticipant } from './entities/competition-participant.entity';
 import { CreateCompetitionDto } from './dto/create-competition.dto';
+import { UpdateCompetitionDto } from './dto/update-competition.dto';
 import {
   ListCompetitionsDto,
   CompetitionStatus,
@@ -43,7 +46,7 @@ export class CompetitionsService {
   async create(dto: CreateCompetitionDto, user: User): Promise<Competition> {
     const inviteCode =
       dto.visibility === CompetitionVisibility.Private
-        ? Math.random().toString(36).slice(2, 8).toUpperCase()
+        ? crypto.randomBytes(3).toString('hex').toUpperCase()
         : null;
 
     const competition = this.competitionsRepository.create({
@@ -213,6 +216,43 @@ export class CompetitionsService {
     }));
 
     return { data, total, page, limit };
+  }
+
+  async update(
+    id: string,
+    dto: UpdateCompetitionDto,
+    userId: string,
+  ): Promise<Competition> {
+    const competition = await this.competitionsRepository.findOne({
+      where: { id },
+      relations: ['creator'],
+    });
+
+    if (!competition) {
+      throw new NotFoundException(`Competition with ID "${id}" not found`);
+    }
+
+    if (competition.creator.id !== userId) {
+      throw new ForbiddenException(
+        'Only the creator can update this competition',
+      );
+    }
+
+    if (new Date() >= competition.start_time) {
+      throw new BadRequestException(
+        'Cannot update a competition that has already started',
+      );
+    }
+
+    if (dto.title !== undefined) competition.title = dto.title;
+    if (dto.description !== undefined)
+      competition.description = dto.description;
+    if (dto.prize_pool_stroops !== undefined)
+      competition.prize_pool_stroops = dto.prize_pool_stroops;
+    if (dto.max_participants !== undefined)
+      competition.max_participants = dto.max_participants;
+
+    return this.competitionsRepository.save(competition);
   }
 
   async findById(id: string): Promise<Competition | null> {

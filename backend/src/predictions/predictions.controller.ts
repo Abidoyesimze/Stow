@@ -26,9 +26,20 @@ import {
   PaginatedMyPredictionsResponse,
   PredictionWithStatus,
 } from './dto/list-my-predictions.dto';
+import {
+  ListMarketPredictionsDto,
+  PaginatedMarketPredictionsResponse,
+  PaginatedMarketPredictionsResponseDto,
+} from './dto/list-market-predictions.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { Public } from '../common/decorators/public.decorator';
+import { Idempotent } from '../common/idempotency/idempotent.decorator';
 import { User } from '../users/entities/user.entity';
 import { Prediction } from './entities/prediction.entity';
+import {
+  ClaimAllRewardsResponseDto,
+  RewardsSummaryDto,
+} from './dto/rewards-summary.dto';
 
 @ApiTags('Predictions')
 @ApiBearerAuth()
@@ -38,6 +49,7 @@ export class PredictionsController {
 
   @Post()
   @UseGuards(BanGuard)
+  @Idempotent()
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Submit a prediction on a market' })
   @ApiResponse({
@@ -45,11 +57,19 @@ export class PredictionsController {
     description: 'Prediction submitted',
     type: Prediction,
   })
-  @ApiResponse({ status: 400, description: 'Market closed or invalid outcome' })
+  @ApiResponse({
+    status: 400,
+    description: 'Market closed, invalid outcome, or missing Idempotency-Key',
+  })
   @ApiResponse({ status: 404, description: 'Market not found' })
   @ApiResponse({
     status: 409,
-    description: 'Duplicate prediction on this market',
+    description:
+      'Duplicate prediction on this market, or a request with the same Idempotency-Key is already in progress',
+  })
+  @ApiResponse({
+    status: 422,
+    description: 'Idempotency-Key reused with a different request body',
   })
   async submit(
     @Body() dto: SubmitPredictionDto,
@@ -69,6 +89,40 @@ export class PredictionsController {
     @CurrentUser() user: User,
   ): Promise<PaginatedMyPredictionsResponse> {
     return this.predictionsService.findMine(user, query);
+  }
+
+  @Get('rewards/summary')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: "Get the authenticated user's claimable and vesting rewards",
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Claimable, vesting, and total-earned balances in XLM',
+    type: RewardsSummaryDto,
+  })
+  async getRewardsSummary(
+    @CurrentUser() user: User,
+  ): Promise<RewardsSummaryDto> {
+    return this.predictionsService.getRewardsSummary(user);
+  }
+
+  @Post('rewards/claim')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      "Claim all of the authenticated user's currently claimable rewards",
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Rewards claimed; returns the refreshed summary',
+    type: ClaimAllRewardsResponseDto,
+  })
+  @ApiResponse({ status: 400, description: 'No claimable rewards' })
+  async claimAllRewards(
+    @CurrentUser() user: User,
+  ): Promise<ClaimAllRewardsResponseDto> {
+    return this.predictionsService.claimAllRewards(user);
   }
 
   @Get(':id')
@@ -132,5 +186,23 @@ export class PredictionsController {
     @CurrentUser() user: User,
   ): Promise<Prediction> {
     return this.predictionsService.claim(id, user);
+  }
+
+  @Public()
+  @Get('market/:marketId')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Get paginated, anonymized predictions for a market (public)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Paginated, anonymized predictions list',
+    type: PaginatedMarketPredictionsResponseDto,
+  })
+  async getMarketPredictions(
+    @Param('marketId', ParseUUIDPipe) marketId: string,
+    @Query() query: ListMarketPredictionsDto,
+  ): Promise<PaginatedMarketPredictionsResponse> {
+    return this.predictionsService.findByMarket(marketId, query);
   }
 }

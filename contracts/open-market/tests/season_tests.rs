@@ -615,28 +615,50 @@ fn test_participant_count_does_not_double_count() {
 #[test]
 fn test_reset_season_points_zeroes_all_user_points() {
     let env = Env::default();
-    let (client, xlm_token, admin, _oracle) = deploy(&env);
+    let (client, xlm_token, admin, oracle) = deploy(&env);
 
-    fund(&env, &xlm_token, &admin, 200_000_000);
+    fund(&env, &xlm_token, &admin, 500_000_000);
     approve_reward_pool(&env, &xlm_token, &admin, &client.address, 100_000_000);
 
-    let season_id = client.create_season(&admin, &0, &10_000, &100_000_000);
+    let _season_id = client.create_season(&admin, &0, &10_000, &100_000_000);
 
-    let user1 = Address::generate(&env);
-    let user2 = Address::generate(&env);
-    fund(&env, &xlm_token, &user1, 50_000_000);
-    fund(&env, &xlm_token, &user2, 50_000_000);
+    let winner1 = Address::generate(&env);
+    let winner2 = Address::generate(&env);
+    let winner3 = Address::generate(&env);
+    let loser = Address::generate(&env);
 
-    let market_id = client.create_market(&admin, &default_market_params(&env));
-    client.submit_prediction(&user1, &market_id, &symbol_short!("yes"), &10_000_000);
-    client.submit_prediction(&user2, &market_id, &symbol_short!("yes"), &10_000_000);
+    settle_winning_market(
+        &env, &client, &xlm_token, &oracle, &winner1, &loser, 10_000_000, 10_000_000,
+    );
+    settle_winning_market(
+        &env, &client, &xlm_token, &oracle, &winner2, &loser, 10_000_000, 10_000_000,
+    );
+    settle_winning_market(
+        &env, &client, &xlm_token, &oracle, &winner3, &loser, 10_000_000, 10_000_000,
+    );
 
-    client.reset_season_points(&admin, &season_id);
+    let p1 = client.get_user_stats(&winner1);
+    let p2 = client.get_user_stats(&winner2);
+    let p3 = client.get_user_stats(&winner3);
 
-    let profile1_after = client.get_user_stats(&user1);
-    let profile2_after = client.get_user_stats(&user2);
-    assert_eq!(profile1_after.season_points, 0);
-    assert_eq!(profile2_after.season_points, 0);
+    assert!(p1.season_points > 0);
+    assert!(p2.season_points > 0);
+    assert!(p3.season_points > 0);
+
+    let new_season_id = client.create_season(&admin, &10_000, &20_000, &100_000_000);
+    client.reset_season_points(&admin, &new_season_id);
+
+    let p1_after = client.get_user_stats(&winner1);
+    let p2_after = client.get_user_stats(&winner2);
+    let p3_after = client.get_user_stats(&winner3);
+
+    assert_eq!(p1_after.season_points, 0);
+    assert_eq!(p2_after.season_points, 0);
+    assert_eq!(p3_after.season_points, 0);
+
+    env.ledger().set_timestamp(15_000);
+    let active = client.get_active_season().unwrap();
+    assert_eq!(active.season_id, new_season_id);
 }
 
 #[test]
@@ -765,3 +787,73 @@ fn test_create_season_before_previous_starts_succeeds() {
     let season2_id = client.create_season(&admin, &100, &200, &100_000_000);
     assert_eq!(season2_id, 2);
 }
+
+#[test]
+fn test_create_season_overlapping_finalized_season_succeeds() {
+    let env = Env::default();
+    let (client, xlm_token, admin, _oracle) = deploy(&env);
+
+    fund(&env, &xlm_token, &admin, 300_000_000);
+    approve_reward_pool(&env, &xlm_token, &admin, &client.address, 300_000_000);
+
+    let season1_id = client.create_season(&admin, &100, &200, &100_000_000);
+    assert_eq!(season1_id, 1);
+
+    let result = client.try_create_season(&admin, &150, &250, &100_000_000);
+    assert_eq!(result, Err(Ok(InsightArenaError::SeasonOverlap)));
+
+    client.update_leaderboard(&admin, &season1_id, &sample_entries(&env));
+
+    env.ledger().set_timestamp(200);
+    client.finalize_season(&admin, &season1_id);
+
+    let season2_id = client.create_season(&admin, &150, &250, &100_000_000);
+    assert_eq!(season2_id, 2);
+}
+
+#[test]
+fn test_season_overlap_ends_inside_fails() {
+    // S1=[100,200], S2=[50,150]: S2 starts before S1 but ends inside it → reject
+    let env = Env::default();
+    let (client, xlm_token, admin, _oracle) = deploy(&env);
+
+    fund(&env, &xlm_token, &admin, 300_000_000);
+    approve_reward_pool(&env, &xlm_token, &admin, &client.address, 200_000_000);
+
+    client.create_season(&admin, &100, &200, &100_000_000);
+
+    let result = client.try_create_season(&admin, &50, &150, &100_000_000);
+    assert_eq!(result, Err(Ok(InsightArenaError::SeasonOverlap)));
+}
+
+#[test]
+fn test_season_overlap_fully_contained_fails() {
+    // S1=[100,200], S2=[120,180]: S2 is fully inside S1 → reject
+    let env = Env::default();
+    let (client, xlm_token, admin, _oracle) = deploy(&env);
+
+    fund(&env, &xlm_token, &admin, 300_000_000);
+    approve_reward_pool(&env, &xlm_token, &admin, &client.address, 200_000_000);
+
+    client.create_season(&admin, &100, &200, &100_000_000);
+
+    let result = client.try_create_season(&admin, &120, &180, &100_000_000);
+    assert_eq!(result, Err(Ok(InsightArenaError::SeasonOverlap)));
+}
+
+#[test]
+fn test_season_overlap_touching_at_start_succeeds() {
+    // S1=[100,200], S2=[50,100]: S2 ends exactly at S1's start → allow (no overlap)
+    let env = Env::default();
+    let (client, xlm_token, admin, _oracle) = deploy(&env);
+
+    fund(&env, &xlm_token, &admin, 300_000_000);
+    approve_reward_pool(&env, &xlm_token, &admin, &client.address, 200_000_000);
+
+    let season1_id = client.create_season(&admin, &100, &200, &100_000_000);
+    assert_eq!(season1_id, 1);
+
+    let season2_id = client.create_season(&admin, &50, &100, &100_000_000);
+    assert_eq!(season2_id, 2);
+}
+

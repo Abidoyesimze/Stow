@@ -1,205 +1,295 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import Header from "@/component/Header";
-import Footer from "@/component/Footer";
-import PageBackground from "@/component/PageBackground";
+import { useEffect, useState, useMemo, useCallback } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
+import { apiClient, ApiError } from "@/lib/api";
+import { useFavorites } from "@/context/FavoritesContext";
 import MarketCard from "@/component/MarketCard";
-import { useWallet } from "@/context/WalletContext";
+import { EmptyState } from "@/component/ui/empty-state";
+import { Skeleton } from "@/component/ui/skeleton";
+import { Heart, AlertCircle, Inbox } from "lucide-react";
 
-type Market = {
+interface Market {
   id: string;
   title: string;
   category: string;
-  probability: number; // 0..1
-  totalStaked: number; // in XLM
-  closeAt: string; // ISO date
-  status: "active" | "resolved" | "upcoming";
-};
+  probability: number;
+  totalStaked: number;
+  closeAt: string;
+  status: string;
+}
 
-const PAGE_SIZE = 8;
+const CATEGORIES = ["All", "Sports", "Finance", "Crypto", "Politics", "Tech"];
 
 export default function MarketsPage() {
-  const [markets, setMarkets] = useState<Market[]>([]);
-  const [page, setPage] = useState(1);
-  const [search, setSearch] = useState("");
-  const [category, setCategory] = useState("All");
-  const [status, setStatus] = useState("All");
-  const [sort, setSort] = useState("newest");
-  const [loading, setLoading] = useState(false);
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const {
+    favoriteIds,
+    toggleFavorite,
+    isLoading: favoritesLoading,
+  } = useFavorites();
 
+  const [markets, setMarkets] = useState<Market[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedCategory, setSelectedCategory] = useState<string>(
+    searchParams.get("category") || "All",
+  );
+  const [viewMode, setViewMode] = useState<"all" | "favorites">(
+    searchParams.get("view") === "favorites" ? "favorites" : "all",
+  );
+
+  // Fetch markets
   useEffect(() => {
-    let mounted = true;
-    async function load() {
+    const abortController = new AbortController();
+
+    const fetchMarkets = async () => {
       setLoading(true);
+      setError(null);
       try {
-        const base = process.env.NEXT_PUBLIC_API_URL || "";
-        const res = await fetch(`${base}/api/v1/markets`);
-        if (!res.ok) throw new Error("fetch failed");
-        const data = await res.json();
-        if (mounted) setMarkets(data || []);
-      } catch (e) {
-        // fallback mock data
-        if (mounted)
-          setMarkets([
-            {
-              id: "1",
-              title: "Will BTC be above $70k on 2026-12-31?",
-              category: "Crypto",
-              probability: 0.42,
-              totalStaked: 124.5,
-              closeAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 10).toISOString(),
-              status: "active",
-            },
-            {
-              id: "2",
-              title: "Team A to beat Team B in the Finals",
-              category: "Sports",
-              probability: 0.66,
-              totalStaked: 52.1,
-              closeAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 3).toISOString(),
-              status: "active",
-            },
-            {
-              id: "3",
-              title: "Will inflation drop below 3% in 2026?",
-              category: "Economics",
-              probability: 0.28,
-              totalStaked: 18.0,
-              closeAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 60).toISOString(),
-              status: "upcoming",
-            },
-          ]);
+        const data = await apiClient.get<Market[]>("/markets", {
+          signal: abortController.signal,
+        });
+        setMarkets(data || []);
+      } catch (err) {
+        if (err instanceof ApiError) {
+          if (
+            err.kind !== "network" ||
+            err.message !== "Network error: The user aborted a request."
+          ) {
+            setError(err.message);
+          }
+        } else if (err instanceof Error && err.name === "AbortError") {
+          // Ignore
+        } else {
+          setError("An unexpected error occurred");
+        }
       } finally {
-        if (mounted) setLoading(false);
+        if (!abortController.signal.aborted) {
+          setLoading(false);
+        }
       }
-    }
-    load();
+    };
+
+    fetchMarkets();
+
     return () => {
-      mounted = false;
+      abortController.abort();
     };
   }, []);
 
-  const categories = useMemo(() => {
-    const set = new Set(markets.map((m) => m.category));
-    return ["All", ...Array.from(set)];
+  // Update URL when category changes
+  useEffect(() => {
+    const params = new URLSearchParams(searchParams);
+    if (selectedCategory === "All") {
+      params.delete("category");
+    } else {
+      params.set("category", selectedCategory);
+    }
+    if (viewMode === "favorites") {
+      params.set("view", "favorites");
+    } else {
+      params.delete("view");
+    }
+    router.push(`?${params.toString()}`);
+  }, [selectedCategory, viewMode, router, searchParams]);
+
+  // Filter markets by category and favorites
+  const filteredMarkets = useMemo(() => {
+    let filtered = markets;
+
+    if (selectedCategory !== "All") {
+      filtered = filtered.filter(
+        (m) => m.category.toLowerCase() === selectedCategory.toLowerCase(),
+      );
+    }
+
+    if (viewMode === "favorites") {
+      filtered = filtered.filter((m) => favoriteIds.has(m.id));
+    }
+
+    return filtered;
+  }, [markets, selectedCategory, viewMode, favoriteIds]);
+
+  const handleCategoryChange = useCallback((category: string) => {
+    setSelectedCategory(category);
+  }, []);
+
+  const handleViewModeChange = useCallback((mode: "all" | "favorites") => {
+    setViewMode(mode);
+  }, []);
+
+  const handleFavoriteToggle = useCallback(
+    (marketId: string) => {
+      toggleFavorite(marketId);
+    },
+    [toggleFavorite],
+  );
+
+  const handlePredict = useCallback((marketId: string) => {
+    // TODO: Navigate to prediction modal/page
+    console.log(`Predict clicked for market ${marketId}`);
+  }, []);
+
+  // Category counts
+  const categoryCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    CATEGORIES.forEach((cat) => {
+      if (cat === "All") {
+        counts[cat] = markets.length;
+      } else {
+        counts[cat] = markets.filter(
+          (m) => m.category.toLowerCase() === cat.toLowerCase(),
+        ).length;
+      }
+    });
+    return counts;
   }, [markets]);
 
-  const filtered = useMemo(() => {
-    let list = markets.slice();
-    if (search.trim()) {
-      const s = search.toLowerCase();
-      list = list.filter((m) => m.title.toLowerCase().includes(s));
-    }
-    if (category !== "All") list = list.filter((m) => m.category === category);
-    if (status !== "All") list = list.filter((m) => m.status === status.toLowerCase());
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-900 via-black to-gray-900 p-6 md:p-10">
+        <div className="mx-auto max-w-7xl space-y-8">
+          <div>
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <h1 className="text-3xl font-bold text-white">Markets</h1>
+                <p className="mt-2 text-gray-400">
+                  Browse and predict on various markets
+                </p>
+              </div>
+            </div>
+          </div>
 
-    if (sort === "newest") list.sort((a, b) => +new Date(b.closeAt) - +new Date(a.closeAt));
-    if (sort === "popular") list.sort((a, b) => b.totalStaked - a.totalStaked);
-    if (sort === "closing") list.sort((a, b) => +new Date(a.closeAt) - +new Date(b.closeAt));
-
-    return list;
-  }, [markets, search, category, status, sort]);
-
-  const paged = filtered.slice(0, page * PAGE_SIZE);
-
-  const { isAuthenticated, openConnectModal } = useWallet();
-
-  function handlePredict(market: Market) {
-    if (!isAuthenticated) {
-      openConnectModal();
-      return;
-    }
-    // navigate to market detail / prediction flow
-    window.location.href = `/markets/${market.id}`;
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
+            {Array.from({ length: 6 }).map((_, idx) => (
+              <Skeleton key={idx} className="h-64 rounded-lg bg-white/10" />
+            ))}
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
-    <PageBackground>
-      <Header />
+    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-black to-gray-900 p-6 md:p-10">
+      <div className="mx-auto max-w-7xl">
+        {/* Header */}
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold text-white">Markets</h1>
+          <p className="mt-2 text-gray-400">
+            Browse and predict on various markets
+          </p>
+        </div>
 
-      <main className="min-h-screen px-6 py-12">
-        <div className="mx-auto max-w-6xl">
-          <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h1 className="text-3xl font-bold text-white">Markets</h1>
-              <p className="mt-1 text-sm text-gray-400">Browse live prediction markets and compete.</p>
-            </div>
+        {/* View Mode Tabs */}
+        <div className="mb-6 flex gap-2">
+          <button
+            onClick={() => handleViewModeChange("all")}
+            className={`rounded-lg px-4 py-2 font-medium transition-colors ${
+              viewMode === "all"
+                ? "bg-primary text-primary-foreground"
+                : "bg-white/10 text-gray-300 hover:bg-white/20"
+            }`}
+          >
+            All Markets
+          </button>
+          <button
+            onClick={() => handleViewModeChange("favorites")}
+            className={`flex items-center gap-2 rounded-lg px-4 py-2 font-medium transition-colors ${
+              viewMode === "favorites"
+                ? "bg-primary text-primary-foreground"
+                : "bg-white/10 text-gray-300 hover:bg-white/20"
+            }`}
+          >
+            <Heart size={16} />
+            Watchlist{" "}
+            {viewMode === "favorites" && `(${filteredMarkets.length})`}
+          </button>
+        </div>
 
-            <div className="flex w-full max-w-lg items-center gap-2">
-              <input
-                aria-label="Search markets"
-                placeholder="Search markets..."
-                className="w-full rounded-md border border-white/10 bg-white/2 px-3 py-2 text-sm text-white placeholder:text-gray-500"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
-            </div>
-          </div>
-
-          <div className="mb-6 flex w-full flex-wrap items-center gap-3">
-            <select
-              className="rounded-md border border-white/10 bg-white/2 px-3 py-2 text-sm text-white"
-              value={category}
-              onChange={(e) => setCategory(e.target.value)}
-            >
-              {categories.map((c) => (
-                <option key={c} value={c} className="text-black">
-                  {c}
-                </option>
+        {/* Category Tabs */}
+        {viewMode === "all" && (
+          <div className="mb-6 overflow-x-auto pb-2">
+            <div className="flex gap-2">
+              {CATEGORIES.map((category) => (
+                <button
+                  key={category}
+                  onClick={() => handleCategoryChange(category)}
+                  className={`whitespace-nowrap rounded-full px-4 py-2 text-sm font-medium transition-all ${
+                    selectedCategory === category
+                      ? "bg-orange-500 text-white"
+                      : "bg-white/10 text-gray-300 hover:bg-white/20"
+                  }`}
+                  aria-pressed={selectedCategory === category}
+                >
+                  {category} ({categoryCounts[category] || 0})
+                </button>
               ))}
-            </select>
-
-            <select
-              className="rounded-md border border-white/10 bg-white/2 px-3 py-2 text-sm text-white"
-              value={status}
-              onChange={(e) => setStatus(e.target.value)}
-            >
-              <option>All</option>
-              <option>Active</option>
-              <option>Resolved</option>
-              <option>Upcoming</option>
-            </select>
-
-            <select
-              className="rounded-md border border-white/10 bg-white/2 px-3 py-2 text-sm text-white"
-              value={sort}
-              onChange={(e) => setSort(e.target.value)}
-            >
-              <option value="newest">Newest</option>
-              <option value="popular">Most Popular</option>
-              <option value="closing">Closing Soon</option>
-            </select>
-
-            <div className="ml-auto text-sm text-gray-400">{filtered.length} results</div>
+            </div>
           </div>
+        )}
 
-          {loading && <div className="py-12 text-center text-gray-400">Loading markets...</div>}
+        {/* Error State */}
+        {error && (
+          <div className="mb-6 rounded-lg border border-red-500/50 bg-red-500/10 p-4">
+            <div className="flex items-center gap-3 text-red-300">
+              <AlertCircle size={20} />
+              <div>
+                <p className="font-semibold">Error loading markets</p>
+                <p className="text-sm">{error}</p>
+              </div>
+            </div>
+          </div>
+        )}
 
-          {!loading && paged.length === 0 && (
-            <div className="rounded-md border border-white/6 bg-white/3 p-8 text-center text-gray-300">No markets found.</div>
-          )}
-
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {paged.map((m) => (
-              <MarketCard key={m.id} market={m} onPredict={() => handlePredict(m)} />
+        {/* Markets Grid */}
+        {filteredMarkets.length > 0 ? (
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
+            {filteredMarkets.map((market) => (
+              <MarketCard
+                key={market.id}
+                market={market}
+                isFavorite={favoriteIds.has(market.id)}
+                onFavoriteToggle={() => handleFavoriteToggle(market.id)}
+                onPredict={() => handlePredict(market.id)}
+              />
             ))}
           </div>
-
-          {paged.length < filtered.length && (
-            <div className="mt-6 flex justify-center">
-              <button
-                className="rounded-md bg-white/5 px-5 py-2 text-sm font-semibold text-white hover:bg-white/10"
-                onClick={() => setPage((p) => p + 1)}
-              >
-                Load more
-              </button>
-            </div>
-          )}
-        </div>
-      </main>
-
-      <Footer />
-    </PageBackground>
+        ) : (
+          <EmptyState
+            icon={
+              viewMode === "favorites" ? (
+                <Heart size={32} />
+              ) : (
+                <Inbox size={32} />
+              )
+            }
+            title={
+              viewMode === "favorites"
+                ? "No Favorite Markets Yet"
+                : selectedCategory === "All"
+                  ? "No Markets Available"
+                  : `No ${selectedCategory} Markets`
+            }
+            description={
+              viewMode === "favorites"
+                ? "Start adding markets to your watchlist to see them here. Click the heart icon on any market to favorite it."
+                : `No markets found in this category. Try selecting a different category or check back soon.`
+            }
+            action={
+              viewMode === "favorites"
+                ? {
+                    label: "Browse Markets",
+                    onClick: () => handleViewModeChange("all"),
+                  }
+                : undefined
+            }
+            variant="empty"
+          />
+        )}
+      </div>
+    </div>
   );
 }

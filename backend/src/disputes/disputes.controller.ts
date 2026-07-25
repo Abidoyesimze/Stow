@@ -19,7 +19,9 @@ import {
 } from '@nestjs/swagger';
 import { DisputesService } from './disputes.service';
 import { CreateDisputeDto } from './dto/create-dispute.dto';
+import { AttachEvidenceDto } from './dto/attach-evidence.dto';
 import { Dispute, DisputeStatus } from './entities/dispute.entity';
+import { DisputeEvidence } from './entities/dispute-evidence.entity';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { BanGuard } from '../common/guards/ban.guard';
 import { User } from '../users/entities/user.entity';
@@ -53,6 +55,40 @@ export class DisputesController {
     @CurrentUser() user: User,
   ): Promise<Dispute> {
     return this.disputesService.create(createDisputeDto, user);
+  }
+
+  @Get('my')
+  @ApiOperation({ summary: 'Get disputes filed by the current user' })
+  @ApiQuery({
+    name: 'page',
+    required: false,
+    type: Number,
+    description: 'Page number',
+  })
+  @ApiQuery({
+    name: 'limit',
+    required: false,
+    type: Number,
+    description: 'Items per page',
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Disputes retrieved successfully',
+  })
+  async findMyDisputes(
+    @CurrentUser() user: User,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ): Promise<{
+    disputes: Dispute[];
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    const pageNum = page ? parseInt(page, 10) : 1;
+    const limitNum = limit ? parseInt(limit, 10) : 20;
+
+    return this.disputesService.findMyDisputes(user.id, pageNum, limitNum);
   }
 
   @Get(':id')
@@ -121,5 +157,57 @@ export class DisputesController {
   })
   async findByMarket(@Param('marketId') marketId: string): Promise<Dispute[]> {
     return this.disputesService.findByMarket(marketId);
+  }
+
+  @Post(':id/evidence')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Attach evidence to a dispute' })
+  @ApiParam({ name: 'id', description: 'Dispute ID' })
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: 'Evidence attached successfully',
+    type: DisputeEvidence,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'Dispute is not pending, or file type/size is not allowed',
+  })
+  @ApiResponse({
+    status: HttpStatus.FORBIDDEN,
+    description: 'Only dispute participants can attach evidence',
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Dispute not found',
+  })
+  async attachEvidence(
+    @Param('id') id: string,
+    @Body() attachEvidenceDto: AttachEvidenceDto,
+    @CurrentUser() user: User,
+  ): Promise<DisputeEvidence> {
+    return this.disputesService.attachEvidence(id, attachEvidenceDto, user);
+  }
+
+  @Get(':id/evidence')
+  @ApiOperation({ summary: 'List evidence attached to a dispute' })
+  @ApiParam({ name: 'id', description: 'Dispute ID' })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Evidence retrieved successfully',
+    type: [DisputeEvidence],
+  })
+  @ApiResponse({
+    status: HttpStatus.FORBIDDEN,
+    description: 'Only dispute participants can view evidence',
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Dispute not found',
+  })
+  async listEvidence(
+    @Param('id') id: string,
+    @CurrentUser() user: User,
+  ): Promise<DisputeEvidence[]> {
+    return this.disputesService.listEvidence(id, user);
   }
 }

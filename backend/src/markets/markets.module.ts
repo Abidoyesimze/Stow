@@ -7,9 +7,13 @@ import { UserBookmark } from './entities/user-bookmark.entity';
 import { Prediction } from '../predictions/entities/prediction.entity';
 import { MarketsService } from './markets.service';
 import { MarketsController } from './markets.controller';
+import { MarketSettlementScheduler } from './market-settlement.scheduler';
 import { UsersModule } from '../users/users.module';
 import { AnalyticsModule } from '../analytics/analytics.module';
 import { DisputesModule } from '../disputes/disputes.module';
+import { WebhooksModule } from '../webhooks/webhooks.module';
+import { CommonModule } from '../common/common.module';
+import { OptionalIdempotencyInterceptor } from '../common/idempotency/optional-idempotency.interceptor';
 
 @Module({
   imports: [
@@ -23,9 +27,15 @@ import { DisputesModule } from '../disputes/disputes.module';
     UsersModule,
     AnalyticsModule,
     DisputesModule,
+    WebhooksModule,
+    CommonModule,
   ],
   controllers: [MarketsController],
-  providers: [MarketsService],
+  providers: [
+    MarketsService,
+    MarketSettlementScheduler,
+    OptionalIdempotencyInterceptor,
+  ],
   exports: [MarketsService, TypeOrmModule],
 })
 export class MarketsModule {}

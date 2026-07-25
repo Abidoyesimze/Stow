@@ -4,10 +4,10 @@
 //! paths so callers can inspect an event's participation, prediction volume,
 //! and completion state in a single contract view.
 
-use soroban_sdk::{contracttype, Env, Vec, Address};
 use crate::event::{self, EventError};
 use crate::storage;
 use crate::storage_types::DataKey;
+use soroban_sdk::{contracttype, Address, Env, Vec};
 
 /// Aggregate statistics for one creator event.
 ///
@@ -19,9 +19,6 @@ use crate::storage_types::DataKey;
 /// * `total_predictions` — total predictions linked to all event matches.
 /// * `all_matches_resolved` — `true` only when the event has at least one
 ///   match and every stored match has a submitted result.
-/// * `winners_verified` — `true` when one or more verified winner records are
-///   stored for the event.
-/// * `winner_count` — number of verified winner records stored for the event.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EventStatistics {
@@ -30,8 +27,6 @@ pub struct EventStatistics {
     pub match_count: u32,
     pub total_predictions: u32,
     pub all_matches_resolved: bool,
-    pub winners_verified: bool,
-    pub winner_count: u32,
 }
 
 /// Public configuration snapshot for the contract.
@@ -46,12 +41,39 @@ pub struct Config {
     pub paused: bool,
 }
 
+/// Return all participant addresses for an existing event.
+///
+/// This view validates that `event_id` points to a stored event, then returns
+/// the `EventParticipants(event_id)` storage index. Newly created events return
+/// an empty `Vec` until users join through `join_event`.
+pub fn get_event_participants(env: &Env, event_id: u64) -> Result<Vec<Address>, EventError> {
+    event::get_event(env, event_id)?;
+    Ok(storage::get_event_participants(env, event_id))
+}
+
+/// Return the escrowed prize pool (in stroops) for an existing event.
+///
+/// Validates that `event_id` exists, then returns the stored `prize_pool`.
+/// A "fun event" (no payouts) returns `0`.
+pub fn get_event_prize_pool(env: &Env, event_id: u64) -> Result<i128, EventError> {
+    let event = event::get_event(env, event_id)?;
+    Ok(event.prize_pool)
+}
+
+/// Return the reward distribution percentages for an existing event.
+///
+/// Validates that `event_id` exists, then returns the stored
+/// `reward_distribution`. The vector is empty for a "fun event".
+pub fn get_event_reward_distribution(env: &Env, event_id: u64) -> Result<Vec<u32>, EventError> {
+    let event = event::get_event(env, event_id)?;
+    Ok(event.reward_distribution)
+}
+
 /// Build aggregate statistics for an existing event.
 ///
 /// The function first retrieves the event to validate that `event_id` exists,
-/// then derives prediction totals from the event's match index, completion
-/// status from each stored match result, and winner status from the event's
-/// verified winners list.
+/// then derives prediction totals from the event's match index and completion
+/// status from each stored match result.
 pub fn get_event_statistics(env: &Env, event_id: u64) -> Result<EventStatistics, EventError> {
     let event = event::get_event(env, event_id)?;
     let match_ids = storage::get_event_matches(env, event_id);
@@ -70,7 +92,6 @@ pub fn get_event_statistics(env: &Env, event_id: u64) -> Result<EventStatistics,
         }
     }
 
-    let winner_count = storage::get_event_winners(env, event_id).len();
     let all_matches_resolved = event.match_count > 0
         && match_ids.len() == event.match_count
         && resolved_matches == event.match_count;
@@ -81,8 +102,6 @@ pub fn get_event_statistics(env: &Env, event_id: u64) -> Result<EventStatistics,
         match_count: event.match_count,
         total_predictions,
         all_matches_resolved,
-        winners_verified: winner_count > 0,
-        winner_count,
     })
 }
 
@@ -125,7 +144,9 @@ pub fn get_config(env: &Env) -> Result<Config, &'static str> {
 pub fn get_user_events(env: &Env, user: Address) -> Vec<u64> {
     // Read the current event counter (instance storage)
     let instance = env.storage().instance();
-    let max_id: u64 = instance.get::<DataKey, u64>(&DataKey::EventCounter(0)).unwrap_or(0);
+    let max_id: u64 = instance
+        .get::<DataKey, u64>(&DataKey::EventCounter(0))
+        .unwrap_or(0);
 
     let mut out = Vec::new(env);
     for id in 1..=max_id {
@@ -140,4 +161,102 @@ pub fn get_user_events(env: &Env, user: Address) -> Vec<u64> {
     }
 
     out
+}
+
+/// Return the count of events that `user` has joined.
+///
+/// Lightweight alternative to `get_user_events` for dashboards that display
+/// only a "X events joined" badge. Returns 0 for unknown users.
+pub fn get_user_joined_events_count(env: &Env, user: Address) -> u32 {
+    get_user_events(env, user).len()
+}
+
+/// Platform-wide statistics aggregated across all events.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlatformStatistics {
+    pub total_events: u64,
+    pub total_matches: u64,
+    pub total_predictions: u64,
+    pub unique_participants: u32,
+    pub total_fees_collected: i128,
+}
+
+/// Get platform-wide statistics.
+///
+/// Aggregates data across all events to provide a comprehensive view of
+/// platform activity including total events, matches, predictions, unique
+/// participants, and fees collected.
+///
+/// # Returns
+/// `PlatformStatistics` struct with aggregated platform data.
+pub fn get_platform_statistics(env: &Env) -> PlatformStatistics {
+    let instance = env.storage().instance();
+
+    // Get counters
+    let total_events = instance
+        .get::<DataKey, u64>(&DataKey::EventCounter(0))
+        .unwrap_or(0);
+
+    let total_matches = instance
+        .get::<DataKey, u64>(&DataKey::MatchCounter(0))
+        .unwrap_or(0);
+
+    let total_predictions = instance
+        .get::<DataKey, u64>(&DataKey::PredictionCounter(0))
+        .unwrap_or(0);
+
+    // Calculate unique participants across all events
+    let mut unique_participants_set: Vec<Address> = Vec::new(env);
+    let mut total_fees_collected: i128 = 0;
+
+    for event_id in 1..=total_events {
+        if let Ok(event) = storage::get_event(env, event_id) {
+            // Accumulate fees
+            total_fees_collected = total_fees_collected.saturating_add(event.creation_fee_paid);
+
+            // Track unique participants
+            let participants = storage::get_event_participants(env, event_id);
+            for participant in participants.iter() {
+                let mut found = false;
+                for i in 0..unique_participants_set.len() {
+                    if unique_participants_set.get(i).unwrap() == participant {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    unique_participants_set.push_back(participant);
+                }
+            }
+        }
+    }
+
+    PlatformStatistics {
+        total_events,
+        total_matches,
+        total_predictions,
+        unique_participants: unique_participants_set.len(),
+        total_fees_collected,
+    }
+}
+
+/// Return the total number of events created on the platform.
+///
+/// Reads `DataKey::EventCounter` from instance storage. Returns `0` before
+/// any events are created or before initialization.
+pub fn get_event_count(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get::<DataKey, u64>(&DataKey::EventCounter(0))
+        .unwrap_or(0)
+}
+
+/// Check whether a single event has been finalized.
+///
+/// Returns `Ok(bool)` representing the event's `is_finalized` flag.
+/// Returns `Err(EventError::EventNotFound)` if the event ID does not exist.
+pub fn is_event_finalized(env: &Env, event_id: u64) -> Result<bool, EventError> {
+    let event = event::get_event(env, event_id)?;
+    Ok(event.is_finalized)
 }

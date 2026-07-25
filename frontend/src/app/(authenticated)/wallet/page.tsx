@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useWallet } from "@/context/WalletContext";
 
 type TxType = "Stake" | "Payout" | "Refund" | "Season Reward";
 type TxStatus = "Confirmed" | "Pending";
@@ -23,7 +24,8 @@ function getSeedFromAddress(address: string): number {
   }
   return seed;
 }
-const PLACEHOLDER_ADDRESS = "GDQP2KPQGKIHYJGXNUIYOMHARUARCA7DJT5FO2FFOOKY3B2WSQHG4W37";
+const PLACEHOLDER_ADDRESS =
+  "GDQP2KPQGKIHYJGXNUIYOMHARUARCA7DJT5FO2FFOOKY3B2WSQHG4W37";
 
 const baseSeed = getSeedFromAddress(PLACEHOLDER_ADDRESS);
 
@@ -33,34 +35,36 @@ const marketPool = [
   "Argentina wins Copa América?",
   "Ethereum ETF — Market Cancelled",
   "Solana active accounts cross 5M",
-  "Stellar Soroban upgrade mainnet deployment"
+  "Stellar Soroban upgrade mainnet deployment",
 ];
 
 const transactionTypes: TxType[] = ["Stake", "Payout", "Stake", "Refund"];
 
-const TRANSACTIONS: Transaction[] = Array.from({ length: 8 }).map((_, index) => {
-  const itemSeed = baseSeed + (index * 47);
-  const type = transactionTypes[itemSeed % transactionTypes.length];
-  const description = marketPool[itemSeed % marketPool.length];
-  
-  let amountValue = "";
-  if (type === "Payout") amountValue = `+${(50 + (itemSeed % 150))} XLM`;
-  if (type === "Stake") amountValue = `-${(15 + (itemSeed % 45))} XLM`;
-  if (type === "Refund") amountValue = `+${(20 + (itemSeed % 30))} XLM`;
+const TRANSACTIONS: Transaction[] = Array.from({ length: 8 }).map(
+  (_, index) => {
+    const itemSeed = baseSeed + index * 47;
+    const type = transactionTypes[itemSeed % transactionTypes.length];
+    const description = marketPool[itemSeed % marketPool.length];
 
-  const computedDay = 29 - index;
-  const deliveryDay = computedDay < 1 ? 1 : computedDay;
-  const dateString = `2026-05-${deliveryDay.toString().padStart(2, '0')}`;
+    let amountValue = "";
+    if (type === "Payout") amountValue = `+${50 + (itemSeed % 150)} XLM`;
+    if (type === "Stake") amountValue = `-${15 + (itemSeed % 45)} XLM`;
+    if (type === "Refund") amountValue = `+${20 + (itemSeed % 30)} XLM`;
 
-  return {
-    id: `tx-generated-id-${itemSeed}`,
-    date: dateString,
-    type,
-    description,
-    amount: amountValue,
-    status: "Confirmed"
-  };
-});
+    const computedDay = 29 - index;
+    const deliveryDay = computedDay < 1 ? 1 : computedDay;
+    const dateString = `2026-05-${deliveryDay.toString().padStart(2, "0")}`;
+
+    return {
+      id: `tx-generated-id-${itemSeed}`,
+      date: dateString,
+      type,
+      description,
+      amount: amountValue,
+      status: "Confirmed",
+    };
+  },
+);
 
 const TYPE_COLORS: Record<TxType, string> = {
   Stake: "bg-orange-500/20 text-orange-400",
@@ -79,11 +83,12 @@ function truncateAddress(addr: string) {
 }
 
 export default function WalletPage() {
+  const { logout } = useWallet();
   const [copied, setCopied] = useState(false);
   const [typeFilter, setTypeFilter] = useState<TxFilter>("All");
 
   // Dynamically calculate individual card summary strings based on the wallet seed
-  const dynamicAvailable = `${(1000 + (baseSeed % 850) + 0.50).toLocaleString(undefined, { minimumFractionDigits: 2 })} XLM`;
+  const dynamicAvailable = `${(1000 + (baseSeed % 850) + 0.5).toLocaleString(undefined, { minimumFractionDigits: 2 })} XLM`;
   const dynamicStaked = `${(50 + (baseSeed % 200)).toFixed(2)} XLM`;
   const dynamicWinnings = `${(100 + (baseSeed % 500)).toFixed(2)} XLM`;
 
@@ -93,16 +98,19 @@ export default function WalletPage() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const filteredTx = typeFilter === "All"
-    ? TRANSACTIONS
-    : TRANSACTIONS.filter((t) => t.type === typeFilter);
+  const filteredTx =
+    typeFilter === "All"
+      ? TRANSACTIONS
+      : TRANSACTIONS.filter((t) => t.type === typeFilter);
 
   return (
     <div className="space-y-6 p-4 sm:p-6">
       {/* Wallet Header */}
       <div className="rounded-xl border border-white/10 bg-white/5 p-5 space-y-3">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="font-mono text-sm text-white break-all">{PLACEHOLDER_ADDRESS}</span>
+          <span className="font-mono text-sm text-white break-all">
+            {PLACEHOLDER_ADDRESS}
+          </span>
           <button
             onClick={handleCopy}
             className="shrink-0 rounded-lg border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-gray-300 hover:bg-white/10 transition-colors"
@@ -113,7 +121,10 @@ export default function WalletPage() {
             Testnet
           </span>
         </div>
-        <button className="text-sm text-red-400 hover:text-red-300 transition-colors">
+        <button
+          onClick={logout}
+          className="text-sm text-red-400 hover:text-red-300 transition-colors"
+        >
           Disconnect Wallet
         </button>
       </div>
@@ -121,11 +132,26 @@ export default function WalletPage() {
       {/* Balance Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         {[
-          { label: "Available Balance", value: dynamicAvailable, accent: "text-emerald-400" },
-          { label: "Staked in Predictions", value: dynamicStaked, accent: "text-orange-400" },
-          { label: "Total Winnings", value: dynamicWinnings, accent: "text-yellow-400" },
+          {
+            label: "Available Balance",
+            value: dynamicAvailable,
+            accent: "text-emerald-400",
+          },
+          {
+            label: "Staked in Predictions",
+            value: dynamicStaked,
+            accent: "text-orange-400",
+          },
+          {
+            label: "Total Winnings",
+            value: dynamicWinnings,
+            accent: "text-yellow-400",
+          },
         ].map((card) => (
-          <div key={card.label} className="rounded-xl border border-white/10 bg-white/5 p-4 space-y-1">
+          <div
+            key={card.label}
+            className="rounded-xl border border-white/10 bg-white/5 p-4 space-y-1"
+          >
             <p className="text-xs text-gray-400">{card.label}</p>
             <p className={`text-xl font-bold ${card.accent}`}>{card.value}</p>
           </div>
@@ -142,7 +168,10 @@ export default function WalletPage() {
         >
           View on Stellar Explorer ↗
         </Link>
-        <button className="rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-gray-400 cursor-not-allowed" disabled>
+        <button
+          className="rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-gray-400 cursor-not-allowed"
+          disabled
+        >
           Export Transaction History
         </button>
       </div>
@@ -150,7 +179,9 @@ export default function WalletPage() {
       {/* Transaction History */}
       <div className="space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-          <h2 className="text-lg font-semibold text-white">Transaction History</h2>
+          <h2 className="text-lg font-semibold text-white">
+            Transaction History
+          </h2>
           <select
             value={typeFilter}
             onChange={(e) => setTypeFilter(e.target.value as TxFilter)}
@@ -176,17 +207,27 @@ export default function WalletPage() {
             <tbody className="divide-y divide-white/5">
               {filteredTx.map((tx) => (
                 <tr key={tx.id} className="bg-black/20 hover:bg-white/5">
-                  <td className="px-4 py-3 text-gray-400 whitespace-nowrap">{tx.date}</td>
+                  <td className="px-4 py-3 text-gray-400 whitespace-nowrap">
+                    {tx.date}
+                  </td>
                   <td className="px-4 py-3">
-                    <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${TYPE_COLORS[tx.type]}`}>
+                    <span
+                      className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${TYPE_COLORS[tx.type]}`}
+                    >
                       {tx.type}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-gray-300 max-w-[200px] truncate">{tx.description}</td>
-                  <td className={`px-4 py-3 font-medium whitespace-nowrap ${tx.amount.startsWith("+") ? "text-emerald-400" : "text-gray-300"}`}>
+                  <td className="px-4 py-3 text-gray-300 max-w-[200px] truncate">
+                    {tx.description}
+                  </td>
+                  <td
+                    className={`px-4 py-3 font-medium whitespace-nowrap ${tx.amount.startsWith("+") ? "text-emerald-400" : "text-gray-300"}`}
+                  >
                     {tx.amount}
                   </td>
-                  <td className={`px-4 py-3 font-medium ${STATUS_COLORS[tx.status]}`}>
+                  <td
+                    className={`px-4 py-3 font-medium ${STATUS_COLORS[tx.status]}`}
+                  >
                     {tx.status}
                   </td>
                 </tr>
@@ -194,7 +235,9 @@ export default function WalletPage() {
             </tbody>
           </table>
           {filteredTx.length === 0 && (
-            <div className="py-10 text-center text-gray-400 text-sm">No transactions match the filter.</div>
+            <div className="py-10 text-center text-gray-400 text-sm">
+              No transactions match the filter.
+            </div>
           )}
         </div>
       </div>

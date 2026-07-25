@@ -1,6 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Brackets, Repository } from 'typeorm';
+import { Brackets, In, Repository } from 'typeorm';
 import {
   ContractService,
   ContractEvent,
@@ -9,6 +9,11 @@ import {
   ContractMatch,
 } from '../contract/contract.service';
 import { CreatorEvent } from '../matches/entities/creator-event.entity';
+import { Match } from '../matches/entities/match.entity';
+import { MatchPrediction } from '../matches/entities/match-prediction.entity';
+import { User } from '../users/entities/user.entity';
+import { CreatorEventLeaderboardEntry } from '../matches/entities/creator-event-leaderboard-entry.entity';
+import { CreatorEventPayout } from '../matches/entities/creator-event-payout.entity';
 import {
   EventByCodeResponseDto,
   MatchPreviewDto,
@@ -36,6 +41,16 @@ import {
 import { UserScoreResponseDto } from './dto/user-score-response.dto';
 import { UserPredictionsResponseDto } from './dto/user-predictions-response.dto';
 import { EventStatsResponseDto } from './dto/event-stats-response.dto';
+import {
+  LeaderboardQueryDto,
+  LeaderboardEntryResponse,
+  PaginatedLeaderboardResponse,
+} from './dto/leaderboard-query.dto';
+import {
+  PayoutsQueryDto,
+  PaginatedPayoutsDto,
+  PayoutEntryDto,
+} from './dto/payouts.dto';
 import {
   normalizeContractPrediction,
   resolveCorrectness,
@@ -74,6 +89,16 @@ export class CreatorEventsService {
     private readonly contractService: ContractService,
     @InjectRepository(CreatorEvent)
     private readonly creatorEventRepository: Repository<CreatorEvent>,
+    @InjectRepository(Match)
+    private readonly matchRepository: Repository<Match>,
+    @InjectRepository(MatchPrediction)
+    private readonly matchPredictionRepository: Repository<MatchPrediction>,
+    @InjectRepository(User)
+    private readonly userRepository: Repository<User>,
+    @InjectRepository(CreatorEventLeaderboardEntry)
+    private readonly leaderboardEntryRepository: Repository<CreatorEventLeaderboardEntry>,
+    @InjectRepository(CreatorEventPayout)
+    private readonly creatorEventPayoutRepository: Repository<CreatorEventPayout>,
   ) {}
 
   async searchEvents(
@@ -240,6 +265,22 @@ export class CreatorEventsService {
     return config;
   }
 
+  async getUpcomingMatches(eventId: string): Promise<Match[]> {
+    const event = await this.creatorEventRepository.findOne({
+      where: { on_chain_event_id: Number(eventId) as unknown as number },
+    });
+    if (!event) {
+      throw new NotFoundException(`Event ${eventId} not found`);
+    }
+    return this.matchRepository
+      .createQueryBuilder('match')
+      .where('match.event_id = :eventId', { eventId: event.id })
+      .andWhere('match.match_time > :now', { now: new Date() })
+      .andWhere('match.result_submitted = false')
+      .orderBy('match.match_time', 'ASC')
+      .getMany();
+  }
+
   async getEventMatches(
     eventId: string,
     query: ListMatchesQueryDto,
@@ -311,6 +352,12 @@ export class CreatorEventsService {
       matchPreview,
       startTime: event.startTime,
       endTime: event.endTime,
+      prizePool: event.prizePool,
+      entryFee: event.entryFee,
+      category: event.category,
+      bannerUrl: event.bannerUrl,
+      isFinalized: event.isFinalized,
+      rewardDistribution: event.rewardDistribution,
     };
   }
 
@@ -402,10 +449,14 @@ export class CreatorEventsService {
       throw new NotFoundException(`Event ${eventId} not found`);
     }
 
-    const [statistics, matches, participants] = await Promise.all([
+    const [statistics, matches, participants, cachedEvent] = await Promise.all([
       this.contractService.getEventStatistics(eventId),
       this.contractService.getEventMatches(eventId),
       this.contractService.getEventParticipants(eventId),
+      this.creatorEventRepository.findOne({
+        where: { on_chain_event_id: Number(eventId) as unknown as number },
+        select: ['prize_pool', 'total_entry_fees_collected'],
+      }),
     ]);
 
     const matchesResolved = matches.filter((m) => m.resolved).length;
@@ -462,6 +513,8 @@ export class CreatorEventsService {
       winnerCount: statistics?.winnerCount ?? 0,
       averagePredictionsPerUser,
       completionRate,
+      prizePool: cachedEvent?.prize_pool ?? '0',
+      totalEntryFeesCollected: cachedEvent?.total_entry_fees_collected ?? '0',
     };
   }
 
@@ -519,6 +572,28 @@ export class CreatorEventsService {
       incorrectPredictions === 0 &&
       pendingPredictions === 0;
 
+    let totalPoints = 0;
+    const userEntity = await this.userRepository.findOne({
+      where: { stellar_address: address },
+    });
+    if (userEntity && matches.length > 0) {
+      const dbMatches = await this.matchRepository.find({
+        where: { event: { on_chain_event_id: Number(eventId) } },
+      });
+      if (dbMatches.length > 0) {
+        const dbPredictions = await this.matchPredictionRepository.find({
+          where: {
+            user: { id: userEntity.id },
+            match: { id: In(dbMatches.map((m) => m.id)) },
+          },
+        });
+        totalPoints = dbPredictions.reduce(
+          (sum, p) => sum + p.points_earned,
+          0,
+        );
+      }
+    }
+
     return {
       address,
       totalMatches: matches.length,
@@ -529,6 +604,7 @@ export class CreatorEventsService {
       accuracyPercentage,
       rank,
       isWinner,
+      totalPoints,
     };
   }
 
@@ -593,14 +669,20 @@ export class CreatorEventsService {
           isCancelled: false,
         });
         break;
-      case CreatorEventSearchStatus.Cancelled:
-        queryBuilder.andWhere('creatorEvent.is_cancelled = :isCancelled', {
-          isCancelled: true,
-        });
+      case CreatorEventSearchStatus.Finished:
+        queryBuilder.andWhere(
+          new Brackets((qb) => {
+            qb.where('creatorEvent.end_time < :now', {
+              now: new Date(),
+            }).orWhere('creatorEvent.is_active = :isActive', {
+              isActive: false,
+            });
+          }),
+        );
         break;
-      case CreatorEventSearchStatus.Inactive:
-        queryBuilder.andWhere('creatorEvent.is_active = :isActive', {
-          isActive: false,
+      case CreatorEventSearchStatus.Upcoming:
+        queryBuilder.andWhere('creatorEvent.start_time > :now', {
+          now: new Date(),
         });
         break;
       case CreatorEventSearchStatus.All:
@@ -625,6 +707,11 @@ export class CreatorEventsService {
       participant_count: event.participant_count,
       match_count: event.match_count,
       rank: Number(rank ?? 0),
+      prize_pool: event.prize_pool,
+      entry_fee: event.entry_fee,
+      category: event.category,
+      banner_url: event.banner_url ?? null,
+      is_finalized: event.is_finalized,
       highlights: this.buildHighlights(event, searchTerm),
     };
   }
@@ -687,5 +774,158 @@ export class CreatorEventsService {
 
   private escapeRegExp(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  /**
+   * GET /creator-events/:id/payouts
+   *
+   * Returns all payout records for a finalized event, ordered by rank ASC.
+   * Raises 404 when the event does not exist or is not yet finalized so the
+   * frontend knows not to show the payouts UI prematurely.
+   *
+   * Time complexity: O(k log n) where k = limit, n = total payout rows.
+   * The query uses the IDX_cep_event_id index + leaderboard entry JOIN.
+   */
+  async getPayouts(
+    eventId: string,
+    query: PayoutsQueryDto,
+  ): Promise<PaginatedPayoutsDto> {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+
+    const cachedEvent = await this.creatorEventRepository.findOne({
+      where: { on_chain_event_id: Number(eventId) as unknown as number },
+      select: ['is_finalized'],
+    });
+
+    if (!cachedEvent?.is_finalized) {
+      throw new NotFoundException(
+        `Event ${eventId} is not finalized or does not exist`,
+      );
+    }
+
+    const [payouts, total] = await this.creatorEventPayoutRepository
+      .createQueryBuilder('payout')
+      .leftJoinAndSelect('payout.leaderboard_entry', 'entry')
+      .where('payout.event_id = :eventId', { eventId })
+      .orderBy('entry.rank', 'ASC')
+      .skip((page - 1) * limit)
+      .take(limit)
+      .getManyAndCount();
+
+    return {
+      data: payouts.map((p) => this.toPayoutDto(p)),
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
+  /**
+   * GET /creator-events/:id/payouts/:address
+   *
+   * Returns a single payout for the given address.
+   * Returns 404 when the address has no payout row (i.e. the address did not
+   * participate, or the event has not been finalized yet).
+   *
+   * Time complexity: O(log n) — uses the UQ_cep_event_address composite index.
+   */
+  async getPayoutByAddress(
+    eventId: string,
+    address: string,
+  ): Promise<PayoutEntryDto> {
+    const payout = await this.creatorEventPayoutRepository.findOne({
+      where: { event_id: eventId, user_address: address },
+      relations: ['leaderboard_entry'],
+    });
+
+    if (!payout) {
+      throw new NotFoundException(
+        `No payout found for address ${address} in event ${eventId}`,
+      );
+    }
+
+    return this.toPayoutDto(payout);
+  }
+
+  private toPayoutDto(payout: CreatorEventPayout): PayoutEntryDto {
+    return {
+      id: payout.id,
+      event_id: payout.event_id,
+      user_address: payout.user_address,
+      payout_amount_stroops: payout.payout_amount_stroops,
+      is_claimed: payout.is_claimed,
+      rank: payout.leaderboard_entry?.rank ?? 0,
+      is_winner: payout.leaderboard_entry?.is_winner ?? false,
+      created_at: payout.created_at,
+    };
+  }
+
+  async getLeaderboard(
+    eventId: string,
+    query: LeaderboardQueryDto,
+  ): Promise<PaginatedLeaderboardResponse> {
+    const page = query.page ?? 1;
+    const limit = query.limit ?? 20;
+
+    // Check if event is finalized via DB cache
+    const cachedEvent = await this.creatorEventRepository.findOne({
+      where: { on_chain_event_id: Number(eventId) as unknown as number },
+      select: ['is_finalized'],
+    });
+
+    if (cachedEvent?.is_finalized) {
+      const [entries, total] =
+        await this.leaderboardEntryRepository.findAndCount({
+          where: { event_id: eventId },
+          order: { rank: 'ASC' },
+          skip: (page - 1) * limit,
+          take: limit,
+        });
+
+      return {
+        data: entries.map((e) => ({
+          rank: e.rank,
+          user_address: e.user_address,
+          total_predictions: e.total_predictions,
+          correct_predictions: e.correct_predictions,
+          accuracy_percentage: Number(e.accuracy_percentage),
+          is_winner: e.is_winner,
+          completion_time: e.completion_time
+            ? e.completion_time.toISOString()
+            : null,
+        })),
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+        source: 'cache',
+      };
+    }
+
+    // Live read from contract
+    const all = await this.contractService.getEventLeaderboard(eventId);
+    const total = all.length;
+    const slice = all.slice((page - 1) * limit, page * limit);
+
+    const data: LeaderboardEntryResponse[] = slice.map((e) => ({
+      rank: e.rank,
+      user_address: e.address,
+      total_predictions: e.total_predictions,
+      correct_predictions: e.correct_predictions,
+      accuracy_percentage: e.accuracy_percentage,
+      is_winner: e.is_winner,
+      completion_time: e.completion_time ?? null,
+    }));
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+      source: 'contract',
+    };
   }
 }

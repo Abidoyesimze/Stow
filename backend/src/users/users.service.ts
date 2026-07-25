@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ConflictException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -46,6 +47,11 @@ import {
   ListUserBookmarksDto,
   PaginatedUserBookmarksResponse,
 } from './dto/list-user-bookmarks.dto';
+import { UserStatsResponseDto } from './dto/user-stats.dto';
+import {
+  accuracyRateFromUser,
+  predictorTierFromReputation,
+} from '../analytics/analytics.service';
 
 @Injectable()
 export class UsersService {
@@ -70,6 +76,22 @@ export class UsersService {
 
   async findAll(): Promise<User[]> {
     return this.usersRepository.find();
+  }
+
+  async getMyStats(userId: string): Promise<UserStatsResponseDto> {
+    const user = await this.findById(userId);
+
+    return {
+      total_predictions: user.total_predictions,
+      correct_predictions: user.correct_predictions,
+      incorrect_predictions: user.total_predictions - user.correct_predictions,
+      accuracy_rate: accuracyRateFromUser(user),
+      tier: predictorTierFromReputation(user.reputation_score),
+      reputation_score: user.reputation_score,
+      season_points: user.season_points,
+      total_staked_stroops: user.total_staked_stroops,
+      total_winnings_stroops: user.total_winnings_stroops,
+    };
   }
 
   async findById(id: string): Promise<User> {
@@ -109,14 +131,21 @@ export class UsersService {
       .skip(skip)
       .take(limit);
 
+    if (dto.outcome === PublicPredictionOutcomeFilter.Correct) {
+      qb.andWhere('prediction.chosen_outcome = market.resolved_outcome');
+    } else if (dto.outcome === PublicPredictionOutcomeFilter.Incorrect) {
+      qb.andWhere('market.resolved_outcome IS NOT NULL').andWhere(
+        'prediction.chosen_outcome != market.resolved_outcome',
+      );
+    } else if (dto.outcome === PublicPredictionOutcomeFilter.Pending) {
+      qb.andWhere('market.resolved_outcome IS NULL');
+    }
+
     const [predictions, total] = await qb.getManyAndCount();
 
-    const data = predictions
-      .map((prediction) => this.mapPublicPrediction(prediction))
-      .filter((prediction) => {
-        if (!dto.outcome) return true;
-        return prediction.outcome === dto.outcome;
-      });
+    const data = predictions.map((prediction) =>
+      this.mapPublicPrediction(prediction),
+    );
 
     return { data, total, page, limit };
   }
@@ -416,7 +445,7 @@ export class UsersService {
     });
 
     if (existing) {
-      throw new BadRequestException('Already following this user');
+      throw new ConflictException('Already following this user');
     }
 
     await this.followRepository.save({
@@ -491,6 +520,27 @@ export class UsersService {
     );
 
     return { data, total, page, limit };
+  }
+
+  async getFollowStats(
+    address: string,
+  ): Promise<{ followers_count: number; following_count: number }> {
+    const user = await this.findByAddress(address);
+
+    const [, followersCount] = await this.followRepository
+      .createQueryBuilder('follow')
+      .where('follow.following_id = :userId', { userId: user.id })
+      .getManyAndCount();
+
+    const [, followingCount] = await this.followRepository
+      .createQueryBuilder('follow')
+      .where('follow.follower_id = :userId', { userId: user.id })
+      .getManyAndCount();
+
+    return {
+      followers_count: followersCount,
+      following_count: followingCount,
+    };
   }
 
   private mapUserToFollowResponse(user: User): UserFollowResponseDto {

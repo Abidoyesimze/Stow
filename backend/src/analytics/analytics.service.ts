@@ -23,6 +23,7 @@ import {
   CategoryAnalyticsResponseDto,
 } from './dto/category-analytics.dto';
 import { CohortDataDto, RetentionResponseDto } from './dto/retention.dto';
+import { PlatformStatsDto } from './dto/platform-stats.dto';
 
 /** Tier thresholds: Bronze < 200, Silver < 500, Gold < 1000, Platinum ≥ 1000 */
 export function predictorTierFromReputation(reputationScore: number): string {
@@ -55,6 +56,32 @@ export class AnalyticsService {
     @InjectRepository(MarketHistory)
     private readonly marketHistoryRepository: Repository<MarketHistory>,
   ) {}
+  private readonly activeSessions = new Map<string, number>();
+  private readonly IDLE_WINDOW_MS = parseInt(
+    process.env.ACTIVE_USERS_IDLE_WINDOW_MS || '300000',
+    10,
+  );
+
+  trackActiveSession(sessionId: string) {
+    this.activeSessions.set(sessionId, Date.now());
+  }
+
+  removeActiveSession(sessionId: string) {
+    this.activeSessions.delete(sessionId);
+  }
+
+  getActiveUsersCount(): number {
+    const now = Date.now();
+    let count = 0;
+    for (const [sessionId, lastActive] of this.activeSessions.entries()) {
+      if (now - lastActive > this.IDLE_WINDOW_MS) {
+        this.activeSessions.delete(sessionId);
+      } else {
+        count++;
+      }
+    }
+    return count;
+  }
 
   async logActivity(
     userId: string,
@@ -197,9 +224,9 @@ export class AnalyticsService {
    */
   async getMarketHistory(
     marketId: string,
-    from?: string,
-    to?: string,
-    interval?: string,
+    from: Date,
+    to: Date,
+    interval?: string, // TODO: Implement interval-based aggregation
   ): Promise<MarketHistoryResponseDto> {
     if (interval) {
       this.logger.debug(
@@ -219,17 +246,8 @@ export class AnalyticsService {
       .createQueryBuilder('history')
       .where('history.marketId = :marketId', { marketId: market.id });
 
-    if (from) {
-      qb.andWhere('history.recorded_at >= :from', { from });
-    } else {
-      const lastWeek = new Date();
-      lastWeek.setDate(lastWeek.getDate() - 7);
-      qb.andWhere('history.recorded_at >= :from', { from: lastWeek });
-    }
-
-    if (to) {
-      qb.andWhere('history.recorded_at <= :to', { to });
-    }
+    qb.andWhere('history.recorded_at >= :from', { from });
+    qb.andWhere('history.recorded_at <= :to', { to });
 
     qb.orderBy('history.recorded_at', 'ASC');
 
@@ -680,5 +698,31 @@ export class AnalyticsService {
         break;
     }
     return d;
+  }
+  async getPlatformStats(): Promise<PlatformStatsDto> {
+    const [total_markets, total_predictions, active_markets, active_users] =
+      await Promise.all([
+        this.marketsRepository.count(),
+        this.predictionsRepository.count(),
+        this.marketsRepository.count({
+          where: { is_resolved: false, is_cancelled: false },
+        }),
+        this.usersRepository.count(),
+      ]);
+
+    const volumeResult = await this.marketsRepository
+      .createQueryBuilder('market')
+      .select('SUM(CAST(market.total_pool_stroops AS BIGINT))', 'total')
+      .getRawOne<{ total: string | null }>();
+
+    const total_volume_stroops = volumeResult?.total ?? '0';
+
+    return {
+      total_markets,
+      total_predictions,
+      total_volume_stroops,
+      active_users,
+      active_markets,
+    };
   }
 }

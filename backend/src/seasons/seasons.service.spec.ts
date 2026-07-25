@@ -84,6 +84,7 @@ describe('SeasonsService', () => {
         reward_pool_stroops: '100',
         is_active: false,
         is_finalized: true,
+        participant_count: 0,
         top_winner: winner as Season['top_winner'],
         on_chain_season_id: null,
         soroban_tx_hash: null,
@@ -131,6 +132,7 @@ describe('SeasonsService', () => {
         reward_pool_stroops: '1',
         is_active: true,
         is_finalized: false,
+        participant_count: 0,
         top_winner: winner as Season['top_winner'],
         on_chain_season_id: null,
         soroban_tx_hash: null,
@@ -212,6 +214,96 @@ describe('SeasonsService', () => {
         }),
       );
     });
+
+    it('throws NotFoundException when no season at all exists in database', async () => {
+      seasonsRepository.createQueryBuilder.mockReturnValue({
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        getOne: jest.fn().mockResolvedValue(null),
+      } as never);
+
+      await expect(service.findActive()).rejects.toThrow(NotFoundException);
+      await expect(service.findActive()).rejects.toThrow(
+        'No active season exists',
+      );
+    });
+
+    it('throws NotFoundException when season exists but window has not started yet', async () => {
+      const futureStart = new Date();
+      futureStart.setFullYear(futureStart.getFullYear() + 1);
+      const futureEnd = new Date(futureStart);
+      futureEnd.setMonth(futureEnd.getMonth() + 6);
+
+      seasonsRepository.createQueryBuilder.mockReturnValue({
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        getOne: jest.fn().mockResolvedValue(null),
+      } as never);
+
+      await expect(service.findActive()).rejects.toThrow(NotFoundException);
+    });
+
+    it('throws NotFoundException when season exists but has already ended', async () => {
+      const pastStart = new Date();
+      pastStart.setFullYear(pastStart.getFullYear() - 2);
+      const pastEnd = new Date();
+      pastEnd.setFullYear(pastEnd.getFullYear() - 1);
+
+      seasonsRepository.createQueryBuilder.mockReturnValue({
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        getOne: jest.fn().mockResolvedValue(null),
+      } as never);
+
+      await expect(service.findActive()).rejects.toThrow(NotFoundException);
+    });
+
+    it('returns the season with latest starts_at when multiple active seasons overlap', async () => {
+      const olderSeason: Season = {
+        id: 's1',
+        season_number: 1,
+        name: 'Season 1',
+        starts_at: new Date('2020-01-01'),
+        ends_at: new Date('2099-01-01'),
+        reward_pool_stroops: '1',
+        is_active: true,
+        is_finalized: false,
+        top_winner: null,
+        on_chain_season_id: null,
+        soroban_tx_hash: null,
+        created_at: new Date(),
+        updated_at: new Date(),
+      };
+      const newerSeason: Season = {
+        id: 's2',
+        season_number: 2,
+        name: 'Season 2',
+        starts_at: new Date('2022-01-01'),
+        ends_at: new Date('2099-01-01'),
+        reward_pool_stroops: '1',
+        is_active: true,
+        is_finalized: false,
+        top_winner: null,
+        on_chain_season_id: null,
+        soroban_tx_hash: null,
+        created_at: new Date(),
+        updated_at: new Date(),
+      };
+
+      seasonsRepository.createQueryBuilder.mockReturnValue({
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        getOne: jest.fn().mockResolvedValue(newerSeason),
+      } as never);
+
+      const result = await service.findActive();
+
+      expect(result).toEqual(newerSeason);
+    });
   });
 
   describe('create', () => {
@@ -231,6 +323,7 @@ describe('SeasonsService', () => {
       reward_pool_stroops: dto.reward_pool_stroops,
       is_active: false,
       is_finalized: false,
+      participant_count: 0,
       top_winner: null,
       on_chain_season_id: null,
       soroban_tx_hash: null,
@@ -278,7 +371,120 @@ describe('SeasonsService', () => {
       expect(seasonsRepository.save).not.toHaveBeenCalled();
     });
 
-    it('throws when an active season overlaps the range', async () => {
+    it('rejects specific overlapping windows and allows back-to-back creation', async () => {
+      // Existing active season window: [100, 200]
+      const now = new Date('2030-01-01T00:00:00.000Z');
+      jest.useFakeTimers().setSystemTime(now);
+
+      // Utility: mock overlap result based on candidate range, driven by
+      // hasActiveSeasonOverlappingRange -> getCount().
+      // Overlap condition in SeasonsService:
+      //   s.starts_at < end AND s.ends_at > start
+      // So we return 1 when overlapping, else 0.
+      const overlapFor = (start: number, end: number) => {
+        const existingStart = 100;
+        const existingEnd = 200;
+        return existingStart < end && existingEnd > start ? 1 : 0;
+      };
+
+      seasonsRepository.createQueryBuilder.mockImplementation(() => {
+        return {
+          where: jest.fn().mockReturnThis(),
+          andWhere: jest.fn().mockReturnThis(),
+          // getCount is set per call below
+          getCount: jest.fn(),
+        } as never;
+      });
+
+      const mkDto = (seasonNumber: number, start: number, end: number) => {
+        // Use dates with deterministic parsing; seconds value isn't used,
+        // only the overlap math in the SQL query bindings.
+        const startIso = new Date(start * 1000).toISOString();
+        const endIso = new Date(end * 1000).toISOString();
+        return {
+          season_number: seasonNumber,
+          start_time: startIso,
+          end_time: endIso,
+          reward_pool_stroops: dto.reward_pool_stroops,
+        } satisfies CreateSeasonDto;
+      };
+
+      const attempts = [
+        {
+          label: '[150, 250] starts inside => reject',
+          start: 150,
+          end: 250,
+          ok: false,
+          season: 10,
+        },
+        {
+          label: '[50, 150] ends inside => reject',
+          start: 50,
+          end: 150,
+          ok: false,
+          season: 11,
+        },
+        {
+          label: '[120, 180] fully inside => reject',
+          start: 120,
+          end: 180,
+          ok: false,
+          season: 12,
+        },
+        {
+          label: '[200, 300] starts at end => success',
+          start: 200,
+          end: 300,
+          ok: true,
+          season: 13,
+        },
+      ] as const;
+
+      for (const a of attempts) {
+        const qb = {
+          where: jest.fn().mockReturnThis(),
+          andWhere: jest.fn().mockReturnThis(),
+          getCount: jest.fn().mockResolvedValue(overlapFor(a.start, a.end)),
+        } as never;
+        seasonsRepository.createQueryBuilder.mockReturnValue(qb);
+
+        if (!a.ok) {
+          await expect(
+            service.create(mkDto(a.season, a.start, a.end)),
+          ).rejects.toBeInstanceOf(ConflictException);
+          expect(seasonsRepository.save).not.toHaveBeenCalled();
+        } else {
+          seasonsRepository.save.mockResolvedValueOnce({
+            ...savedSeason,
+            season_number: a.season,
+          });
+
+          const result = await service.create(mkDto(a.season, a.start, a.end));
+          expect(result.season_number).toBe(a.season);
+          expect(seasonsRepository.save).toHaveBeenCalled();
+        }
+      }
+
+      // Finalize existing season; the existing active season should no longer
+      // overlap checks against is_active=true.
+      // Simulate by returning 0 overlap for [150, 250].
+      seasonsRepository.createQueryBuilder.mockReturnValue({
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        getCount: jest.fn().mockResolvedValue(0),
+      } as never);
+
+      seasonsRepository.save.mockResolvedValueOnce({
+        ...savedSeason,
+        season_number: 99,
+      });
+      const finalResult = await service.create(mkDto(99, 150, 250));
+      expect(finalResult.season_number).toBe(99);
+
+      jest.useRealTimers();
+    });
+
+    it('throws when an active season overlaps the range (generic)', async () => {
       seasonsRepository.createQueryBuilder.mockReturnValue({
         where: jest.fn().mockReturnThis(),
         andWhere: jest.fn().mockReturnThis(),
