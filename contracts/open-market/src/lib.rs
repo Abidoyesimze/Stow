@@ -26,11 +26,12 @@ pub use crate::storage_types::ProposalState;
 pub use crate::liquidity::{calculate_liquidity_value, calculate_lp_tokens, calculate_swap_output};
 pub use crate::market::CreateMarketParams;
 pub use crate::storage_types::{
+    BatchPredictionRequest,
     ConditionalChain, ConditionalMarket, CreatorLeaderboardEntry, CreatorStats, DataKey,
     DependencyStatus, Dispute, Event, EventMatch, EventPrediction, FeeTier, FeeTierConfig,
     InviteCode, LPPosition, LeaderboardEntry, LeaderboardSnapshot, LiquidityPool, Market,
-    MarketFeeInfo, MarketStats, PlatformStats, Prediction, Season, SwapRecord, UserProfile,
-    VolatilityState, Winner,
+    MarketFeeInfo, MarketStats, PlatformStats, Prediction, PriceAccumulator, PriceObservation,
+    Season, SwapRecord, UserProfile, VolatilityState, Winner,
 };
 
 use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, Vec};
@@ -309,6 +310,15 @@ impl InsightArenaContract {
         prediction::submit_prediction(&env, predictor, market_id, chosen_outcome, stake_amount)
     }
 
+    /// Submit a batch of predictions atomically.
+    pub fn submit_predictions_batch(
+        env: Env,
+        predictor: Address,
+        requests: Vec<BatchPredictionRequest>,
+    ) -> Result<Vec<()>, InsightArenaError> {
+        prediction::submit_predictions_batch(&env, predictor, requests)
+    }
+
     /// Return the stored [`Prediction`] for a given `(market_id, predictor)` pair.
     pub fn get_prediction(
         env: Env,
@@ -340,6 +350,21 @@ impl InsightArenaContract {
         market_id: u64,
     ) -> Result<i128, InsightArenaError> {
         prediction::claim_payout(&env, predictor, market_id)
+    }
+
+    /// Pull-based cancellation refund: transfer the caller's full staked amount
+    /// back to them from escrow.
+    ///
+    /// The market must be cancelled. Each participant calls this once for
+    /// themselves; a second call reverts with `RefundAlreadyClaimed`.
+    /// A caller with no stake in the market reverts with `NotAParticipant`.
+    /// Returns the refund amount in stroops.
+    pub fn claim_cancel_refund(
+        env: Env,
+        predictor: Address,
+        market_id: u64,
+    ) -> Result<i128, InsightArenaError> {
+        prediction::claim_cancel_refund(&env, predictor, market_id)
     }
 
     /// Return the current XLM balance held by the contract escrow in stroops.
@@ -747,6 +772,18 @@ impl InsightArenaContract {
         market_id: u64,
     ) -> Result<i128, InsightArenaError> {
         liquidity::collect_lp_fees(&env, provider, market_id)
+    }
+
+    /// Compute the time-weighted average price of `outcome` over the trailing
+    /// `window` seconds. See `liquidity::TWAP_RING_BUFFER_CAPACITY` for the
+    /// maximum window the ring buffer can currently honor.
+    pub fn get_twap(
+        env: Env,
+        market_id: u64,
+        outcome: Symbol,
+        window: u64,
+    ) -> Result<i128, InsightArenaError> {
+        liquidity::get_twap(&env, market_id, outcome, window)
     }
 
     // ── Dynamic Swap Fee ──────────────────────────────────────────────────────

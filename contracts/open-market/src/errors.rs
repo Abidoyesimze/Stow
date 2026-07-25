@@ -44,6 +44,10 @@ pub enum InsightArenaError {
     /// Raised when cancel_market is called a second time or when any post-cancel
     /// mutation (prediction, resolution) is attempted.
     MarketAlreadyCancelled = 19,
+    /// The market is not in the cancelled state.
+    /// Raised by `claim_cancel_refund` when the market has not been cancelled and
+    /// therefore no cancellation refund is available.
+    MarketNotCancelled = 28,
     /// The predicted outcome symbol is not present in `outcome_options`.
     /// Raised when a user submits a prediction with an unrecognised outcome.
     InvalidOutcome = 16,
@@ -81,6 +85,12 @@ pub enum InsightArenaError {
     /// The market has already been closed and is no longer accepting changes.
     /// Raised when a mutation (fee update, end_time extension) is attempted after close.
     MarketAlreadyClosed = 25,
+    /// The participant has already claimed their cancellation refund for this market.
+    /// Raised by `claim_cancel_refund` to prevent double-claiming on cancelled markets.
+    RefundAlreadyClaimed = 26,
+    /// The caller has no stake in this market and is therefore not entitled to a refund.
+    /// Raised by `claim_cancel_refund` when the address never submitted a prediction.
+    NotAParticipant = 27,
 
     // ── Escrow ────────────────────────────────────────────────────────────────
     /// The contract's escrow balance is insufficient to complete the transfer.
@@ -154,5 +164,23 @@ pub enum InsightArenaError {
     /// `DataKey::TrustedCreator` allowlist. Raised by `market::create_market`
     /// before any market state is persisted; a `MarketCreationDenied` event is
     /// emitted with the attempted creator's address before this error returns.
-    InsufficientReputation = 105,
+    InsufficientReputation = 106,
+
+    // ── Batch Operations ──────────────────────────────────────────────────────
+    /// The number of items in a batch operation exceeds the maximum allowed size.
+    BatchSizeExceeded = 107,
+
+    // ── TWAP Price Oracle ─────────────────────────────────────────────────────
+    /// `get_twap` was called with a zero-second window, which cannot produce a
+    /// meaningful average.
+    TwapEmptyWindow = 108,
+    /// Not enough retained price history to cover the requested window: either
+    /// this outcome has never had a price-changing operation, or the window's
+    /// start predates the oldest observation still held in the ring buffer
+    /// (older samples were evicted by wraparound). Raised instead of silently
+    /// truncating the window or dividing by an under-covered interval.
+    TwapInsufficientHistory = 109,
+    /// The elapsed time between the window's start and now collapsed to zero
+    /// seconds, which would require dividing the price integral by zero.
+    TwapDivideByZero = 110,
 }

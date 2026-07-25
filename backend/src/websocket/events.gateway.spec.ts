@@ -52,9 +52,12 @@ const makeServer = () => {
 // Test suite
 // ---------------------------------------------------------------------------
 
+import { AnalyticsService } from '../analytics/analytics.service';
+
 describe('EventsGateway', () => {
   let gateway: EventsGateway;
   let jwtService: jest.Mocked<JwtService>;
+  let analyticsService: jest.Mocked<AnalyticsService>;
   let server: ReturnType<typeof makeServer>;
 
   beforeEach(async () => {
@@ -69,13 +72,22 @@ describe('EventsGateway', () => {
           provide: ConfigService,
           useValue: { get: jest.fn().mockReturnValue('test-secret') },
         },
+        {
+          provide: AnalyticsService,
+          useValue: {
+            trackActiveSession: jest.fn(),
+            removeActiveSession: jest.fn(),
+            getActiveUsersCount: jest.fn().mockReturnValue(0),
+          },
+        },
       ],
     }).compile();
 
-    gateway = module.get(EventsGateway);
+    gateway = module.get<EventsGateway>(EventsGateway);
     jwtService = module.get(JwtService);
+    analyticsService = module.get(AnalyticsService);
     server = makeServer();
-    (gateway as any).server = server;
+    gateway.server = server as unknown as Server;
   });
 
   afterEach(() => jest.clearAllMocks());

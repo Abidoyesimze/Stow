@@ -1,4 +1,12 @@
-use soroban_sdk::{contracttype, Address, Map, String, Symbol, Vec};
+use soroban_sdk::{contracttype, Address, Env, Map, String, Symbol, Vec};
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchPredictionRequest {
+    pub market_id: u64,
+    pub chosen_outcome: Symbol,
+    pub stake_amount: i128,
+}
 
 #[contracttype]
 #[derive(Clone)]
@@ -322,10 +330,15 @@ pub struct LiquidityPool {
     pub lp_token_supply: i128,
     pub fee_bps: u32,
     pub created_at: u64,
+    /// Per-outcome TWAP price accumulators. Kept on the pool itself (rather than
+    /// a separate storage key) so a single `save_pool` persists both the reserve
+    /// update and its price observation atomically. See [`PriceAccumulator`].
+    pub price_accumulators: Map<Symbol, PriceAccumulator>,
 }
 
 impl LiquidityPool {
     pub fn new(
+        env: &Env,
         market_id: u64,
         initial_reserves: Map<Symbol, i128>,
         fee_bps: u32,
@@ -340,6 +353,7 @@ impl LiquidityPool {
             lp_token_supply: 0,
             fee_bps,
             created_at,
+            price_accumulators: Map::new(env),
         }
     }
 }
@@ -498,6 +512,70 @@ pub struct MarketFeeInfo {
     pub tier: FeeTier,
     pub effective_fee_bps: u32,
     pub volatility_ema_bps: u32,
+}
+
+// ── TWAP Price Oracle Types ───────────────────────────────────────────────────
+
+/// A single recorded price sample for one outcome, kept in the [`PriceAccumulator`]
+/// ring buffer.
+///
+/// `price_cumulative` is the value of the running price integral (sum of
+/// `price * elapsed_seconds` over the outcome's whole history) *as of*
+/// `timestamp`, i.e. immediately before `price` itself takes effect. This lets
+/// `get_twap` reconstruct the integral at any timestamp `t >= observations[0].timestamp`
+/// by locating the latest observation at or before `t` and extrapolating with
+/// its `price` for the remaining `t - timestamp` seconds.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceObservation {
+    /// Ledger timestamp this observation was recorded at.
+    pub timestamp: u64,
+    /// Instantaneous outcome price (pool reserve) that became active at `timestamp`.
+    pub price: i128,
+    /// Cumulative price integral as of `timestamp`, not yet including `price` itself.
+    pub price_cumulative: i128,
+}
+
+/// Per-(market, outcome) TWAP state: a cumulative price accumulator plus a
+/// fixed-capacity ring buffer of historical observations used to answer
+/// windowed `get_twap` queries. Updated on every operation that changes the
+/// outcome's reserve (pool creation, swaps).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceAccumulator {
+    pub market_id: u64,
+    pub outcome: Symbol,
+    /// Fixed-capacity ring buffer of the most recent observations. Once full,
+    /// new observations overwrite the oldest slot (see `next_index`).
+    pub observations: Vec<PriceObservation>,
+    /// Index in `observations` that the next write will occupy (wraps modulo capacity).
+    pub next_index: u32,
+    /// Total number of observations ever recorded for this outcome (monotonic;
+    /// may exceed `observations.len()` once the buffer has wrapped).
+    pub total_count: u64,
+    /// The price active since `last_timestamp`, used to extrapolate the
+    /// cumulative integral forward to "now" without a storage write.
+    pub last_price: i128,
+    /// Ledger timestamp of the most recent observation.
+    pub last_timestamp: u64,
+    /// Cumulative price integral as of `last_timestamp` (mirrors the most
+    /// recent observation's `price_cumulative`).
+    pub cumulative: i128,
+}
+
+impl PriceAccumulator {
+    pub fn empty(env: &Env, market_id: u64, outcome: Symbol) -> Self {
+        Self {
+            market_id,
+            outcome,
+            observations: Vec::new(env),
+            next_index: 0,
+            total_count: 0,
+            last_price: 0,
+            last_timestamp: 0,
+            cumulative: 0,
+        }
+    }
 }
 
 #[contracttype]
