@@ -2,7 +2,6 @@ use soroban_sdk::{contracttype, symbol_short, Address, Env, String, Symbol, Vec}
 
 use crate::config::{self, PERSISTENT_BUMP, PERSISTENT_THRESHOLD};
 use crate::errors::InsightArenaError;
-use crate::escrow;
 use crate::reputation;
 use crate::storage_types::{
     ConditionalMarket, DataKey, DependencyStatus, Market, MarketStats, PlatformStats, Prediction,
@@ -615,19 +614,24 @@ pub fn extend_market_end_time(
 
 /// Cancel a market that could not be resolved (oracle failure, creator error, etc.).
 ///
-/// Upon cancellation every predictor's full stake is refunded via the escrow
-/// module. No payouts or fees are processed.
+/// Marks the market as cancelled and freezes all further mutations (predictions,
+/// resolution, fee updates). Funds are NOT pushed in this call. Instead, each
+/// participant must call `claim_cancel_refund` to pull their stake back. This
+/// pull pattern keeps this function O(1) and gas-bounded regardless of participant
+/// count, and each individual transfer is isolated so one failing recipient cannot
+/// block the rest.
 ///
 /// Validation order:
-/// 1. Market exists
-/// 2. Market has not already been resolved
-/// 3. Market has not already been cancelled
-/// 4. `caller` must be the platform admin
+/// 1. Platform not paused
+/// 2. Market exists
+/// 3. Market has not already been resolved
+/// 4. Market has not already been cancelled
+/// 5. `caller` must be the platform admin
 ///
 /// On success:
 /// - `market.is_cancelled` is set to `true` and persisted.
-/// - All entries in `PredictorList(market_id)` are iterated; for each, the
-///   corresponding `Prediction` record is loaded and `escrow::refund` is called.
+/// - Conditional children are deactivated (their own stakes remain claimable per
+///   participant via `claim_cancel_refund` on each child market).
 /// - A `MarketCancelled` event is emitted.
 pub fn cancel_market(env: &Env, caller: Address, market_id: u64) -> Result<(), InsightArenaError> {
     config::ensure_not_paused(env)?;
@@ -659,20 +663,9 @@ pub fn cancel_market(env: &Env, caller: Address, market_id: u64) -> Result<(), I
         .set(&DataKey::Market(market_id), &market);
     bump_market(env, market_id);
 
-    let predictors = env
-        .storage()
-        .persistent()
-        .get::<DataKey, Vec<Address>>(&DataKey::PredictorList(market_id))
-        .unwrap_or_else(|| Vec::new(env));
-
-    for predictor in predictors.iter() {
-        let key = DataKey::Prediction(market_id, predictor.clone());
-        if let Some(prediction) = env.storage().persistent().get::<DataKey, Prediction>(&key) {
-            escrow::refund(env, &predictor, prediction.stake_amount)?;
-        }
-    }
-
     // Deactivate all conditional children so no orphaned markets remain.
+    // Each child market is also marked cancelled; its participants may call
+    // claim_cancel_refund on the child market independently.
     let child_ids: Vec<u64> = env
         .storage()
         .persistent()
@@ -1078,8 +1071,11 @@ fn emit_conditional_deactivated(env: &Env, market_id: u64) {
 
 /// Deactivate a conditional market whose parent was cancelled or resolved to a
 /// non-matching outcome. Sets `is_activated = false`, marks the underlying
-/// `Market` as `is_cancelled = true`, refunds any stakes already placed, and
-/// emits a deactivation event.
+/// `Market` as `is_cancelled = true` so `submit_prediction` rejects new entries,
+/// and emits a deactivation event.
+///
+/// Stakes already placed in the child market are claimable by each participant
+/// via `claim_cancel_refund` — the pull pattern keeps this function O(1).
 pub fn deactivate_conditional_market(env: &Env, market_id: u64) -> Result<(), InsightArenaError> {
     // Load and update the ConditionalMarket record.
     let mut conditional: ConditionalMarket = env
@@ -1094,7 +1090,8 @@ pub fn deactivate_conditional_market(env: &Env, market_id: u64) -> Result<(), In
         .persistent()
         .set(&DataKey::ConditionalMarket(market_id), &conditional);
 
-    // Mark the underlying Market as cancelled and refund any stakes.
+    // Mark the underlying Market as cancelled. Stakes remain in escrow and are
+    // individually claimable via claim_cancel_refund.
     let mut market = get_market(env, market_id)?;
 
     if !market.is_cancelled && !market.is_resolved {
@@ -1103,19 +1100,6 @@ pub fn deactivate_conditional_market(env: &Env, market_id: u64) -> Result<(), In
             .persistent()
             .set(&DataKey::Market(market_id), &market);
         bump_market(env, market_id);
-
-        let predictors = env
-            .storage()
-            .persistent()
-            .get::<DataKey, Vec<Address>>(&DataKey::PredictorList(market_id))
-            .unwrap_or_else(|| Vec::new(env));
-
-        for predictor in predictors.iter() {
-            let key = DataKey::Prediction(market_id, predictor.clone());
-            if let Some(prediction) = env.storage().persistent().get::<DataKey, Prediction>(&key) {
-                escrow::refund(env, &predictor, prediction.stake_amount)?;
-            }
-        }
     }
 
     emit_conditional_deactivated(env, market_id);
