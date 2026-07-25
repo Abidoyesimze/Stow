@@ -69,6 +69,44 @@ pub fn lock_stake(env: &Env, from: &Address, amount: i128) -> Result<(), Insight
     Ok(())
 }
 
+/// Transfer `amount` stroops from `from` to the contract via pre-approved allowance.
+///
+/// Uses `transfer_from` instead of direct `transfer`, enabling gasless approval flows
+/// where the token holder pre-approves the contract separately.
+///
+/// # Errors
+/// - `InvalidInput` when `amount <= 0`.
+/// - `InsufficientFunds` when the allowance is insufficient.
+/// - Propagates any error returned by [`config::get_config`].
+pub fn lock_stake_via_allowance(
+    env: &Env,
+    from: &Address,
+    amount: i128,
+) -> Result<(), InsightArenaError> {
+    acquire_escrow_lock(env)?;
+
+    if amount <= 0 {
+        release_escrow_lock(env);
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    from.require_auth();
+
+    let cfg = config::get_config(env)?;
+    let contract = env.current_contract_address();
+    let client = token::Client::new(env, &cfg.xlm_token);
+
+    if client.allowance(from, &contract) < amount {
+        release_escrow_lock(env);
+        return Err(InsightArenaError::InsufficientFunds);
+    }
+
+    client.transfer_from(&contract, from, &contract, &amount);
+
+    release_escrow_lock(env);
+    Ok(())
+}
+
 /// Transfer `amount` stroops from contract escrow back to `to` as a refund.
 ///
 /// This entry point is intentionally separate from [`release_payout`] even

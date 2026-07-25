@@ -47,6 +47,20 @@ fn emit_dispute_resolved(env: &Env, market_id: u64, admin: &Address, uphold: boo
     );
 }
 
+fn emit_appeal_filed(env: &Env, market_id: u64, appealer: &Address, bond: i128, tier: u32) {
+    env.events().publish(
+        (symbol_short!("dsp"), symbol_short!("appld")),
+        (market_id, appealer.clone(), bond, tier),
+    );
+}
+
+fn emit_appeal_resolved(env: &Env, market_id: u64, admin: &Address, uphold: bool, tier: u32) {
+    env.events().publish(
+        (symbol_short!("dsp"), symbol_short!("appeald")),
+        (market_id, admin.clone(), uphold, tier),
+    );
+}
+
 pub fn get_dispute(env: &Env, market_id: u64) -> Result<Dispute, InsightArenaError> {
     let dispute: Dispute = env
         .storage()
@@ -216,4 +230,106 @@ fn set_open_dispute_count(env: &Env, count: u32) {
         config::PERSISTENT_THRESHOLD,
         config::PERSISTENT_BUMP,
     );
+}
+
+const MAX_APPEAL_TIERS: u32 = 2;
+
+fn calculate_appeal_bond(base_bond: i128, tier: u32) -> i128 {
+    base_bond.saturating_mul((tier as i128) + 1)
+}
+
+pub fn appeal_dispute(
+    env: Env,
+    appealer: Address,
+    market_id: u64,
+    appeal_bond: i128,
+) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(&env)?;
+
+    if appeal_bond <= 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    let mut dispute: Dispute = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Dispute(market_id))
+        .ok_or(InsightArenaError::DisputeNotFound)?;
+
+    if dispute.appeal_tier >= MAX_APPEAL_TIERS {
+        // Max appeal tiers reached; the appeal window is effectively closed.
+        // Reuses DisputeWindowClosed since the error enum is at its 50-case cap.
+        return Err(InsightArenaError::DisputeWindowClosed);
+    }
+
+    if dispute.appealer.is_some() {
+        // A dispute has already been appealed at this tier. Reuses
+        // DisputeAlreadyFiled since the error enum is at its 50-case cap.
+        return Err(InsightArenaError::DisputeAlreadyFiled);
+    }
+
+    let expected_bond = calculate_appeal_bond(dispute.bond, dispute.appeal_tier + 1);
+    if appeal_bond < expected_bond {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    escrow::lock_stake(&env, &appealer, appeal_bond)?;
+
+    dispute.appeal_tier += 1;
+    dispute.appealer = Some(appealer.clone());
+    dispute.appeal_bond = appeal_bond;
+    env.storage()
+        .persistent()
+        .set(&DataKey::Dispute(market_id), &dispute);
+    bump_dispute(&env, market_id);
+
+    emit_appeal_filed(&env, market_id, &appealer, appeal_bond, dispute.appeal_tier);
+
+    Ok(())
+}
+
+pub fn resolve_appeal(
+    env: Env,
+    admin: Address,
+    market_id: u64,
+    uphold: bool,
+) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(&env)?;
+    require_admin(&env, &admin)?;
+
+    let mut dispute: Dispute = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Dispute(market_id))
+        .ok_or(InsightArenaError::DisputeNotFound)?;
+
+    let appealer = dispute
+        .appealer
+        .clone()
+        .ok_or(InsightArenaError::DisputeNotFound)?;
+
+    if uphold {
+        escrow::refund(&env, &appealer, dispute.appeal_bond)?;
+        let mut market = market::get_market(&env, market_id)?;
+        market.is_resolved = false;
+        market.resolved_outcome = None;
+        market.resolved_at = None;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Market(market_id), &market);
+        config::extend_market_ttl(&env, market_id);
+    } else {
+        escrow::add_to_treasury_balance(&env, dispute.appeal_bond);
+    }
+
+    dispute.appealer = None;
+    dispute.appeal_bond = 0;
+    env.storage()
+        .persistent()
+        .set(&DataKey::Dispute(market_id), &dispute);
+    bump_dispute(&env, market_id);
+
+    emit_appeal_resolved(&env, market_id, &admin, uphold, dispute.appeal_tier);
+
+    Ok(())
 }

@@ -1,9 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { ArrowRight, Calendar, Users, XCircle, CheckCircle, ShieldCheck, Tag } from "lucide-react";
+import { ArrowRight, Calendar, Users, XCircle, CheckCircle, ShieldCheck, Tag, Zap } from "lucide-react";
 import { Button } from "@/component/ui/button";
 import { cn } from "@/lib/utils";
+import { useCountdown, formatCountdown } from "@/hooks/useCountdown";
 
 export type CreatorEventStatus = "Active" | "Completed" | "Cancelled";
 
@@ -51,6 +52,7 @@ export default function EventCard({
   const StatusIcon = statusIcons[status];
   const [bannerError, setBannerError] = useState(false);
   const showBanner = Boolean(bannerUrl) && !bannerError;
+  const countdown = useCountdown(endsAt);
 
   return (
     <div className="overflow-hidden rounded-3xl border border-white/10 bg-slate-950/80 shadow-xl shadow-black/20 transition hover:border-white/20 hover:shadow-white/5">
@@ -98,11 +100,11 @@ export default function EventCard({
             <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Creator</p>
             <p className="mt-2 text-sm font-semibold text-white">{creator}</p>
           </div>
-          <div className="rounded-2xl bg-white/5 p-4 border border-white/10">
-            <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Ends</p>
-            <p className="mt-2 flex items-center gap-2 text-sm font-semibold text-white">
-              <Calendar className="h-4 w-4 text-slate-400" />
-              {endsAt}
+          <div className={cn("rounded-2xl p-4 border", countdown.isExpired ? "bg-red-500/10 border-red-500/30" : "bg-white/5 border-white/10")}>
+            <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Time Until Lock</p>
+            <p className={cn("mt-2 flex items-center gap-2 text-sm font-semibold", countdown.isExpired ? "text-red-300" : "text-white")}>
+              <Zap className="h-4 w-4" />
+              {formatCountdown(countdown, 'Event Locked')}
             </p>
           </div>
         </div>

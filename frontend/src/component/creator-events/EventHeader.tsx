@@ -1,12 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { CalendarDays, Check, Copy, KeyRound, Tag, Users } from "lucide-react";
+import { CalendarDays, Check, Copy, KeyRound, Tag, Users, Zap } from "lucide-react";
 
 import { Badge } from "@/component/ui/badge";
 import { Button } from "@/component/ui/button";
 import type { EventStatus } from "@/hooks/useCreatorEvents";
 import { cn } from "@/lib/utils";
+import { useCountdown, formatCountdown } from "@/hooks/useCountdown";
 
 interface EventHeaderProps {
   title: string;
@@ -16,6 +17,7 @@ interface EventHeaderProps {
   participants: number;
   maxParticipants: number;
   createdAt: string;
+  endsAt?: string;
   inviteCode?: string;
   category?: string;
   bannerUrl?: string;
@@ -35,6 +37,7 @@ export default function EventHeader({
   participants,
   maxParticipants,
   createdAt,
+  endsAt,
   inviteCode,
   category,
   bannerUrl,
@@ -42,6 +45,7 @@ export default function EventHeader({
   const [copied, setCopied] = useState(false);
   const [bannerError, setBannerError] = useState(false);
   const showBanner = Boolean(bannerUrl) && !bannerError;
+  const countdown = useCountdown(endsAt || createdAt);
 
   const handleCopyCreator = async () => {
     try {
@@ -123,6 +127,16 @@ export default function EventHeader({
                 {createdAt}
               </p>
             </div>
+
+            {endsAt ? (
+              <div className={cn("rounded-2xl p-4", countdown.isExpired ? "border-red-500/30 bg-red-500/10" : "border-white/10 bg-slate-950/80 border")}>
+                <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Time Until Lock</p>
+                <p className={cn("mt-2 flex items-center gap-2 text-sm font-semibold", countdown.isExpired ? "text-red-300" : "text-white")}>
+                  <Zap className="h-4 w-4" />
+                  {formatCountdown(countdown, 'Event Locked')}
+                </p>
+              </div>
+            ) : null}
 
             {inviteCode ? (
               <div className="rounded-2xl border border-amber-400/20 bg-amber-400/10 p-4 sm:col-span-2 lg:col-span-1">

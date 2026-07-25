@@ -110,8 +110,13 @@ pub enum DataKey {
     VerifiedAddress(Address),
     /// Keyed by event_id. Vec of Winner records for the event.
     Winners(u64),
-    /// Singleton. Treasury balance separate from protocol fees.
-    TreasuryBalance,
+
+    // ── Commit-Reveal Predictions ─────────────────────────────────────────────
+    // NOTE: `#[contracttype]` union enums are hard-capped at 50 XDR cases
+    // (`ScSpecUdtUnionV0::cases<50>`). The previously-declared-but-unused
+    // `TreasuryBalance` singleton was removed here to make room for this key.
+    /// Keyed by (market_id, predictor). Stores a committed prediction (hash + amount, awaiting reveal).
+    CommitmentPrediction(u64, Address),
 }
 
 /// Lifecycle state of a governance proposal, derived from its stored flags and
@@ -141,6 +146,9 @@ pub struct Dispute {
     pub disputer: Address,
     pub bond: i128,
     pub filed_at: u64,
+    pub appeal_tier: u32,
+    pub appealer: Option<Address>,
+    pub appeal_bond: i128,
 }
 
 impl Dispute {
@@ -149,6 +157,9 @@ impl Dispute {
             disputer,
             bond,
             filed_at,
+            appeal_tier: 0,
+            appealer: None,
+            appeal_bond: 0,
         }
     }
 }
@@ -205,6 +216,8 @@ pub struct Prediction {
     pub payout_claimed: bool,
     /// The final portion of XLM the user won, populated after resolution. Defaults to 0.
     pub payout_amount: i128,
+    /// Payment method: true if via allowance (transfer_from), false if direct transfer. Defaults to false.
+    pub via_allowance: bool,
 }
 
 impl Prediction {
@@ -224,6 +237,27 @@ impl Prediction {
             submitted_at,
             payout_claimed: false,
             payout_amount: 0,
+            via_allowance: false,
+        }
+    }
+
+    /// Create a prediction via allowance-based payment.
+    pub fn new_via_allowance(
+        market_id: u64,
+        predictor: Address,
+        chosen_outcome: Symbol,
+        stake_amount: i128,
+        submitted_at: u64,
+    ) -> Self {
+        Self {
+            market_id,
+            predictor,
+            chosen_outcome,
+            stake_amount,
+            submitted_at,
+            payout_claimed: false,
+            payout_amount: 0,
+            via_allowance: true,
         }
     }
 }
@@ -974,6 +1008,28 @@ impl EventPrediction {
     /// Returns true if the predicted_winner value is valid (must be 0, 1, or 2).
     pub fn is_valid_outcome(predicted_winner: u32) -> bool {
         predicted_winner <= 2
+    }
+}
+
+/// Represents a committed prediction awaiting reveal phase.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommitmentPrediction {
+    /// Hash of (chosen_outcome, amount, salt).
+    pub commitment_hash: soroban_sdk::BytesN<32>,
+    /// Ledger timestamp when the commit was recorded.
+    pub committed_at: u64,
+    /// Whether the commitment has been revealed yet.
+    pub revealed: bool,
+}
+
+impl CommitmentPrediction {
+    pub fn new(commitment_hash: soroban_sdk::BytesN<32>, committed_at: u64) -> Self {
+        Self {
+            commitment_hash,
+            committed_at,
+            revealed: false,
+        }
     }
 }
 
