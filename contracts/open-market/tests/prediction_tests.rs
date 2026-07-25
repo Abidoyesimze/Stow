@@ -4,7 +4,7 @@ use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol};
 
 use insightarena_contract::config::LEDGER_BUMP_MARKET;
 use insightarena_contract::market::CreateMarketParams;
-use insightarena_contract::storage_types::DataKey;
+use insightarena_contract::storage_types::{DataKey, BatchPredictionRequest};
 use insightarena_contract::{InsightArenaContract, InsightArenaContractClient, InsightArenaError};
 
 // ── Test helpers ──────────────────────────────────────────────────────────
@@ -154,6 +154,97 @@ fn test_submit_prediction_already_predicted() {
         result,
         Err(Ok(InsightArenaError::AlreadyPredicted))
     ));
+}
+
+// ── submit_predictions_batch tests ────────────────────────────────────────
+
+#[test]
+fn test_submit_predictions_batch_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, xlm_token, _, _) = deploy(&env);
+    let predictor = Address::generate(&env);
+    let stake = 20_000_000_i128;
+
+    let market_id_1 = client.create_market(&Address::generate(&env), &default_params(&env));
+    let market_id_2 = client.create_market(&Address::generate(&env), &default_params(&env));
+    fund(&env, &xlm_token, &predictor, stake * 2);
+
+    let requests = vec![
+        &env,
+        BatchPredictionRequest {
+            market_id: market_id_1,
+            chosen_outcome: symbol_short!("yes"),
+            stake_amount: stake,
+        },
+        BatchPredictionRequest {
+            market_id: market_id_2,
+            chosen_outcome: symbol_short!("no"),
+            stake_amount: stake,
+        },
+    ];
+
+    let result = client.submit_predictions_batch(&predictor, &requests);
+    assert_eq!(result.len(), 2);
+    
+    assert!(client.has_predicted(&market_id_1, &predictor));
+    assert!(client.has_predicted(&market_id_2, &predictor));
+}
+
+#[test]
+fn test_submit_predictions_batch_oversize() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _) = deploy(&env);
+    let predictor = Address::generate(&env);
+    let stake = 20_000_000_i128;
+
+    let mut requests_vec = alloc::vec::Vec::new();
+    for _ in 0..11 {
+        requests_vec.push(BatchPredictionRequest {
+            market_id: 1,
+            chosen_outcome: symbol_short!("yes"),
+            stake_amount: stake,
+        });
+    }
+    
+    let requests = soroban_sdk::Vec::from_slice(&env, &requests_vec);
+    let result = client.try_submit_predictions_batch(&predictor, &requests);
+    assert!(matches!(result, Err(Ok(InsightArenaError::BatchSizeExceeded))));
+}
+
+#[test]
+fn test_submit_predictions_batch_partial_failure_reverts_all() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, xlm_token, _, _) = deploy(&env);
+    let predictor = Address::generate(&env);
+    let stake = 20_000_000_i128;
+
+    let market_id_1 = client.create_market(&Address::generate(&env), &default_params(&env));
+    let market_id_2 = client.create_market(&Address::generate(&env), &default_params(&env));
+    fund(&env, &xlm_token, &predictor, stake * 2);
+
+    let requests = vec![
+        &env,
+        BatchPredictionRequest {
+            market_id: market_id_1,
+            chosen_outcome: symbol_short!("yes"),
+            stake_amount: stake, // valid
+        },
+        BatchPredictionRequest {
+            market_id: market_id_2,
+            chosen_outcome: symbol_short!("maybe"), // invalid outcome
+            stake_amount: stake,
+        },
+    ];
+
+    let result = client.try_submit_predictions_batch(&predictor, &requests);
+    assert!(matches!(result, Err(Ok(InsightArenaError::InvalidOutcome))));
+    
+    // Check that neither prediction was recorded due to atomic rollback
+    assert!(!client.has_predicted(&market_id_1, &predictor));
+    assert!(!client.has_predicted(&market_id_2, &predictor));
 }
 
 // ── claim_payout tests ────────────────────────────────────────────────────

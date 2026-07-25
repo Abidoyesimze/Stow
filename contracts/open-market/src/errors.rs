@@ -138,4 +138,8 @@ pub enum InsightArenaError {
     // ── Conditional Markets ───────────────────────────────────────────────────
     /// The maximum allowed depth for nested conditional markets has been exceeded.
     ConditionalDepthExceeded = 103,
+    
+    // ── Batch Operations ──────────────────────────────────────────────────────
+    /// The number of items in a batch operation exceeds the maximum allowed size.
+    BatchSizeExceeded = 104,
 }

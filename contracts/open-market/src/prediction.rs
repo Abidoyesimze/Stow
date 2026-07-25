@@ -5,7 +5,7 @@ use crate::errors::InsightArenaError;
 use crate::escrow;
 use crate::market;
 use crate::season;
-use crate::storage_types::{DataKey, Market, Prediction, UserProfile};
+use crate::storage_types::{DataKey, Market, Prediction, UserProfile, BatchPredictionRequest};
 
 // ── TTL helpers ───────────────────────────────────────────────────────────────
 
@@ -157,6 +157,34 @@ fn apply_winner_payout(
 }
 
 // ── Entry-point logic ─────────────────────────────────────────────────────────
+
+pub const MAX_PREDICTION_BATCH_SIZE: u32 = 10;
+
+/// Submit a batch of predictions atomically.
+/// Enforces a maximum batch size and reverts the entire transaction if any prediction fails.
+pub fn submit_predictions_batch(
+    env: &Env,
+    predictor: Address,
+    requests: Vec<BatchPredictionRequest>,
+) -> Result<Vec<()>, InsightArenaError> {
+    if requests.len() > MAX_PREDICTION_BATCH_SIZE {
+        return Err(InsightArenaError::BatchSizeExceeded);
+    }
+
+    let mut results = Vec::new(env);
+    for request in requests.iter() {
+        submit_prediction(
+            env,
+            predictor.clone(),
+            request.market_id,
+            request.chosen_outcome,
+            request.stake_amount,
+        )?;
+        results.push_back(());
+    }
+
+    Ok(results)
+}
 
 /// Submit a prediction for an open market by staking XLM on a chosen outcome.
 ///

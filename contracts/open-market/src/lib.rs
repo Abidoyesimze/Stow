@@ -28,7 +28,7 @@ pub use crate::storage_types::{
     ConditionalChain, ConditionalMarket, CreatorLeaderboardEntry, CreatorStats, DataKey, Dispute,
     Event, EventMatch, EventPrediction, InviteCode, LPPosition, LeaderboardEntry,
     LeaderboardSnapshot, LiquidityPool, Market, MarketStats, PlatformStats, Prediction, Season,
-    SwapRecord, UserProfile, Winner,
+    SwapRecord, UserProfile, Winner, BatchPredictionRequest,
 };
 
 use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, Vec};
@@ -283,6 +283,15 @@ impl InsightArenaContract {
         stake_amount: i128,
     ) -> Result<(), InsightArenaError> {
         prediction::submit_prediction(&env, predictor, market_id, chosen_outcome, stake_amount)
+    }
+
+    /// Submit a batch of predictions atomically.
+    pub fn submit_predictions_batch(
+        env: Env,
+        predictor: Address,
+        requests: Vec<BatchPredictionRequest>,
+    ) -> Result<Vec<()>, InsightArenaError> {
+        prediction::submit_predictions_batch(&env, predictor, requests)
     }
 
     /// Return the stored [`Prediction`] for a given `(market_id, predictor)` pair.
