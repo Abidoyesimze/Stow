@@ -110,10 +110,11 @@ pub enum DataKey {
     VerifiedAddress(Address),
     /// Keyed by event_id. Vec of Winner records for the event.
     Winners(u64),
-    /// Singleton. Treasury balance separate from protocol fees.
-    TreasuryBalance,
 
     // ── Commit-Reveal Predictions ─────────────────────────────────────────────
+    // NOTE: `#[contracttype]` union enums are hard-capped at 50 XDR cases
+    // (`ScSpecUdtUnionV0::cases<50>`). The previously-declared-but-unused
+    // `TreasuryBalance` singleton was removed here to make room for this key.
     /// Keyed by (market_id, predictor). Stores a committed prediction (hash + amount, awaiting reveal).
     CommitmentPrediction(u64, Address),
 }

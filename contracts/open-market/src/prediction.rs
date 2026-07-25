@@ -1,4 +1,5 @@
-use soroban_sdk::{symbol_short, Address, BytesN, Env, Map, Symbol, Vec};
+use soroban_sdk::xdr::ToXdr;
+use soroban_sdk::{symbol_short, Address, BytesN, Env, IntoVal, Map, Symbol, Vec};
 
 use crate::config::{self, PERSISTENT_BUMP, PERSISTENT_THRESHOLD};
 use crate::errors::InsightArenaError;
@@ -35,6 +36,113 @@ fn bump_user_markets(env: &Env, user: &Address) {
 
 fn bump_user(env: &Env, address: &Address) {
     config::extend_user_ttl(env, address);
+}
+
+// ── PredictorList / UserMarkets index helpers (used by transfer_prediction) ───
+
+fn add_predictor_to_list(env: &Env, market_id: u64, predictor: &Address) {
+    let list_key = DataKey::PredictorList(market_id);
+    let mut predictors: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&list_key)
+        .unwrap_or_else(|| Vec::new(env));
+    predictors.push_back(predictor.clone());
+    env.storage().persistent().set(&list_key, &predictors);
+    bump_predictor_list(env, market_id);
+}
+
+fn remove_predictor_from_list(env: &Env, market_id: u64, predictor: &Address) {
+    let list_key = DataKey::PredictorList(market_id);
+    let mut predictors: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&list_key)
+        .unwrap_or_else(|| Vec::new(env));
+
+    let mut index: u32 = 0;
+    while index < predictors.len() {
+        if predictors.get(index) == Some(predictor.clone()) {
+            predictors.remove(index);
+            break;
+        }
+        index += 1;
+    }
+
+    env.storage().persistent().set(&list_key, &predictors);
+    bump_predictor_list(env, market_id);
+}
+
+fn add_user_market(env: &Env, user: &Address, market_id: u64) {
+    let key = DataKey::UserMarkets(user.clone());
+    let mut markets: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    if !markets.contains(market_id) {
+        markets.push_back(market_id);
+        env.storage().persistent().set(&key, &markets);
+    }
+    bump_user_markets(env, user);
+}
+
+fn remove_user_market(env: &Env, user: &Address, market_id: u64) {
+    let key = DataKey::UserMarkets(user.clone());
+    let mut markets: Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+
+    let mut index: u32 = 0;
+    while index < markets.len() {
+        if markets.get(index) == Some(market_id) {
+            markets.remove(index);
+            break;
+        }
+        index += 1;
+    }
+
+    env.storage().persistent().set(&key, &markets);
+    bump_user_markets(env, user);
+}
+
+fn decrease_user_stake(env: &Env, user: &Address, amount: i128) -> Result<(), InsightArenaError> {
+    let user_key = DataKey::User(user.clone());
+    let mut profile: UserProfile = env
+        .storage()
+        .persistent()
+        .get(&user_key)
+        .unwrap_or_else(|| UserProfile::new(user.clone(), env.ledger().timestamp()));
+
+    profile.total_staked = profile
+        .total_staked
+        .checked_sub(amount)
+        .ok_or(InsightArenaError::Overflow)?;
+
+    env.storage().persistent().set(&user_key, &profile);
+    bump_user(env, user);
+    Ok(())
+}
+
+fn increase_user_stake(env: &Env, user: &Address, amount: i128) -> Result<(), InsightArenaError> {
+    let user_key = DataKey::User(user.clone());
+    let mut profile: UserProfile = env
+        .storage()
+        .persistent()
+        .get(&user_key)
+        .unwrap_or_else(|| UserProfile::new(user.clone(), env.ledger().timestamp()));
+
+    profile.total_staked = profile
+        .total_staked
+        .checked_add(amount)
+        .ok_or(InsightArenaError::Overflow)?;
+
+    env.storage().persistent().set(&user_key, &profile);
+    bump_user(env, user);
+    season::track_user_profile(env, user);
+    Ok(())
 }
 
 // ── Event emission ────────────────────────────────────────────────────────────
@@ -102,6 +210,19 @@ fn emit_payout_claimed(
             protocol_fee,
             creator_fee,
         ),
+    );
+}
+
+fn emit_prediction_transferred(
+    env: &Env,
+    market_id: u64,
+    from: &Address,
+    to: &Address,
+    shares: i128,
+) {
+    env.events().publish(
+        (symbol_short!("pred"), symbol_short!("transfr")),
+        (market_id, from.clone(), to.clone(), shares),
     );
 }
 
@@ -238,9 +359,8 @@ pub fn submit_predictions_batch(
 /// 2. Market exists (else `MarketNotFound`)
 /// 3. `current_time < market.end_time` (else `MarketExpired`)
 /// 4. `chosen_outcome` is present in `market.outcome_options` (else `InvalidOutcome`)
-/// 5. `stake_amount >= market.min_stake` (else `StakeTooLow`)
-/// 6. `stake_amount <= market.max_stake` (else `StakeTooHigh`)
-/// 7. Predictor has not already submitted a prediction for this market (else `AlreadyPredicted`)
+/// 5. `stake_amount` within the effective `[min, max]` window (market override
+///    if set, otherwise global Config bounds) — else `StakeTooLow` / `StakeTooHigh`
 ///
 /// On success:
 /// - XLM is locked in escrow via `escrow::lock_stake`.
@@ -323,11 +443,14 @@ fn do_submit_prediction(
         );
     }
 
-    // ── Guard 5 & 6: stake_amount must be within [min_stake, max_stake] ───────
-    if stake_amount < market.min_stake {
+    // ── Guard 5 & 6: stake_amount must be within effective [min, max] ─────────
+    // Per-market non-zero bounds override the global Config bounds.
+    let (min_stake, max_stake) =
+        config::resolve_stake_bounds(env, market.min_stake, market.max_stake)?;
+    if stake_amount < min_stake {
         return Err(InsightArenaError::StakeTooLow);
     }
-    if stake_amount > market.max_stake {
+    if stake_amount > max_stake {
         return Err(InsightArenaError::StakeTooHigh);
     }
 
@@ -423,9 +546,6 @@ fn do_submit_prediction(
     Ok(())
 }
 
-/// Commit to a prediction by hashing (outcome, amount, salt).
-/// The predictor's funds are locked but the outcome remains hidden until reveal.
-/// Commit-reveal window is enforced: minimum `reveal_delay_seconds` before reveal is allowed.
 pub fn commit_prediction(
     env: &Env,
     predictor: Address,
@@ -519,7 +639,9 @@ pub fn reveal_prediction(
         .storage()
         .persistent()
         .get(&commitment_key)
-        .ok_or(InsightArenaError::CommitmentNotFound)?;
+        // No commitment exists for this (market, predictor). Reuses
+        // PredictionNotFound since the error enum is at its 50-case cap.
+        .ok_or(InsightArenaError::PredictionNotFound)?;
 
     if commitment.revealed {
         return Err(InsightArenaError::AlreadyPredicted);
@@ -527,7 +649,9 @@ pub fn reveal_prediction(
 
     // Check reveal window (1 minute minimum for safety)
     if now < commitment.committed_at + 60 {
-        return Err(InsightArenaError::RevealWindowNotOpen);
+        // Reveal window has not opened yet. Reuses TimelockNotElapsed since
+        // the error enum is at its 50-case cap.
+        return Err(InsightArenaError::TimelockNotElapsed);
     }
 
     // Compute hash of (outcome, amount, salt)
@@ -538,9 +662,11 @@ pub fn reveal_prediction(
         preimage.push_back(s);
     }
 
-    let computed_hash = env.crypto().sha256(&preimage.to_xdr(env));
+    let computed_hash = env.crypto().sha256(&preimage.to_xdr(env)).to_bytes();
     if computed_hash != commitment.commitment_hash {
-        return Err(InsightArenaError::CommitmentMismatch);
+        // Revealed values do not hash to the stored commitment. Reuses
+        // InvalidSignature since the error enum is at its 50-case cap.
+        return Err(InsightArenaError::InvalidSignature);
     }
 
     escrow::lock_stake(env, &predictor, stake_amount)?;
@@ -760,6 +886,141 @@ fn do_submit_prediction_via_allowance(
 
     Ok(())
 }
+
+pub fn transfer_prediction(
+    env: &Env,
+    market_id: u64,
+    from: Address,
+    to: Address,
+    shares: i128,
+) -> Result<(), InsightArenaError> {
+    // ── Guard 1: platform not paused ─────────────────────────────────────────
+    config::ensure_not_paused(env)?;
+
+    // ── Guard 2: sender authorisation ────────────────────────────────────────
+    from.require_auth();
+
+    // ── Guard 3: no self-transfer ─────────────────────────────────────────────
+    if from == to {
+        return Err(InsightArenaError::SelfTransfer);
+    }
+
+    // ── Guard 4: shares must be strictly positive ─────────────────────────────
+    if shares <= 0 {
+        return Err(InsightArenaError::ZeroShareTransfer);
+    }
+
+    // ── Guard 5: market must exist ────────────────────────────────────────────
+    let mut market: Market = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Market(market_id))
+        .ok_or(InsightArenaError::MarketNotFound)?;
+
+    // ── Guard 6: market must still be open (not resolved/cancelled/expired) ───
+    if market.is_resolved {
+        return Err(InsightArenaError::MarketAlreadyResolved);
+    }
+    if market.is_cancelled {
+        return Err(InsightArenaError::MarketAlreadyCancelled);
+    }
+    let now = env.ledger().timestamp();
+    if now >= market.end_time {
+        return Err(InsightArenaError::MarketExpired);
+    }
+
+    // ── Guard 7: sender must hold a position on this market ──────────────────
+    let from_key = DataKey::Prediction(market_id, from.clone());
+    let mut from_prediction: Prediction = env
+        .storage()
+        .persistent()
+        .get(&from_key)
+        .ok_or(InsightArenaError::PredictionNotFound)?;
+
+    // ── Guard 8: cannot transfer more than the sender holds ───────────────────
+    if shares > from_prediction.stake_amount {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    // ── Guard 9: recipient's existing position (if any) must be compatible ────
+    let to_key = DataKey::Prediction(market_id, to.clone());
+    let existing_to: Option<Prediction> = env.storage().persistent().get(&to_key);
+    if let Some(existing) = &existing_to {
+        if existing.chosen_outcome != from_prediction.chosen_outcome {
+            return Err(InsightArenaError::AlreadyPredicted);
+        }
+    }
+    let to_is_new_participant = existing_to.is_none();
+
+    let remaining = from_prediction
+        .stake_amount
+        .checked_sub(shares)
+        .ok_or(InsightArenaError::Overflow)?;
+    let from_fully_exited = remaining == 0;
+
+    // ── Shrink or delete the sender's position ────────────────────────────────
+    if from_fully_exited {
+        env.storage().persistent().remove(&from_key);
+        remove_predictor_from_list(env, market_id, &from);
+        remove_user_market(env, &from, market_id);
+    } else {
+        from_prediction.stake_amount = remaining;
+        env.storage().persistent().set(&from_key, &from_prediction);
+        bump_prediction(env, market_id, &from);
+    }
+
+    // ── Grow or create the recipient's position ───────────────────────────────
+    match existing_to {
+        Some(mut to_prediction) => {
+            to_prediction.stake_amount = to_prediction
+                .stake_amount
+                .checked_add(shares)
+                .ok_or(InsightArenaError::Overflow)?;
+            env.storage().persistent().set(&to_key, &to_prediction);
+            bump_prediction(env, market_id, &to);
+        }
+        None => {
+            let to_prediction = Prediction::new(
+                market_id,
+                to.clone(),
+                from_prediction.chosen_outcome.clone(),
+                shares,
+                now,
+            );
+            env.storage().persistent().set(&to_key, &to_prediction);
+            bump_prediction(env, market_id, &to);
+            add_predictor_to_list(env, market_id, &to);
+            add_user_market(env, &to, market_id);
+        }
+    }
+
+    // ── Adjust market.participant_count; total_pool is unchanged ─────────────
+    if to_is_new_participant {
+        market.participant_count = market
+            .participant_count
+            .checked_add(1)
+            .ok_or(InsightArenaError::Overflow)?;
+    }
+    if from_fully_exited {
+        market.participant_count = market
+            .participant_count
+            .checked_sub(1)
+            .ok_or(InsightArenaError::Overflow)?;
+    }
+    env.storage()
+        .persistent()
+        .set(&DataKey::Market(market_id), &market);
+    bump_market(env, market_id);
+
+    // ── Move the staked amount between the two UserProfiles ──────────────────
+    decrease_user_stake(env, &from, shares)?;
+    increase_user_stake(env, &to, shares)?;
+
+    emit_prediction_transferred(env, market_id, &from, &to, shares);
+
+    Ok(())
+}
+
 
 /// Return the stored [`Prediction`] for a given `(market_id, predictor)` pair.
 ///

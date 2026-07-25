@@ -101,7 +101,7 @@ pub fn lock_stake_via_allowance(
         return Err(InsightArenaError::InsufficientFunds);
     }
 
-    client.transfer_from(from, &contract, &amount);
+    client.transfer_from(&contract, from, &contract, &amount);
 
     release_escrow_lock(env);
     Ok(())

@@ -32,3 +32,5 @@ export function NavLinks({ isActive }: NavLinksProps) {
     </div>
   );
 }
+
+export default NavLinks;

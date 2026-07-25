@@ -33,11 +33,22 @@ fn ttl_threshold(max: u32) -> u32 {
 }
 
 pub fn extend_market_ttl(env: &Env, market_id: u64) {
+    let extension = market_ttl_extension_amount(env);
     env.storage().persistent().extend_ttl(
         &DataKey::Market(market_id),
-        ttl_threshold(LEDGER_BUMP_MARKET),
-        LEDGER_BUMP_MARKET,
+        ttl_threshold(extension),
+        extension,
     );
+}
+
+/// Number of ledgers to extend a market's TTL by on each interaction and via
+/// the explicit `market::extend_market_ttl` maintenance entrypoint. Reads the
+/// admin-configurable `Config::market_ttl_extension`, falling back to
+/// `LEDGER_BUMP_MARKET` if the contract has not been initialized yet.
+fn market_ttl_extension_amount(env: &Env) -> u32 {
+    get_config_readonly(env)
+        .map(|c| c.market_ttl_extension)
+        .unwrap_or(LEDGER_BUMP_MARKET)
 }
 
 pub fn extend_prediction_ttl(env: &Env, market_id: u64, predictor: &Address) {
@@ -111,8 +122,14 @@ pub struct Config {
     pub protocol_fee_bps: u32,
     /// Hard cap on the fee a market creator may charge, in basis points.
     pub max_creator_fee_bps: u32,
-    /// Minimum XLM stake required to participate in a market, in stroops.
+    /// Global per-prediction minimum stake in stroops. Markets may override
+    /// this with a non-zero `Market::min_stake`; `0` on the market means
+    /// "use this global floor".
     pub min_stake_xlm: i128,
+    /// Global per-prediction maximum stake in stroops. Markets may override
+    /// this with a non-zero `Market::max_stake`; `0` on the market means
+    /// "use this global ceiling". Must always satisfy `min_stake_xlm <= max_stake_xlm`.
+    pub max_stake_xlm: i128,
     /// Trusted oracle contract address used for market resolution.
     pub oracle_address: Address,
     /// Address of the XLM Stellar Asset Contract used for escrow transfers.
@@ -137,6 +154,12 @@ pub struct Config {
     /// `ProposalType::UpdateMinReputation` (timelocked governance). Defaults
     /// to `0` at initialization, which disables the gate entirely.
     pub min_creator_reputation: u32,
+    /// Number of ledgers a market's persistent-storage entry is extended by
+    /// on each interaction (`market::bump_market`) and by the explicit
+    /// `extend_market_ttl` maintenance entrypoint. Admin-configurable via
+    /// `set_market_ttl_extension`. Defaults to `LEDGER_BUMP_MARKET` (~30
+    /// days) at initialization.
+    pub market_ttl_extension: u32,
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -175,6 +198,44 @@ fn validate_min_reputation(threshold: u32) -> Result<(), InsightArenaError> {
     Ok(())
 }
 
+/// Validate global (or market-override) stake bounds.
+///
+/// Both bounds must be strictly positive and `min_stake <= max_stake`.
+pub(crate) fn validate_stake_bounds(min_stake: i128, max_stake: i128) -> Result<(), InsightArenaError> {
+    if min_stake <= 0 || max_stake <= 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+    if min_stake > max_stake {
+        return Err(InsightArenaError::InvalidInput);
+    }
+    Ok(())
+}
+
+/// Resolve the effective `[min, max]` stake window for a market.
+///
+/// A non-zero market field is treated as a per-market override and takes
+/// precedence over the corresponding global `Config` bound. A zero market
+/// field inherits the global bound. The resolved pair is always validated.
+pub fn resolve_stake_bounds(
+    env: &Env,
+    market_min_stake: i128,
+    market_max_stake: i128,
+) -> Result<(i128, i128), InsightArenaError> {
+    let cfg = load_config(env)?;
+    let min = if market_min_stake > 0 {
+        market_min_stake
+    } else {
+        cfg.min_stake_xlm
+    };
+    let max = if market_max_stake > 0 {
+        market_max_stake
+    } else {
+        cfg.max_stake_xlm
+    };
+    validate_stake_bounds(min, max)?;
+    Ok((min, max))
+}
+
 // ── Entry-point logic (called from contractimpl in lib.rs) ────────────────────
 
 /// One-time contract setup.
@@ -200,11 +261,13 @@ pub fn initialize(
         protocol_fee_bps: fee_bps,
         max_creator_fee_bps: 500,  // 5 % absolute cap for market creators
         min_stake_xlm: 10_000_000, // 1 XLM expressed in stroops
+        max_stake_xlm: 1_000_000_000_000, // 100_000 XLM expressed in stroops
         oracle_address: oracle,
         xlm_token,
         is_paused: false,
         timelock_delay: DEFAULT_TIMELOCK_DELAY,
         min_creator_reputation: 0, // gate disabled by default; admin/governance opt in
+        market_ttl_extension: LEDGER_BUMP_MARKET,
     };
 
     env.storage().persistent().set(&DataKey::Config, &config);
@@ -469,6 +532,106 @@ fn emit_min_reputation_updated(env: &Env, old_threshold: u32, new_threshold: u32
     env.events().publish(
         (symbol_short!("cfg"), symbol_short!("rep_upd")),
         (old_threshold, new_threshold),
+    );
+}
+
+/// Update the number of ledgers a market's TTL is extended by, both on each
+/// interaction and via the explicit `extend_market_ttl` maintenance
+/// entrypoint. Caller must be the stored admin.
+pub fn set_market_ttl_extension(
+    env: &Env,
+    admin: Address,
+    new_extension: u32,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    if new_extension == 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    let old_extension = config.market_ttl_extension;
+    config.market_ttl_extension = new_extension;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_market_ttl_extension_updated(env, old_extension, new_extension);
+
+    Ok(())
+}
+
+fn emit_market_ttl_extension_updated(env: &Env, old_extension: u32, new_extension: u32) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("ttl_upd")),
+        (old_extension, new_extension),
+    );
+}
+
+/// Update the global per-prediction min/max stake bounds.
+///
+/// Caller must be the stored admin. Reverts with [`InsightArenaError::InvalidInput`]
+/// when either bound is non-positive or when `min_stake > max_stake`.
+pub fn set_stake_bounds(
+    env: &Env,
+    admin: Address,
+    min_stake: i128,
+    max_stake: i128,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    validate_stake_bounds(min_stake, max_stake)?;
+
+    let old_min = config.min_stake_xlm;
+    let old_max = config.max_stake_xlm;
+    config.min_stake_xlm = min_stake;
+    config.max_stake_xlm = max_stake;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_stake_bounds_updated(env, old_min, old_max, min_stake, max_stake);
+
+    Ok(())
+}
+
+/// Governance path for updating the global minimum stake. Keeps the existing
+/// `max_stake_xlm` and rejects the update when the new minimum would exceed it.
+pub fn update_min_stake_from_governance(
+    env: &Env,
+    new_min_stake: i128,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+    validate_stake_bounds(new_min_stake, config.max_stake_xlm)?;
+
+    let old_min = config.min_stake_xlm;
+    let old_max = config.max_stake_xlm;
+    config.min_stake_xlm = new_min_stake;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_stake_bounds_updated(env, old_min, old_max, new_min_stake, old_max);
+
+    Ok(())
+}
+
+fn emit_stake_bounds_updated(
+    env: &Env,
+    old_min: i128,
+    old_max: i128,
+    new_min: i128,
+    new_max: i128,
+) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("stk_bnd")),
+        (old_min, old_max, new_min, new_max),
     );
 }
 

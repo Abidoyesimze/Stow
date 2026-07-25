@@ -257,11 +257,15 @@ pub fn appeal_dispute(
         .ok_or(InsightArenaError::DisputeNotFound)?;
 
     if dispute.appeal_tier >= MAX_APPEAL_TIERS {
-        return Err(InsightArenaError::MaxAppealTiersExceeded);
+        // Max appeal tiers reached; the appeal window is effectively closed.
+        // Reuses DisputeWindowClosed since the error enum is at its 50-case cap.
+        return Err(InsightArenaError::DisputeWindowClosed);
     }
 
     if dispute.appealer.is_some() {
-        return Err(InsightArenaError::DisputeAlreadyAppealed);
+        // A dispute has already been appealed at this tier. Reuses
+        // DisputeAlreadyFiled since the error enum is at its 50-case cap.
+        return Err(InsightArenaError::DisputeAlreadyFiled);
     }
 
     let expected_bond = calculate_appeal_bond(dispute.bond, dispute.appeal_tier + 1);

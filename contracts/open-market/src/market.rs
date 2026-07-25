@@ -226,7 +226,9 @@ fn has_duplicate_outcomes(outcomes: &Vec<Symbol>) -> bool {
 ///    address) otherwise.
 /// 7. `category` must be in the admin-managed whitelist
 /// 8. `creator_fee_bps` must not exceed the platform cap
-/// 9. `min_stake` >= platform minimum; `max_stake` >= `min_stake`
+/// 9. Stake bounds: `min_stake`/`max_stake` of `0` inherit the global Config
+///    bounds; non-zero values are per-market overrides. The resolved pair must
+///    satisfy `min <= max` with both sides strictly positive.
 pub fn create_market(
     env: &Env,
     creator: Address,
@@ -278,12 +280,14 @@ pub fn create_market(
     }
 
     // ── Guard 8: stake bounds ─────────────────────────────────────────────────
-    if params.min_stake < cfg.min_stake_xlm {
-        return Err(InsightArenaError::StakeTooLow);
-    }
-    if params.max_stake < params.min_stake {
+    // A zero min/max on the market means "inherit the global Config bound" and
+    // is resolved at prediction time. Non-zero values are per-market overrides
+    // that take precedence. Validate the resolved pair so create cannot store
+    // an inconsistent override / inherit combination.
+    if params.min_stake < 0 || params.max_stake < 0 {
         return Err(InsightArenaError::InvalidInput);
     }
+    let (_, _) = config::resolve_stake_bounds(env, params.min_stake, params.max_stake)?;
 
     // ── Atomically assign a new market ID ────────────────────────────────────
     let market_id = next_market_id(env)?;
@@ -608,6 +612,41 @@ pub fn extend_market_end_time(
         .persistent()
         .set(&DataKey::Market(market_id), &market);
     bump_market(env, market_id);
+
+    Ok(())
+}
+
+fn emit_market_ttl_extended(env: &Env, market_id: u64, caller: &Address, extension: u32) {
+    env.events().publish(
+        (symbol_short!("mkt"), symbol_short!("ttl_ext")),
+        (market_id, caller.clone(), extension),
+    );
+}
+
+/// Explicitly extend a market's persistent-storage TTL by the
+/// admin-configured extension amount (`Config::market_ttl_extension`).
+///
+/// Permissionless maintenance entrypoint — anyone may call this to keep a
+/// long-running market's storage from expiring between organic interactions;
+/// the caller must still authorize the call. Emits an event recording the
+/// extension.
+///
+/// # Errors
+/// * [`InsightArenaError::Paused`] — the platform is paused.
+/// * [`InsightArenaError::MarketNotFound`] — no market exists with the given ID.
+pub fn extend_market_ttl(
+    env: &Env,
+    caller: Address,
+    market_id: u64,
+) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(env)?;
+    caller.require_auth();
+
+    // Validates existence and bumps the market's TTL by the configured amount.
+    get_market(env, market_id)?;
+
+    let cfg = config::get_config(env)?;
+    emit_market_ttl_extended(env, market_id, &caller, cfg.market_ttl_extension);
 
     Ok(())
 }

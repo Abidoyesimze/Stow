@@ -23,6 +23,7 @@ import { Market, MarketSettlementState } from './entities/market.entity';
 import { UserBookmark } from './entities/user-bookmark.entity';
 import { Prediction } from '../predictions/entities/prediction.entity';
 import { MarketsService } from './markets.service';
+import { MarketSettlementScheduler } from './market-settlement.scheduler';
 import { WebhookDispatcherService } from '../webhooks/services/webhook-dispatcher.service';
 
 type MockRepo = jest.Mocked<
@@ -135,6 +136,13 @@ describe('MarketsService', () => {
             set: jest.fn(),
             del: jest.fn(),
             reset: jest.fn(),
+          },
+        },
+        {
+          provide: MarketSettlementScheduler,
+          useValue: {
+            getDeadLetterQueue: jest.fn(),
+            retrySettlement: jest.fn(),
           },
         },
       ],
@@ -432,6 +440,13 @@ describe('MarketsService.findFeaturedMarkets', () => {
         { provide: DataSource, useValue: {} },
         { provide: WebhookDispatcherService, useValue: { emit: jest.fn() } },
         { provide: CACHE_MANAGER, useValue: cacheMock },
+        {
+          provide: MarketSettlementScheduler,
+          useValue: {
+            getDeadLetterQueue: jest.fn(),
+            retrySettlement: jest.fn(),
+          },
+        },
       ],
     }).compile();
 
@@ -598,6 +613,13 @@ describe('MarketsService.update', () => {
         {
           provide: CACHE_MANAGER,
           useValue: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
+        },
+        {
+          provide: MarketSettlementScheduler,
+          useValue: {
+            getDeadLetterQueue: jest.fn(),
+            retrySettlement: jest.fn(),
+          },
         },
       ],
     }).compile();
@@ -811,6 +833,13 @@ describe('MarketsService.getPredictionStats', () => {
           provide: CACHE_MANAGER,
           useValue: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
         },
+        {
+          provide: MarketSettlementScheduler,
+          useValue: {
+            getDeadLetterQueue: jest.fn(),
+            retrySettlement: jest.fn(),
+          },
+        },
       ],
     }).compile();
 
@@ -941,6 +970,13 @@ describe('MarketsService.cancelMarket', () => {
         {
           provide: CACHE_MANAGER,
           useValue: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
+        },
+        {
+          provide: MarketSettlementScheduler,
+          useValue: {
+            getDeadLetterQueue: jest.fn(),
+            retrySettlement: jest.fn(),
+          },
         },
       ],
     }).compile();
@@ -1085,6 +1121,13 @@ describe('MarketsService pause/resume cache invalidation', () => {
           provide: CACHE_MANAGER,
           useValue: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
         },
+        {
+          provide: MarketSettlementScheduler,
+          useValue: {
+            getDeadLetterQueue: jest.fn(),
+            retrySettlement: jest.fn(),
+          },
+        },
       ],
     }).compile();
 
@@ -1222,6 +1265,13 @@ describe('MarketsService settlement grace period workflow', () => {
         {
           provide: CACHE_MANAGER,
           useValue: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
+        },
+        {
+          provide: MarketSettlementScheduler,
+          useValue: {
+            getDeadLetterQueue: jest.fn(),
+            retrySettlement: jest.fn(),
+          },
         },
       ],
     }).compile();

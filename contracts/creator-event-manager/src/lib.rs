@@ -20,7 +20,10 @@ use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 use admin::AdminError;
 use event::EventError;
 use r#match::MatchError;
-use storage_types::{Event, LeaderboardEntry, Match, ParticipantScore, Prediction, StandingEntry};
+use storage_types::{
+    Event, FinalizationBond, LeaderboardEntry, Match, OracleSubmission, ParticipantScore,
+    Prediction, StandingEntry,
+};
 use verification::VerificationError;
 use views::{EventStatistics, PlatformStatistics};
 
@@ -156,6 +159,58 @@ impl CreatorEventManagerContract {
             Err(AdminError::NotPaused) => panic!("not_paused"),
             Err(_) => panic!("unexpected_error"),
         }
+    }
+
+    /// Nominate a new admin. Current admin stays in place until acceptance (#1356).
+    ///
+    /// # Panics
+    /// * `"unauthorized"` — caller is not the admin.
+    /// * `"invalid_address"` — nominee equals the contract address.
+    /// * `"nomination_pending"` — a nomination is already outstanding.
+    pub fn nominate_admin(env: Env, caller: Address, nominee: Address) {
+        match admin::nominate_admin(&env, caller, nominee) {
+            Ok(()) => {}
+            Err(AdminError::Unauthorized) => panic!("unauthorized"),
+            Err(AdminError::InvalidAddress) => panic!("invalid_address"),
+            Err(AdminError::NominationPending) => panic!("nomination_pending"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Accept a pending admin nomination. Only the nominee may accept (#1356).
+    ///
+    /// # Panics
+    /// * `"no_pending_nomination"` — no nomination is outstanding.
+    /// * `"not_nominee"` — caller is not the pending nominee.
+    pub fn accept_admin(env: Env, caller: Address) {
+        match admin::accept_admin(&env, caller) {
+            Ok(()) => {}
+            Err(AdminError::NoPendingNomination) => panic!("no_pending_nomination"),
+            Err(AdminError::NotNominee) => panic!("not_nominee"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Cancel a pending admin nomination. Only the current admin may cancel (#1356).
+    ///
+    /// # Panics
+    /// * `"unauthorized"` — caller is not the admin.
+    /// * `"no_pending_nomination"` — no nomination is outstanding.
+    pub fn cancel_admin_nomination(env: Env, caller: Address) {
+        match admin::cancel_admin_nomination(&env, caller) {
+            Ok(()) => {}
+            Err(AdminError::Unauthorized) => panic!("unauthorized"),
+            Err(AdminError::NoPendingNomination) => panic!("no_pending_nomination"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Return the pending admin nominee, or panics if none (#1356).
+    ///
+    /// # Panics
+    /// * `"no_pending_nomination"` — no nomination is outstanding.
+    pub fn get_pending_admin(env: Env) -> Address {
+        admin::get_pending_admin(&env).unwrap_or_else(|| panic!("no_pending_nomination"))
     }
 
     /// Returns `true` if the contract has been initialised.
@@ -786,6 +841,21 @@ impl CreatorEventManagerContract {
         }
     }
 
+    /// Return the resolved 1-based leaderboard rank for `user` in `event_id` (#1343).
+    ///
+    /// Identical to the `rank` field on the matching [`LeaderboardEntry`].
+    /// Returns `0` when the user is not a participant.
+    ///
+    /// # Panics
+    /// * `"event_not_found"` — no event exists with the given ID.
+    pub fn get_user_rank(env: Env, event_id: u64, user: Address) -> u32 {
+        match views::get_user_rank(&env, event_id, user) {
+            Ok(rank) => rank,
+            Err(EventError::EventNotFound) => panic!("event_not_found"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
     /// Return the stored weighted standings for an event (#1311).
     ///
     /// Standings weight each correct prediction by documented multipliers:
@@ -864,7 +934,60 @@ impl CreatorEventManagerContract {
             Err(EventError::EventNotEnded) => panic!("event_not_ended"),
             Err(EventError::MatchesNotComplete) => panic!("matches_not_complete"),
             Err(EventError::TransferFailed) => panic!("transfer_failed"),
+            Err(EventError::BondRequired) => panic!("bond_required"),
             Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Return a finalizer's bond after the challenge window closes unchallenged (#1344).
+    ///
+    /// # Panics
+    /// * `"bond_not_found"` — no bond was locked for this event.
+    /// * `"bond_already_settled"` — bond already returned or slashed.
+    /// * `"challenge_window_open"` — challenge window has not closed yet.
+    /// * `"transfer_failed"` — bond return transfer failed.
+    pub fn settle_finalization_bond(env: Env, caller: Address, event_id: u64) -> i128 {
+        match finalize::settle_finalization_bond(&env, caller, event_id) {
+            Ok(amount) => amount,
+            Err(EventError::BondNotFound) => panic!("bond_not_found"),
+            Err(EventError::BondAlreadySettled) => panic!("bond_already_settled"),
+            Err(EventError::ChallengeWindowOpen) => panic!("challenge_window_open"),
+            Err(EventError::TransferFailed) => panic!("transfer_failed"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Challenge a finalization and slash 100% of the finalizer's bond to treasury (#1344).
+    ///
+    /// Only the admin or a configured verifier signer may challenge, and only
+    /// while the challenge window is open.
+    ///
+    /// # Panics
+    /// * `"unauthorized_challenge"` — caller is neither admin nor verifier.
+    /// * `"bond_not_found"` — no bond was locked for this event.
+    /// * `"bond_already_settled"` — bond already returned or slashed.
+    /// * `"challenge_window_closed"` — challenge window has elapsed.
+    /// * `"transfer_failed"` — slash transfer failed.
+    pub fn challenge_finalization(env: Env, challenger: Address, event_id: u64) -> i128 {
+        match verification::challenge_finalization(&env, challenger, event_id) {
+            Ok(amount) => amount,
+            Err(EventError::UnauthorizedChallenge) => panic!("unauthorized_challenge"),
+            Err(EventError::BondNotFound) => panic!("bond_not_found"),
+            Err(EventError::BondAlreadySettled) => panic!("bond_already_settled"),
+            Err(EventError::ChallengeWindowClosed) => panic!("challenge_window_closed"),
+            Err(EventError::TransferFailed) => panic!("transfer_failed"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Return the finalization bond record for an event (#1344).
+    ///
+    /// # Panics
+    /// * `"bond_not_found"` — no bond was locked for this event.
+    pub fn get_finalization_bond(env: Env, event_id: u64) -> FinalizationBond {
+        match finalize::get_finalization_bond(&env, event_id) {
+            Some(bond) => bond,
+            None => panic!("bond_not_found"),
         }
     }
 
@@ -953,6 +1076,86 @@ impl CreatorEventManagerContract {
     /// predictions, unique participants, and total fees collected.
     pub fn get_platform_statistics(env: Env) -> PlatformStatistics {
         views::get_platform_statistics(&env)
+    }
+
+    // =========================================================================
+    // Multi-source oracle median aggregation (#1347)
+    // =========================================================================
+
+    /// Configure the set of authorized oracle sources and the minimum number
+    /// of distinct sources required before their submissions can be
+    /// aggregated into a median. Only the admin may call this.
+    ///
+    /// # Panics
+    /// * `"unauthorized"` — caller is not the admin.
+    /// * `"invalid_oracle_config"` — `min_sources` is `0` or exceeds the
+    ///   number of sources, or `sources` contains a duplicate address.
+    pub fn configure_oracle_sources(env: Env, caller: Address, sources: Vec<Address>, min_sources: u32) {
+        match oracle::configure_oracle_sources(&env, caller, sources, min_sources) {
+            Ok(()) => {}
+            Err(oracle::OracleError::Unauthorized) => panic!("unauthorized"),
+            Err(oracle::OracleError::InvalidOracleConfig) => panic!("invalid_oracle_config"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Submit a numeric resolution value for a match as an authorized oracle
+    /// source.
+    ///
+    /// # Panics
+    /// * `"contract_paused"` — the contract is paused.
+    /// * `"match_not_found"` — no match exists with the given ID.
+    /// * `"not_an_oracle_source"` — caller is not a configured oracle source.
+    /// * `"duplicate_oracle_submission"` — caller already submitted a value
+    ///   for this match.
+    pub fn submit_oracle_value(env: Env, source: Address, match_id: u64, value: i128) {
+        match oracle::submit_oracle_value(&env, source, match_id, value) {
+            Ok(()) => {}
+            Err(oracle::OracleError::Paused) => panic!("contract_paused"),
+            Err(oracle::OracleError::MatchNotFound) => panic!("match_not_found"),
+            Err(oracle::OracleError::NotAnOracleSource) => panic!("not_an_oracle_source"),
+            Err(oracle::OracleError::DuplicateOracleSubmission) => {
+                panic!("duplicate_oracle_submission")
+            }
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Return every oracle submission recorded for a match, for
+    /// auditability. Returns an empty `Vec` when no source has submitted a
+    /// value yet.
+    pub fn get_oracle_submissions(env: Env, match_id: u64) -> Vec<OracleSubmission> {
+        oracle::get_oracle_submissions(&env, match_id)
+    }
+
+    /// Compute the median of the numeric values submitted for a match by
+    /// authorized oracle sources.
+    ///
+    /// # Panics
+    /// * `"insufficient_oracle_sources"` — fewer sources have reported than
+    ///   the configured minimum.
+    /// * `"overflow"` — averaging the two middle values overflowed i128.
+    pub fn get_oracle_median(env: Env, match_id: u64) -> i128 {
+        match oracle::compute_oracle_median(&env, match_id) {
+            Ok(median) => median,
+            Err(oracle::OracleError::InsufficientOracleSources) => {
+                panic!("insufficient_oracle_sources")
+            }
+            Err(oracle::OracleError::Overflow) => panic!("overflow"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Return the configured set of authorized oracle sources (empty if
+    /// never configured).
+    pub fn get_oracle_sources(env: Env) -> Vec<Address> {
+        storage::get_oracle_sources(&env)
+    }
+
+    /// Return the configured minimum oracle source count (0 if never
+    /// configured).
+    pub fn get_oracle_min_sources(env: Env) -> u32 {
+        storage::get_oracle_min_sources(&env)
     }
 
     /// Return the total number of events created on the platform.

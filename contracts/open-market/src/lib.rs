@@ -112,6 +112,28 @@ impl InsightArenaContract {
         config::set_min_creator_reputation(&env, admin, new_threshold)
     }
 
+    /// Update the number of ledgers a market's TTL is extended by on each
+    /// interaction and via `extend_market_ttl`. Caller must be the current admin.
+    pub fn set_market_ttl_extension(
+        env: Env,
+        admin: Address,
+        new_extension: u32,
+    ) -> Result<(), InsightArenaError> {
+        config::set_market_ttl_extension(&env, admin, new_extension)
+    }
+
+    /// Update the global per-prediction min/max stake bounds.
+    /// Caller must be the current admin. Reverts when `min_stake > max_stake`
+    /// or when either bound is non-positive.
+    pub fn set_stake_bounds(
+        env: Env,
+        admin: Address,
+        min_stake: i128,
+        max_stake: i128,
+    ) -> Result<(), InsightArenaError> {
+        config::set_stake_bounds(&env, admin, min_stake, max_stake)
+    }
+
     // ── Market ────────────────────────────────────────────────────────────────
 
     /// Create a new prediction market. Returns the auto-assigned `market_id`.
@@ -207,6 +229,17 @@ impl InsightArenaContract {
         market_id: u64,
     ) -> Result<(), InsightArenaError> {
         market::cancel_market(&env, caller, market_id)
+    }
+
+    /// Explicitly extend a market's persistent-storage TTL by the configured
+    /// extension amount. Permissionless maintenance entrypoint — anyone may
+    /// call this to keep a long-running market's storage from expiring.
+    pub fn extend_market_ttl(
+        env: Env,
+        caller: Address,
+        market_id: u64,
+    ) -> Result<(), InsightArenaError> {
+        market::extend_market_ttl(&env, caller, market_id)
     }
 
     // ── Conditional Markets ───────────────────────────────────────────────────
@@ -371,6 +404,18 @@ impl InsightArenaContract {
         requests: Vec<BatchPredictionRequest>,
     ) -> Result<Vec<()>, InsightArenaError> {
         prediction::submit_predictions_batch(&env, predictor, requests)
+    }
+
+    /// Transfer part or all of a prediction position from `from` to `to` while
+    /// the market is still open. Pure accounting move — no token transfer.
+    pub fn transfer_prediction(
+        env: Env,
+        market_id: u64,
+        from: Address,
+        to: Address,
+        shares: i128,
+    ) -> Result<(), InsightArenaError> {
+        prediction::transfer_prediction(&env, market_id, from, to, shares)
     }
 
     /// Return the stored [`Prediction`] for a given `(market_id, predictor)` pair.

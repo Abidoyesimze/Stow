@@ -5,7 +5,6 @@ use crate::errors::InsightArenaError;
 use crate::market;
 use crate::reputation;
 use crate::storage_types::{DataKey, ProposalState};
-use crate::Config;
 
 /// Parameter changes a passed governance proposal may apply.
 ///
@@ -279,16 +278,7 @@ pub fn execute_proposal(
             symbol_short!("oracle")
         }
         ProposalType::UpdateMinStake(amount) => {
-            if amount <= 0 {
-                return Err(InsightArenaError::InvalidInput);
-            }
-            let mut cfg: Config = env
-                .storage()
-                .persistent()
-                .get(&DataKey::Config)
-                .ok_or(InsightArenaError::NotInitialized)?;
-            cfg.min_stake_xlm = amount;
-            env.storage().persistent().set(&DataKey::Config, &cfg);
+            config::update_min_stake_from_governance(env, amount)?;
             symbol_short!("minstk")
         }
         ProposalType::AddSupportedCategory(sym) => {

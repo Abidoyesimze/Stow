@@ -65,10 +65,6 @@ pub enum InsightArenaError {
     DisputeAlreadyFiled = 61,
     /// No active dispute exists for this market.
     DisputeNotFound = 62,
-    /// Maximum appeal tiers reached; no further appeals allowed.
-    MaxAppealTiersExceeded = 64,
-    /// A dispute has already been appealed at this tier.
-    DisputeAlreadyAppealed = 65,
 
     // ── Prediction ────────────────────────────────────────────────────────────
     /// No prediction exists for the given `(market_id, predictor)` pair.
@@ -188,11 +184,14 @@ pub enum InsightArenaError {
     /// seconds, which would require dividing the price integral by zero.
     TwapDivideByZero = 110,
 
-    // ── Commit-Reveal ────────────────────────────────────────────────────────
-    /// No commitment exists for the given (market_id, predictor) pair.
-    CommitmentNotFound = 111,
-    /// Reveal window has not opened yet; the minimum time between commit and reveal has not elapsed.
-    RevealWindowNotOpen = 112,
-    /// The revealed outcome/amount/salt does not hash to the stored commitment.
-    CommitmentMismatch = 113,
+    // ── Prediction Transfer ───────────────────────────────────────────────────
+    // NOTE: `#[contracterror]` enums are hard-capped at 50 XDR cases
+    // (`ScSpecUdtErrorEnumV0::cases<50>`) — this enum is now at the limit.
+    // Reuse an existing variant rather than adding a new one.
+    /// `transfer_prediction` was called with `from == to`.
+    /// A position cannot be transferred to itself.
+    SelfTransfer = 111,
+    /// `transfer_prediction` was called with `shares <= 0`.
+    /// A transfer must move a strictly positive amount.
+    ZeroShareTransfer = 112,
 }

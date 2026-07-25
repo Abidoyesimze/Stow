@@ -17,6 +17,8 @@ import {
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { DateRangeQueryDto } from '../common/dto/date-range-query.dto';
 import { Public } from '../common/decorators/public.decorator';
+import { Roles } from '../common/decorators/roles.decorator';
+import { Role } from '../common/enums/role.enum';
 import { User } from '../users/entities/user.entity';
 import { AnalyticsService } from './analytics.service';
 import { DashboardKpisDto } from './dto/dashboard-kpis.dto';
@@ -24,6 +26,7 @@ import { MarketAnalyticsDto } from './dto/market-analytics.dto';
 import { MarketHistoryResponseDto } from './dto/market-history.dto';
 import { UserTrendsDto } from './dto/user-trends.dto';
 import { CategoryAnalyticsResponseDto } from './dto/category-analytics.dto';
+import { RetentionResponseDto, RetentionQueryDto } from './dto/retention.dto';
 import { PlatformStatsDto } from './dto/platform-stats.dto';
 
 @ApiTags('Analytics')
@@ -143,6 +146,36 @@ export class AnalyticsController {
   })
   async getCategoryAnalytics(): Promise<CategoryAnalyticsResponseDto> {
     return this.analyticsService.getCategoryAnalytics();
+  }
+
+  @Get('retention')
+  @ApiBearerAuth()
+  @Roles(Role.Admin)
+  @ApiOperation({ summary: 'Get user retention by signup cohort (admin only)' })
+  @ApiQuery({
+    name: 'period',
+    required: false,
+    enum: ['day', 'week', 'month'],
+    description: 'Period granularity (default: week)',
+  })
+  @ApiQuery({
+    name: 'periods',
+    required: false,
+    type: Number,
+    description: 'Number of periods to analyze (default: 8, max 52)',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Cohort-by-period retention matrix',
+    type: RetentionResponseDto,
+  })
+  async getRetention(
+    @Query() query: RetentionQueryDto,
+  ): Promise<RetentionResponseDto> {
+    return this.analyticsService.getRetention(
+      query.period ?? 'week',
+      query.periods ?? 8,
+    );
   }
 
   @Get('platform')
