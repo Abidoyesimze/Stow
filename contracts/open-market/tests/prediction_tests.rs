@@ -138,6 +138,69 @@ fn test_submit_prediction_stake_too_high() {
 }
 
 #[test]
+fn test_submit_prediction_uses_global_bounds_when_market_inherits() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, xlm_token, admin, _) = deploy(&env);
+    let predictor = Address::generate(&env);
+
+    // Tighten the global window, then create a market that inherits both bounds.
+    client.set_stake_bounds(&admin, &20_000_000_i128, &40_000_000_i128);
+
+    let mut params = default_params(&env);
+    params.min_stake = 0;
+    params.max_stake = 0;
+    let market_id = client.create_market(&Address::generate(&env), &params);
+
+    // Below global min → StakeTooLow
+    fund(&env, &xlm_token, &predictor, 20_000_000);
+    let too_low =
+        client.try_submit_prediction(&predictor, &market_id, &symbol_short!("yes"), &19_999_999_i128);
+    assert!(matches!(too_low, Err(Ok(InsightArenaError::StakeTooLow))));
+
+    // Above global max → StakeTooHigh
+    fund(&env, &xlm_token, &predictor, 50_000_000);
+    let too_high =
+        client.try_submit_prediction(&predictor, &market_id, &symbol_short!("yes"), &40_000_001_i128);
+    assert!(matches!(too_high, Err(Ok(InsightArenaError::StakeTooHigh))));
+
+    // Exact boundary succeeds.
+    client.submit_prediction(&predictor, &market_id, &symbol_short!("yes"), &20_000_000_i128);
+    assert!(client.has_predicted(&market_id, &predictor));
+}
+
+#[test]
+fn test_submit_prediction_market_override_takes_precedence() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, xlm_token, admin, _) = deploy(&env);
+    let predictor = Address::generate(&env);
+
+    // Global window is wide; market overrides to a tighter band.
+    client.set_stake_bounds(&admin, &1_000_000_i128, &1_000_000_000_i128);
+
+    let mut params = default_params(&env);
+    params.min_stake = 25_000_000;
+    params.max_stake = 30_000_000;
+    let market_id = client.create_market(&Address::generate(&env), &params);
+
+    // Allowed by global but below market override → StakeTooLow
+    fund(&env, &xlm_token, &predictor, 30_000_000);
+    let too_low =
+        client.try_submit_prediction(&predictor, &market_id, &symbol_short!("yes"), &24_999_999_i128);
+    assert!(matches!(too_low, Err(Ok(InsightArenaError::StakeTooLow))));
+
+    // Allowed by global but above market override → StakeTooHigh
+    let too_high =
+        client.try_submit_prediction(&predictor, &market_id, &symbol_short!("yes"), &30_000_001_i128);
+    assert!(matches!(too_high, Err(Ok(InsightArenaError::StakeTooHigh))));
+
+    // Inside the market override window succeeds.
+    client.submit_prediction(&predictor, &market_id, &symbol_short!("yes"), &25_000_000_i128);
+    assert!(client.has_predicted(&market_id, &predictor));
+}
+
+#[test]
 fn test_submit_prediction_already_predicted() {
     let env = Env::default();
     env.mock_all_auths();
