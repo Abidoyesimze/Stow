@@ -936,11 +936,21 @@ fn cancel_market_refunds_all_predictors() {
     StellarAssetClient::new(&env, &xlm_token).mint(&contract_id, &(stake_a + stake_b));
 
     let token_client = TokenClient::new(&env, &xlm_token);
+
+    // Cancel — funds stay in escrow until each participant pulls them.
     client.cancel_market(&admin, &id);
+    assert!(client.get_market(&id).is_cancelled);
+
+    // Funds are still in contract escrow — not pushed.
+    assert_eq!(token_client.balance(&client.address), stake_a + stake_b);
+
+    // Each participant pulls their refund.
+    client.claim_cancel_refund(&predictor_a, &id);
+    client.claim_cancel_refund(&predictor_b, &id);
 
     assert_eq!(token_client.balance(&predictor_a), stake_a);
     assert_eq!(token_client.balance(&predictor_b), stake_b);
-    assert!(client.get_market(&id).is_cancelled);
+    assert_eq!(token_client.balance(&client.address), 0);
 }
 
 #[test]
@@ -1007,16 +1017,19 @@ fn cancel_market_refunds_exact_stake_amounts() {
 
     let token_client = TokenClient::new(&env, &xlm_token);
 
-    // Admin cancels the market
+    // Admin cancels the market (pull pattern — no funds move yet).
     client.cancel_market(&admin, &id);
+    assert!(client.get_market(&id).is_cancelled);
 
-    // Assert each user's balance is restored exactly
+    // Each participant pulls their own refund.
+    client.claim_cancel_refund(&user1, &id);
+    client.claim_cancel_refund(&user2, &id);
+    client.claim_cancel_refund(&user3, &id);
+
+    // Assert each user's balance is restored exactly.
     assert_eq!(token_client.balance(&user1), stake1);
     assert_eq!(token_client.balance(&user2), stake2);
     assert_eq!(token_client.balance(&user3), stake3);
-
-    // Assert market is cancelled
-    assert!(client.get_market(&id).is_cancelled);
 
     // Assert further predictions fail with MarketAlreadyCancelled
     let result = client.try_submit_prediction(&user1, &id, &symbol_short!("yes"), &stake1);
@@ -1026,15 +1039,14 @@ fn cancel_market_refunds_exact_stake_amounts() {
     ));
 }
 
-// ── cancel_market multi-predictor refund flow (#1265) ────────────────────────
+// ── cancel_market multi-predictor refund flow (#1265 / #1341) ────────────────
 //
-// Unlike the storage-injection tests above, these run the full end-to-end
-// flow: predictors are funded, stake real tokens through submit_prediction,
-// and are refunded by cancel_market. Refunds in this contract are push-based —
-// cancel_market transfers every stake back in the same call, so "claiming a
-// refund" is the cancellation itself and the double-claim / non-participant
-// requirements are pinned against every post-cancellation extraction path
-// (second cancel, resolve-after-cancel, claim_payout, batch payouts).
+// These tests run the full end-to-end flow: predictors are funded, stake real
+// tokens through submit_prediction, and retrieve their funds by calling
+// claim_cancel_refund after cancellation. Refunds in this contract are
+// pull-based — cancel_market only marks the market cancelled; each participant
+// calls claim_cancel_refund independently. Double-claim prevention and
+// non-participant exclusion are exercised against every extraction path.
 
 /// Five distinct stakes within default_params' min/max bounds (10M..=100M).
 const FLOW_STAKES: [i128; 5] = [12_000_000, 25_000_000, 40_000_000, 60_000_000, 100_000_000];
@@ -1081,8 +1093,8 @@ fn setup_five_predictor_market(
 }
 
 /// Requirements 1–4 & 7: five predictors with five different stakes across
-/// both outcomes are each made exactly whole by cancellation, and the contract
-/// retains zero tokens from the cancelled market.
+/// both outcomes are each made exactly whole after claiming their refund, and
+/// the contract retains zero tokens once all claims are complete.
 #[test]
 fn cancel_market_five_predictors_restores_exact_pre_stake_balances() {
     let env = Env::default();
@@ -1103,8 +1115,17 @@ fn cancel_market_five_predictors_restores_exact_pre_stake_balances() {
         assert_eq!(token.balance(predictor), balances_before[i] - FLOW_STAKES[i]);
     }
 
+    // Cancel marks the market; funds stay in escrow.
     client.cancel_market(&admin, &id);
     assert!(client.get_market(&id).is_cancelled);
+
+    // Funds are still in escrow — not pushed.
+    assert_eq!(token.balance(&client.address), contract_before + total_staked);
+
+    // Each predictor pulls their own refund.
+    for predictor in predictors.iter() {
+        client.claim_cancel_refund(predictor, &id);
+    }
 
     // Every predictor's balance is restored exactly, regardless of stake size
     // or which outcome they chose.
@@ -1118,10 +1139,9 @@ fn cancel_market_five_predictors_restores_exact_pre_stake_balances() {
 }
 
 /// Requirement 5 & acceptance: a second refund for the same predictor is
-/// impossible. Refunds are pushed by cancel_market, so every path that could
-/// pay a second time is asserted closed: cancelling again, resolving the
-/// cancelled market (which would reopen claim_payout), claiming a payout
-/// directly, and batch-distributing payouts.
+/// impossible via claim_cancel_refund (RefundAlreadyClaimed), and all other
+/// extraction paths (resolve-after-cancel, claim_payout, batch payouts) are
+/// also closed.
 #[test]
 fn cancel_market_second_refund_is_impossible_via_any_path() {
     let env = Env::default();
@@ -1133,6 +1153,20 @@ fn cancel_market_second_refund_is_impossible_via_any_path() {
         setup_five_predictor_market(&env, &client, &xlm_token);
 
     client.cancel_market(&admin, &id);
+
+    // Each predictor claims once successfully.
+    for predictor in predictors.iter() {
+        client.claim_cancel_refund(predictor, &id);
+    }
+
+    // Path 0: a second claim_cancel_refund is rejected with RefundAlreadyClaimed.
+    for predictor in predictors.iter() {
+        let second_claim = client.try_claim_cancel_refund(predictor, &id);
+        assert!(matches!(
+            second_claim,
+            Err(Ok(InsightArenaError::RefundAlreadyClaimed))
+        ));
+    }
 
     // Path 1: cancelling again is rejected.
     let second_cancel = client.try_cancel_market(&admin, &id);
@@ -1167,7 +1201,7 @@ fn cancel_market_second_refund_is_impossible_via_any_path() {
         Err(Ok(InsightArenaError::MarketNotResolved))
     ));
 
-    // After all rejected attempts, balances are exactly the refunded ones and
+    // After all rejected attempts, balances equal the refunded amounts and
     // the contract kept nothing.
     for (i, predictor) in predictors.iter().enumerate() {
         assert_eq!(token.balance(predictor), balances_before[i]);
@@ -1175,8 +1209,8 @@ fn cancel_market_second_refund_is_impossible_via_any_path() {
     assert_eq!(token.balance(&client.address), 0);
 }
 
-/// Requirement 6: an address that never predicted receives nothing from the
-/// cancellation and cannot extract anything afterwards.
+/// Requirement 6: an address that never predicted receives nothing and cannot
+/// call claim_cancel_refund (NotAParticipant).
 #[test]
 fn cancel_market_non_participant_receives_nothing() {
     let env = Env::default();
@@ -1192,14 +1226,20 @@ fn cancel_market_non_participant_receives_nothing() {
 
     client.cancel_market(&admin, &id);
 
-    // The cancellation refunded only the five predictors.
-    assert_eq!(token.balance(&outsider), 0);
-    assert_eq!(token.balance(&client.address), 0);
-
-    // And the outsider has no post-cancellation claim path.
-    let claim = client.try_claim_payout(&outsider, &id);
+    // The outsider has no prediction record — claim is rejected.
+    let claim = client.try_claim_cancel_refund(&outsider, &id);
     assert!(matches!(
         claim,
+        Err(Ok(InsightArenaError::NotAParticipant))
+    ));
+
+    // The outsider received nothing.
+    assert_eq!(token.balance(&outsider), 0);
+
+    // The payout path is also closed.
+    let payout_claim = client.try_claim_payout(&outsider, &id);
+    assert!(matches!(
+        payout_claim,
         Err(Ok(InsightArenaError::MarketNotResolved))
     ));
 }

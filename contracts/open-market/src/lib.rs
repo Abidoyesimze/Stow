@@ -352,6 +352,21 @@ impl InsightArenaContract {
         prediction::claim_payout(&env, predictor, market_id)
     }
 
+    /// Pull-based cancellation refund: transfer the caller's full staked amount
+    /// back to them from escrow.
+    ///
+    /// The market must be cancelled. Each participant calls this once for
+    /// themselves; a second call reverts with `RefundAlreadyClaimed`.
+    /// A caller with no stake in the market reverts with `NotAParticipant`.
+    /// Returns the refund amount in stroops.
+    pub fn claim_cancel_refund(
+        env: Env,
+        predictor: Address,
+        market_id: u64,
+    ) -> Result<i128, InsightArenaError> {
+        prediction::claim_cancel_refund(&env, predictor, market_id)
+    }
+
     /// Return the current XLM balance held by the contract escrow in stroops.
     pub fn get_contract_balance(env: Env) -> i128 {
         escrow::get_contract_balance(&env)

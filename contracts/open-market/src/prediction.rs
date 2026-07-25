@@ -812,3 +812,107 @@ pub fn batch_distribute_payouts(
 
     Ok(processed)
 }
+
+// ── Cancellation refund (pull pattern) ───────────────────────────────────────
+
+/// Emit one refund event per individual claim, matching the emit_* style used
+/// elsewhere in this module.
+fn emit_refund_claimed(env: &Env, market_id: u64, predictor: &Address, amount: i128) {
+    env.events().publish(
+        (symbol_short!("pred"), symbol_short!("refndcld")),
+        (market_id, predictor.clone(), amount),
+    );
+}
+
+/// Claim a cancellation refund for a staked prediction on a cancelled market.
+///
+/// This implements a **pull** pattern: each participant calls this function
+/// independently to withdraw their own stake. The function is O(1) — it
+/// touches only the caller's records and does not iterate any participant list.
+///
+/// Accounting guarantee: because no fees are deducted before resolution, the
+/// full `stake_amount` is still held in escrow at cancellation time. Each
+/// participant therefore receives exactly what they deposited, and the sum of
+/// all individual refunds equals `market.total_pool` — the total held in
+/// escrow for that market.
+///
+/// # Validation order
+/// 1. Platform not paused
+/// 2. Market exists
+/// 3. Market is cancelled (`is_cancelled == true`)
+/// 4. Caller has an unclaimed prediction for this market (`NotAParticipant`)
+/// 5. Refund has not already been claimed (`RefundAlreadyClaimed`)
+///
+/// # On success
+/// - `stake_amount` is transferred from escrow to `predictor` via
+///   `escrow::refund`.
+/// - The prediction record is moved from persistent to temporary storage,
+///   preventing any second claim (same tombstone pattern as `claim_payout`).
+/// - A `RefundClaimed` event is emitted carrying
+///   `(market_id, predictor, amount)`.
+///
+/// # Returns
+/// The refund amount in stroops (equal to the original `stake_amount`).
+pub fn claim_cancel_refund(
+    env: &Env,
+    predictor: Address,
+    market_id: u64,
+) -> Result<i128, InsightArenaError> {
+    // ── Guard 1: platform not paused ─────────────────────────────────────────
+    config::ensure_not_paused(env)?;
+
+    // Require the caller's authorisation before reading any state so the
+    // auth check can never be bypassed by an early error return.
+    predictor.require_auth();
+
+    // ── Guard 2: market must exist ────────────────────────────────────────────
+    let market: Market = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Market(market_id))
+        .ok_or(InsightArenaError::MarketNotFound)?;
+
+    // ── Guard 3: market must be cancelled ─────────────────────────────────────
+    if !market.is_cancelled {
+        return Err(InsightArenaError::MarketNotCancelled);
+    }
+
+    // ── Guard 4: caller must have a prediction record ─────────────────────────
+    // Presence in persistent storage means the refund has not yet been claimed.
+    // After a successful claim the record is moved to temporary storage (tombstone),
+    // exactly mirroring what claim_payout does — so the same "is it in persistent?"
+    // check doubles as the double-claim guard with no new storage keys required.
+    let prediction_key = DataKey::Prediction(market_id, predictor.clone());
+
+    // Check temporary storage first: if the record is there it was already processed.
+    if env.storage().temporary().has(&prediction_key) {
+        return Err(InsightArenaError::RefundAlreadyClaimed);
+    }
+
+    let prediction: Prediction = env
+        .storage()
+        .persistent()
+        .get(&prediction_key)
+        .ok_or(InsightArenaError::NotAParticipant)?;
+
+    let refund_amount = prediction.stake_amount;
+
+    // ── Checks-Effects-Interactions: move record to temporary before transfer ─
+    // Removing from persistent and writing a tombstone to temporary makes the
+    // double-claim guard above fire on any subsequent call, even if the transfer
+    // below were somehow to revert (it cannot in Soroban, but the pattern is
+    // correct regardless).
+    let mut tombstone = prediction.clone();
+    tombstone.payout_claimed = true; // reuse flag to signal "refund claimed"
+    env.storage().persistent().remove(&prediction_key);
+    env.storage().temporary().set(&prediction_key, &tombstone);
+    config::shorten_prediction_ttl_after_claim(env, market_id, &predictor);
+
+    // ── Transfer stake from escrow back to predictor ──────────────────────────
+    escrow::refund(env, &predictor, refund_amount)?;
+
+    // ── Emit one RefundClaimed event for this individual claim ────────────────
+    emit_refund_claimed(env, market_id, &predictor, refund_amount);
+
+    Ok(refund_amount)
+}
