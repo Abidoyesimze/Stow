@@ -15,7 +15,7 @@ use insightarena_contract::storage_types::{DataKey, Market, Prediction};
 use insightarena_contract::{InsightArenaContract, InsightArenaContractClient, InsightArenaError};
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, Vec, BytesN};
 
 // ── Test Helpers ─────────────────────────────────────────────────────────────
 
@@ -60,6 +60,7 @@ fn seed_unresolved_market(env: &Env, client: &InsightArenaContractClient<'_>, ma
         10_000_000,
         100_000_000,
         86_400,
+        BytesN::from_array(env, &[0u8; 32]),
     );
 
     env.as_contract(&client.address, || {

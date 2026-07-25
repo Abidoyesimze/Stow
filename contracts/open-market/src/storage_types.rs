@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Env, Map, String, Symbol, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, Env, Map, String, Symbol, Vec};
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -274,6 +274,9 @@ pub struct Market {
     pub participant_count: u32,
     /// Dispute window duration in seconds after resolution.
     pub dispute_window: u64,
+    /// SHA-256 content hash of off-chain market metadata. Set once at creation
+    /// and never mutated by any subsequent market operation.
+    pub metadata_hash: BytesN<32>,
 }
 
 impl Market {
@@ -294,6 +297,7 @@ impl Market {
         min_stake: i128,
         max_stake: i128,
         dispute_window: u64,
+        metadata_hash: BytesN<32>,
     ) -> Self {
         Self {
             market_id,
@@ -317,6 +321,7 @@ impl Market {
             max_stake,
             participant_count: 0,
             dispute_window,
+            metadata_hash,
         }
     }
 }

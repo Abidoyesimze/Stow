@@ -13,7 +13,7 @@
 use insightarena_contract::market::CreateMarketParams;
 use insightarena_contract::{InsightArenaContract, InsightArenaContractClient};
 use soroban_sdk::testutils::{Address as _, Events, MockAuth, MockAuthInvoke};
-use soroban_sdk::{symbol_short, vec, Address, Env, IntoVal, String, Symbol, TryIntoVal};
+use soroban_sdk::{symbol_short, vec, Address, Env, IntoVal, String, Symbol, TryIntoVal, BytesN};
 
 fn register_token(env: &Env) -> Address {
     let token_admin = Address::generate(env);
@@ -45,6 +45,7 @@ fn default_params(env: &Env) -> CreateMarketParams {
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: true,
+        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
     }
 }
 

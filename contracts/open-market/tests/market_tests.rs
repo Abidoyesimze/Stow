@@ -3,7 +3,7 @@ use insightarena_contract::storage_types::{DataKey, Market, Prediction};
 use insightarena_contract::{InsightArenaContract, InsightArenaContractClient, InsightArenaError};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, Vec, BytesN};
 
 #[test]
 fn test_calculate_price_equal_reserves() {
@@ -78,6 +78,7 @@ fn default_params(env: &Env) -> CreateMarketParams {
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: true,
+        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
     }
 }
 
@@ -1796,4 +1797,98 @@ fn get_markets_by_category_zero_markets_returns_empty_without_panic() {
     let politics = Symbol::new(&env, "Politics");
     let result = client.get_markets_by_category(&politics, &0_u64, &5_u32);
     assert_eq!(result.len(), 0);
+}
+
+#[test]
+fn metadata_hash_stored_at_creation_and_retrievable() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    let mut hash_bytes = [0u8; 32];
+    hash_bytes[0] = 0xab;
+    hash_bytes[31] = 0xcd;
+    let metadata_hash = BytesN::from_array(&env, &hash_bytes);
+
+    let mut params = default_params(&env);
+    params.metadata_hash = metadata_hash.clone();
+
+    let id = client.create_market(&creator, &params);
+    let stored = client.get_metadata_hash(&id);
+    assert_eq!(stored, metadata_hash);
+}
+
+#[test]
+fn metadata_hash_is_immutable_after_creation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    let original = BytesN::from_array(&env, &[1u8; 32]);
+    let mut params = default_params(&env);
+    params.metadata_hash = original.clone();
+    let id = client.create_market(&creator, &params);
+
+    // There is no contract mutator for metadata hash. Attempting a direct
+    // storage overwrite via a second create for a different market must not
+    // affect the first market's anchored hash.
+    let other = BytesN::from_array(&env, &[2u8; 32]);
+    let mut params2 = default_params(&env);
+    params2.metadata_hash = other;
+    let id2 = client.create_market(&creator, &params2);
+
+    assert_eq!(client.get_metadata_hash(&id), original);
+    assert_ne!(client.get_metadata_hash(&id2), original);
+    assert_eq!(client.get_metadata_hash(&id), original);
+}
+
+#[test]
+fn get_metadata_hash_fails_for_unknown_market() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+
+    let result = client.try_get_metadata_hash(&999_u64);
+    assert_eq!(result, Err(Ok(InsightArenaError::MarketNotFound)));
+}
+
+#[test]
+fn market_created_event_includes_metadata_hash() {
+    use soroban_sdk::testutils::Events;
+    use soroban_sdk::TryFromVal;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    let metadata_hash = BytesN::from_array(&env, &[9u8; 32]);
+    let mut params = default_params(&env);
+    params.metadata_hash = metadata_hash.clone();
+    let end_time = params.end_time;
+
+    let id = client.create_market(&creator, &params);
+
+    let contract_id = client.address.clone();
+    let events = env.events().all();
+    let mut found = false;
+    for event in events.iter() {
+        if event.0 == contract_id && event.1.len() == 2 {
+            let topic0 = Symbol::try_from_val(&env, &event.1.get(0).unwrap()).unwrap();
+            let topic1 = Symbol::try_from_val(&env, &event.1.get(1).unwrap()).unwrap();
+            if topic0 == symbol_short!("mkt") && topic1 == symbol_short!("created") {
+                let data: (u64, Address, u64, BytesN<32>) =
+                    TryFromVal::try_from_val(&env, &event.2).unwrap();
+                assert_eq!(data.0, id);
+                assert_eq!(data.1, creator);
+                assert_eq!(data.2, end_time);
+                assert_eq!(data.3, metadata_hash);
+                found = true;
+            }
+        }
+    }
+    assert!(found, "market created event must include metadata_hash");
+    assert_eq!(client.get_metadata_hash(&id), metadata_hash);
 }

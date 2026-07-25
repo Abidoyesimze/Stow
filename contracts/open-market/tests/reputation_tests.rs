@@ -6,7 +6,7 @@ use insightarena_contract::storage_types::CreatorStats;
 use insightarena_contract::{InsightArenaContract, InsightArenaContractClient, InsightArenaError};
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, TryFromVal};
+use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, TryFromVal, BytesN};
 
 fn register_token(env: &Env) -> Address {
     let token_admin = Address::generate(env);
@@ -39,6 +39,7 @@ fn default_params(env: &Env) -> CreateMarketParams {
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: true,
+        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
     }
 }
 

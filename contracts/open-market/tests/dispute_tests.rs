@@ -3,7 +3,7 @@ use insightarena_contract::{
 };
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol};
+use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, BytesN};
 
 fn register_token(env: &Env) -> Address {
     let token_admin = Address::generate(env);
@@ -40,6 +40,7 @@ fn market_params_with_window(env: &Env, dispute_window: u64) -> CreateMarketPara
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: true,
+        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
     }
 }
 
