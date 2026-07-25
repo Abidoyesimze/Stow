@@ -141,4 +141,18 @@ export class SeasonsController {
   async finalizeSeason(@Param('id') id: string): Promise<Season> {
     return this.seasonsService.finalizeSeason(id);
   }
+
+  @Post('rollover')
+  @HttpCode(HttpStatus.OK)
+  @Roles(Role.Admin)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Run automated season rollover (Admin only)',
+    description:
+      'Closes an ending season, finalizes standings, computes rewards, and opens the next season. Safe to re-run (idempotent).',
+  })
+  @ApiResponse({ status: 200, description: 'Rollover result' })
+  async rollover() {
+    return this.seasonsService.processSeasonRollover();
+  }
 }
