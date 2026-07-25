@@ -12,6 +12,7 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { Button } from "@/component/ui/button";
+import { validators } from "@/lib/validators";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -189,9 +190,12 @@ export default function CreateMarketForm() {
   function validateField(field: string): string {
     switch (field) {
       case "title":
-        if (!draft.title.trim()) return "Title is required.";
-        if (draft.title.trim().length > MAX_TITLE) return `Title must be at most ${MAX_TITLE} characters.`;
-        return "";
+        return (
+          validators.compose(
+            validators.required("Title"),
+            validators.maxLength(MAX_TITLE, "Title"),
+          )(draft.title) || ""
+        );
       case "endDate":
       case "endClock": {
         const endDt = draft.endDate ? `${draft.endDate}T${draft.endClock}` : "";
@@ -229,11 +233,22 @@ export default function CreateMarketForm() {
 
   function validateStep1(): boolean {
     const errs: Record<string, string> = {};
-    if (!draft.title.trim()) errs.title = "Title is required.";
-    else if (draft.title.length < 5) errs.title = "Title must be at least 5 characters.";
-    if (!draft.category) errs.category = "Please select a category.";
-    if (!draft.description.trim()) errs.description = "Description is required.";
-    else if (draft.description.length < 10) errs.description = "Description must be at least 10 characters.";
+    const titleError = validators.compose(
+      validators.required("Title"),
+      validators.minLength(5, "Title"),
+      validators.maxLength(MAX_TITLE, "Title"),
+    )(draft.title);
+    if (titleError) errs.title = titleError;
+
+    const categoryError = validators.required("Category")(draft.category);
+    if (categoryError) errs.category = "Please select a category.";
+
+    const descriptionError = validators.compose(
+      validators.required("Description"),
+      validators.minLength(10, "Description"),
+    )(draft.description);
+    if (descriptionError) errs.description = descriptionError;
+
     setErrors(errs);
     return Object.keys(errs).length === 0;
   }
@@ -265,11 +280,18 @@ export default function CreateMarketForm() {
     const errs: Record<string, string> = {};
     const min = parseFloat(draft.minStakeXlm);
     const max = parseFloat(draft.maxStakeXlm);
-    if (isNaN(min) || min <= 0) errs.minStakeXlm = "Minimum stake must be greater than 0.";
-    if (isNaN(max) || max <= 0) errs.maxStakeXlm = "Maximum stake must be greater than 0.";
+
+    const minError = validators.minValue(0.01, "Minimum stake")(draft.minStakeXlm);
+    if (isNaN(min) || minError) errs.minStakeXlm = "Minimum stake must be greater than 0.";
+
+    const maxError = validators.minValue(0.01, "Maximum stake")(draft.maxStakeXlm);
+    if (isNaN(max) || maxError) errs.maxStakeXlm = "Maximum stake must be greater than 0.";
+
     if (!isNaN(min) && !isNaN(max) && max < min) errs.maxStakeXlm = "Maximum stake must be ≥ minimum stake.";
-    const seed = parseFloat(draft.creatorLiquiditySeed);
-    if (isNaN(seed) || seed < 0) errs.creatorLiquiditySeed = "Liquidity seed cannot be negative.";
+
+    const seedError = validators.minValue(0, "Liquidity seed")(draft.creatorLiquiditySeed);
+    if (seedError) errs.creatorLiquiditySeed = "Liquidity seed cannot be negative.";
+
     setErrors(errs);
     return Object.keys(errs).length === 0;
   }
