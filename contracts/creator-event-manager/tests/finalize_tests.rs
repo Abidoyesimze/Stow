@@ -108,6 +108,7 @@ fn create_funded_event(
                 String::from_str(env, &format!("Team B{}", i)),
                 env.ledger().timestamp() + 100 + (i as u64) * 60,
                 1u32,
+                0,
             );
             storage::set_match(env, match_id, &match_record);
             storage::add_event_match(env, event_id, match_id);
@@ -222,7 +223,10 @@ fn test_finalize_event_distributes_top5_split() {
     }
 
     // Full pool staged in the contract; nothing refunded to the creator.
-    assert_eq!(balance(&env, &xlm_token, &contract_id), PRIZE + FINALIZATION_BOND_STROOPS);
+    assert_eq!(
+        balance(&env, &xlm_token, &contract_id),
+        PRIZE + FINALIZATION_BOND_STROOPS
+    );
     assert_eq!(balance(&env, &xlm_token, &creator), 0);
 
     // Each winner claims their own allocation exactly once.
@@ -233,7 +237,10 @@ fn test_finalize_event_distributes_top5_split() {
     }
 
     // Prize pool distributed; finalization bond remains until settlement.
-    assert_eq!(balance(&env, &xlm_token, &contract_id), FINALIZATION_BOND_STROOPS);
+    assert_eq!(
+        balance(&env, &xlm_token, &contract_id),
+        FINALIZATION_BOND_STROOPS
+    );
     assert_eq!(balance(&env, &xlm_token, &creator), 0);
 
     // Event marked finalized; snapshot retrievable.
@@ -395,14 +402,20 @@ fn test_finalize_event_fewer_participants_than_ranks_refunds_creator() {
     assert_eq!(balance(&env, &xlm_token, &user2), 0);
     assert_eq!(balance(&env, &xlm_token, &creator), refund);
     // Two staged allocations + finalization bond remain in the contract.
-    assert_eq!(balance(&env, &xlm_token, &contract_id), rank1 + rank2 + FINALIZATION_BOND_STROOPS);
+    assert_eq!(
+        balance(&env, &xlm_token, &contract_id),
+        rank1 + rank2 + FINALIZATION_BOND_STROOPS
+    );
 
     assert_eq!(client.claim_prize(&user1, &event_id), rank1);
     assert_eq!(client.claim_prize(&user2, &event_id), rank2);
     assert_eq!(balance(&env, &xlm_token, &user1), rank1);
     assert_eq!(balance(&env, &xlm_token, &user2), rank2);
     // Only the finalization bond remains once both winners have claimed.
-    assert_eq!(balance(&env, &xlm_token, &contract_id), FINALIZATION_BOND_STROOPS);
+    assert_eq!(
+        balance(&env, &xlm_token, &contract_id),
+        FINALIZATION_BOND_STROOPS
+    );
 }
 
 #[test]
@@ -431,7 +444,10 @@ fn test_finalize_event_zero_participants_refunds_full_pool() {
     assert_eq!(payouts.len(), 0);
     // Entire pool refunded to creator; only the finalization bond remains.
     assert_eq!(balance(&env, &xlm_token, &creator), PRIZE);
-    assert_eq!(balance(&env, &xlm_token, &contract_id), FINALIZATION_BOND_STROOPS);
+    assert_eq!(
+        balance(&env, &xlm_token, &contract_id),
+        FINALIZATION_BOND_STROOPS
+    );
     assert!(client.get_event(&event_id).is_finalized);
 }
 
@@ -507,7 +523,10 @@ fn test_finalize_event_integer_division_dust_refunded_to_creator() {
     assert_eq!(balance(&env, &xlm_token, &user2), expected_rank2);
 
     // Bond remains until settlement.
-    assert_eq!(balance(&env, &xlm_token, &contract_id), FINALIZATION_BOND_STROOPS);
+    assert_eq!(
+        balance(&env, &xlm_token, &contract_id),
+        FINALIZATION_BOND_STROOPS
+    );
 
     // Total outflows equal the full prize pool.
     let total_paid = expected_rank1 + expected_rank2 + expected_dust;
@@ -550,7 +569,10 @@ fn test_finalize_event_zero_prize_pool_noop() {
 
     // No reward ranks → no payouts, no prize transfers; only the bond remains.
     assert_eq!(payouts.len(), 0);
-    assert_eq!(balance(&env, &xlm_token, &contract_id), FINALIZATION_BOND_STROOPS);
+    assert_eq!(
+        balance(&env, &xlm_token, &contract_id),
+        FINALIZATION_BOND_STROOPS
+    );
     assert_eq!(balance(&env, &xlm_token, &creator), 0);
     assert_eq!(balance(&env, &xlm_token, &user), 0);
     // But the event is still marked finalized.
@@ -612,7 +634,12 @@ fn test_get_event_payouts_after_finalization_returns_correct_entries() {
     client.submit_prediction(&user, &match_ids.get(0).unwrap(), &1u32, &0u32);
 
     env.ledger().set_timestamp(env.ledger().timestamp() + 7300);
-    submit_result(&client, &ai_agent, match_ids.get(0).unwrap(), MatchResult::TeamA);
+    submit_result(
+        &client,
+        &ai_agent,
+        match_ids.get(0).unwrap(),
+        MatchResult::TeamA,
+    );
 
     let caller = Address::generate(&env);
     fund_finalizer_bond(&env, &xlm_token, &caller);
@@ -663,12 +690,18 @@ fn test_finalize_event_permissionless() {
     assert_eq!(payouts.len(), 1);
     // Allocation staged, not yet transferred.
     assert_eq!(balance(&env, &xlm_token, &user), 0);
-    assert_eq!(balance(&env, &xlm_token, &contract_id), PRIZE + FINALIZATION_BOND_STROOPS);
+    assert_eq!(
+        balance(&env, &xlm_token, &contract_id),
+        PRIZE + FINALIZATION_BOND_STROOPS
+    );
 
     // The winner (or anyone, on the winner's behalf via auth) claims.
     assert_eq!(client.claim_prize(&user, &event_id), PRIZE);
     assert_eq!(balance(&env, &xlm_token, &user), PRIZE);
-    assert_eq!(balance(&env, &xlm_token, &contract_id), FINALIZATION_BOND_STROOPS);
+    assert_eq!(
+        balance(&env, &xlm_token, &contract_id),
+        FINALIZATION_BOND_STROOPS
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -731,6 +764,7 @@ fn test_finalize_event_seed_pool_plus_entry_fees_combined() {
             String::from_str(&env, "Team B"),
             env.ledger().timestamp() + 100,
             1u32,
+            0,
         );
         storage::set_match(&env, mid, &m);
         storage::add_event_match(&env, event_id, mid);
@@ -786,7 +820,10 @@ fn test_finalize_event_seed_pool_plus_entry_fees_combined() {
     assert_eq!(client.claim_prize(&user2, &event_id), expected_rank2);
     assert_eq!(balance(&env, &xlm_token, &user1), expected_rank1);
     assert_eq!(balance(&env, &xlm_token, &user2), expected_rank2);
-    assert_eq!(balance(&env, &xlm_token, &contract_id), FINALIZATION_BOND_STROOPS);
+    assert_eq!(
+        balance(&env, &xlm_token, &contract_id),
+        FINALIZATION_BOND_STROOPS
+    );
 
     assert!(client.get_event(&event_id).is_finalized);
 }
@@ -814,7 +851,12 @@ fn test_finalize_event_without_bond_rejected() {
     client.join_event(&user, &invite_code);
     client.submit_prediction(&user, &match_ids.get(0).unwrap(), &1u32, &0u32);
     env.ledger().set_timestamp(env.ledger().timestamp() + 7300);
-    submit_result(&client, &ai_agent, match_ids.get(0).unwrap(), MatchResult::TeamA);
+    submit_result(
+        &client,
+        &ai_agent,
+        match_ids.get(0).unwrap(),
+        MatchResult::TeamA,
+    );
 
     let caller = Address::generate(&env);
     client.finalize_event(&caller, &event_id);
@@ -838,7 +880,12 @@ fn test_unchallenged_finalization_returns_bond_after_window() {
     client.join_event(&user, &invite_code);
     client.submit_prediction(&user, &match_ids.get(0).unwrap(), &1u32, &0u32);
     env.ledger().set_timestamp(env.ledger().timestamp() + 7300);
-    submit_result(&client, &ai_agent, match_ids.get(0).unwrap(), MatchResult::TeamA);
+    submit_result(
+        &client,
+        &ai_agent,
+        match_ids.get(0).unwrap(),
+        MatchResult::TeamA,
+    );
 
     let caller = Address::generate(&env);
     fund_finalizer_bond(&env, &xlm_token, &caller);
@@ -850,9 +897,8 @@ fn test_unchallenged_finalization_returns_bond_after_window() {
     assert!(!bond.challenged);
     assert!(!bond.settled);
 
-    env.ledger().set_timestamp(
-        env.ledger().timestamp() + FINALIZATION_CHALLENGE_WINDOW_SECONDS + 1,
-    );
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + FINALIZATION_CHALLENGE_WINDOW_SECONDS + 1);
 
     let before = balance(&env, &xlm_token, &caller);
     let returned = client.settle_finalization_bond(&caller, &event_id);
@@ -887,7 +933,12 @@ fn test_successful_challenge_slashes_bond_to_treasury() {
     client.join_event(&user, &invite_code);
     client.submit_prediction(&user, &match_ids.get(0).unwrap(), &1u32, &0u32);
     env.ledger().set_timestamp(env.ledger().timestamp() + 7300);
-    submit_result(&client, &ai_agent, match_ids.get(0).unwrap(), MatchResult::TeamA);
+    submit_result(
+        &client,
+        &ai_agent,
+        match_ids.get(0).unwrap(),
+        MatchResult::TeamA,
+    );
 
     let finalizer = Address::generate(&env);
     fund_finalizer_bond(&env, &xlm_token, &finalizer);
@@ -926,7 +977,12 @@ fn test_challenge_by_non_admin_non_verifier_rejected() {
     client.join_event(&user, &invite_code);
     client.submit_prediction(&user, &match_ids.get(0).unwrap(), &1u32, &0u32);
     env.ledger().set_timestamp(env.ledger().timestamp() + 7300);
-    submit_result(&client, &ai_agent, match_ids.get(0).unwrap(), MatchResult::TeamA);
+    submit_result(
+        &client,
+        &ai_agent,
+        match_ids.get(0).unwrap(),
+        MatchResult::TeamA,
+    );
 
     let finalizer = Address::generate(&env);
     fund_finalizer_bond(&env, &xlm_token, &finalizer);

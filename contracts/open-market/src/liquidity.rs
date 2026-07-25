@@ -5,8 +5,8 @@ use crate::errors::InsightArenaError;
 use crate::escrow;
 use crate::market;
 use crate::storage_types::{
-    DataKey, FeeTier, FeeTierConfig, LPPosition, LiquidityPool, MarketFeeInfo, PriceAccumulator,
-    PriceObservation, SwapRecord, VolatilityState,
+    DataKey, FeeTier, FeeTierConfig, LPPosition, LiquidityPool, Market, MarketFeeInfo,
+    PriceAccumulator, PriceObservation, SwapRecord, VolatilityState,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -541,6 +541,53 @@ pub fn calculate_lp_tokens(
     Ok(lp_tokens)
 }
 
+/// Resolve the effective per-outcome liquidity cap for a market: a non-zero
+/// `Market::outcome_liquidity_cap` override takes precedence over the global
+/// `Config::max_liquidity_per_outcome`. Returns `None` when neither is set
+/// (unlimited).
+fn effective_outcome_cap(
+    env: &Env,
+    market: &Market,
+) -> Result<Option<i128>, InsightArenaError> {
+    if market.outcome_liquidity_cap > 0 {
+        return Ok(Some(market.outcome_liquidity_cap));
+    }
+
+    let cfg = config::get_config_readonly(env)?;
+    if cfg.max_liquidity_per_outcome > 0 {
+        Ok(Some(cfg.max_liquidity_per_outcome))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Return the remaining liquidity capacity (stroops) for `outcome` in
+/// `market_id`, or `None` if no cap applies (unlimited).
+pub fn get_remaining_outcome_capacity(
+    env: &Env,
+    market_id: u64,
+    outcome: Symbol,
+) -> Result<Option<i128>, InsightArenaError> {
+    let mkt = market::get_market(env, market_id)?;
+    if !mkt.outcome_options.contains(outcome.clone()) {
+        return Err(InsightArenaError::InvalidOutcome);
+    }
+
+    let cap = match effective_outcome_cap(env, &mkt)? {
+        Some(cap) => cap,
+        None => return Ok(None),
+    };
+
+    let current_reserve = env
+        .storage()
+        .persistent()
+        .get::<_, LiquidityPool>(&DataKey::LiquidityPool(market_id))
+        .and_then(|p| p.outcome_reserves.get(outcome))
+        .unwrap_or(0);
+
+    Ok(Some((cap - current_reserve).max(0)))
+}
+
 /// Add liquidity to a market pool and mint LP tokens
 pub fn add_liquidity(
     env: &Env,
@@ -559,12 +606,34 @@ pub fn add_liquidity(
         return Err(InsightArenaError::MarketExpired);
     }
 
-    escrow::lock_stake(env, &provider, amount)?;
+    let outcome_count = mkt.outcome_options.len() as i128;
+    if outcome_count == 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+    let per_outcome_amount = amount / outcome_count;
 
     let pool = env
         .storage()
         .persistent()
         .get::<_, LiquidityPool>(&DataKey::LiquidityPool(market_id));
+
+    // ── Per-outcome liquidity cap check (before any funds move) ──────────────
+    if let Some(cap) = effective_outcome_cap(env, &mkt)? {
+        for outcome in mkt.outcome_options.iter() {
+            let current_reserve = pool
+                .as_ref()
+                .and_then(|p| p.outcome_reserves.get(outcome))
+                .unwrap_or(0);
+            let projected = current_reserve
+                .checked_add(per_outcome_amount)
+                .ok_or(InsightArenaError::Overflow)?;
+            if projected > cap {
+                return Err(InsightArenaError::StakeTooHigh);
+            }
+        }
+    }
+
+    escrow::lock_stake(env, &provider, amount)?;
 
     let is_new_pool = pool.is_none();
 
@@ -578,11 +647,20 @@ pub fn add_liquidity(
             .lp_token_supply
             .checked_add(lp_tokens)
             .ok_or(InsightArenaError::Overflow)?;
+        for outcome in mkt.outcome_options.iter() {
+            let current_reserve = pool.outcome_reserves.get(outcome.clone()).unwrap_or(0);
+            pool.outcome_reserves.set(
+                outcome,
+                current_reserve
+                    .checked_add(per_outcome_amount)
+                    .ok_or(InsightArenaError::Overflow)?,
+            );
+        }
         (lp_tokens, pool)
     } else {
         let mut reserves = Map::new(env);
         for outcome in mkt.outcome_options.iter() {
-            reserves.set(outcome, amount / mkt.outcome_options.len() as i128);
+            reserves.set(outcome, per_outcome_amount);
         }
         let pool = LiquidityPool::new(
             env,

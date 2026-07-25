@@ -14,7 +14,9 @@
 ///   claim/no-show subset) scenarios, `sum(claims) + clawed_back` always
 ///   equals the original prize pool.
 use creator_event_manager::storage;
-use creator_event_manager::storage_types::{FINALIZATION_BOND_STROOPS, MatchResult, CLAIM_PERIOD_SECONDS};
+use creator_event_manager::storage_types::{
+    MatchResult, CLAIM_PERIOD_SECONDS, FINALIZATION_BOND_STROOPS,
+};
 use creator_event_manager::CreatorEventManagerContractClient;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::testutils::Ledger as _;
@@ -116,6 +118,7 @@ fn create_funded_event(
                 String::from_str(env, &std::format!("Team B{}", i)),
                 env.ledger().timestamp() + 100 + (i as u64) * 60,
                 1u32,
+                0,
             );
             storage::set_match(env, match_id, &match_record);
             storage::add_event_match(env, event_id, match_id);
@@ -194,7 +197,10 @@ fn test_claim_prize_transfers_allocation_once() {
     let claimed = client.claim_prize(&user, &event_id);
     assert_eq!(claimed, PRIZE);
     assert_eq!(balance(&env, &xlm_token, &user), PRIZE);
-    assert_eq!(balance(&env, &xlm_token, &contract_id), FINALIZATION_BOND_STROOPS);
+    assert_eq!(
+        balance(&env, &xlm_token, &contract_id),
+        FINALIZATION_BOND_STROOPS
+    );
 }
 
 #[test]
@@ -422,7 +428,10 @@ fn test_clawback_after_deadline_sweeps_only_unclaimed() {
     // The no-show never receives anything.
     assert_eq!(balance(&env, &xlm_token, &no_show), 0);
     // Only the finalization bond remains after prize settlements.
-    assert_eq!(balance(&env, &xlm_token, &contract_id), FINALIZATION_BOND_STROOPS);
+    assert_eq!(
+        balance(&env, &xlm_token, &contract_id),
+        FINALIZATION_BOND_STROOPS
+    );
 }
 
 #[test]
@@ -622,7 +631,10 @@ fn test_property_claims_plus_clawback_equals_prize_pool() {
         );
 
         // Finalization bond remains after every prize allocation is settled.
-        assert_eq!(balance(&env, &xlm_token, &contract_id), FINALIZATION_BOND_STROOPS);
+        assert_eq!(
+            balance(&env, &xlm_token, &contract_id),
+            FINALIZATION_BOND_STROOPS
+        );
 
         // Repeat clawback is a harmless no-op — invariant still holds.
         assert_eq!(client.clawback_unclaimed(&caller, &event_id), 0);

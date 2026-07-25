@@ -324,6 +324,28 @@ pub enum DataKey {
     /// is outstanding. Written by `nominate_admin`, cleared by `accept_admin`
     /// or `cancel_admin_nomination`.
     PendingAdmin,
+
+    // ── Creator revenue share vesting ────────────────────────────────────────
+    /// A creator's staged vesting schedule for an event's leftover prize-pool
+    /// revenue  (creator, event_id). Written once by `finalize::finalize_event`,
+    /// settled via `fee::claim_vested_revenue` or `fee::forfeit_creator_vesting`.
+    CreatorVesting(Address, u64),
+
+    /// Share (bps, 0-10000) of a creator's event revenue that is locked into
+    /// a vesting schedule instead of paid immediately. `0` (default) means no
+    /// vesting — fully immediate payout. Written by
+    /// `fee::set_creator_vesting_config`.
+    CreatorVestShareBps,
+
+    /// Lock period (seconds) over which a creator's vested revenue linearly
+    /// unlocks. Written by `fee::set_creator_vesting_config`.
+    CreatorVestingPeriodSeconds,
+
+    // ── Event match lock windows ──────────────────────────────────────────────
+    /// Lock lead-time (seconds before `match_time`) before which predictions
+    /// must be placed. `0` (default) means predictions lock exactly at
+    /// `match_time`. Written by `admin::set_prediction_lock_lead_seconds`.
+    PredictionLockLeadSeconds,
 }
 
 // ---------------------------------------------------------------------------
@@ -568,10 +590,23 @@ pub struct Match {
     /// Must be in the range 1..=MAX_POINTS_MULTIPLIER. Grading multiplies the
     /// base points by this value so a 2× final can award 0 / 2 / 8 points.
     pub points_multiplier: u32,
+
+    /// Unix timestamp after which predictions are no longer accepted for
+    /// this match. Computed at creation as
+    /// `match_time.saturating_sub(lock_lead_seconds)`, using the
+    /// contract-wide `DataKey::PredictionLockLeadSeconds` in effect at that
+    /// time. Enforced by `prediction::submit_prediction`.
+    pub prediction_lock_time: u64,
 }
 
 impl Match {
     /// Create a new pending match.
+    ///
+    /// `lock_lead_seconds` is the configured lock lead-time
+    /// (`admin::get_prediction_lock_lead_seconds`); `prediction_lock_time` is
+    /// computed as `match_time.saturating_sub(lock_lead_seconds)` and stored
+    /// so it can be read back without re-deriving it from a config value that
+    /// may change later.
     pub fn new(
         match_id: u64,
         event_id: u64,
@@ -579,6 +614,7 @@ impl Match {
         team_b: String,
         match_time: u64,
         points_multiplier: u32,
+        lock_lead_seconds: u64,
     ) -> Self {
         Self {
             match_id,
@@ -593,6 +629,7 @@ impl Match {
             home_score: None,
             away_score: None,
             points_multiplier,
+            prediction_lock_time: match_time.saturating_sub(lock_lead_seconds),
         }
     }
 
@@ -1165,5 +1202,55 @@ pub struct FinalizationBond {
     pub challenged: bool,
 
     /// `true` once the bond has been returned or slashed (terminal state).
+    pub settled: bool,
+}
+
+// ---------------------------------------------------------------------------
+// CreatorVestingSchedule (creator revenue share vesting)
+// ---------------------------------------------------------------------------
+
+/// A creator's staged vesting schedule for their share of an event's leftover
+/// prize-pool revenue, recorded by `finalize::finalize_event` in place of
+/// paying the vested portion out immediately.
+///
+/// The vested amount unlocks linearly between `start_time` and `unlock_time`;
+/// `fee::claim_vested_revenue` transfers whatever portion has unlocked but not
+/// yet been claimed. `fee::forfeit_creator_vesting` settles the schedule
+/// early — e.g. when the event's finalization is later invalidated — sweeping
+/// whatever remains unclaimed to treasury. Either path sets `settled = true`,
+/// a terminal state after which no further claims or forfeitures apply.
+///
+/// Invariant: `claimed_amount + forfeited_amount <= total_amount`, and once
+/// `settled` is true, `claimed_amount + forfeited_amount == total_amount`.
+///
+/// Stored under `DataKey::CreatorVesting(creator, event_id)`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreatorVestingSchedule {
+    /// Address of the creator this schedule pays out to.
+    pub creator: Address,
+
+    /// Event this vesting schedule was staged from.
+    pub event_id: u64,
+
+    /// Total amount (stroops) originally scheduled to vest.
+    pub total_amount: i128,
+
+    /// Cumulative amount (stroops) claimed so far via `claim_vested_revenue`.
+    pub claimed_amount: i128,
+
+    /// Amount (stroops) forfeited via `forfeit_creator_vesting`, if the event
+    /// was invalidated before the schedule fully settled.
+    pub forfeited_amount: i128,
+
+    /// Unix timestamp the schedule was created (finalization time); the
+    /// start of the linear unlock curve.
+    pub start_time: u64,
+
+    /// Unix timestamp at which `total_amount` is fully unlocked.
+    pub unlock_time: u64,
+
+    /// `true` once the schedule reaches a terminal state (fully claimed or
+    /// forfeited). No further claims or forfeitures apply after this.
     pub settled: bool,
 }

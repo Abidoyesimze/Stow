@@ -21,8 +21,8 @@ use admin::AdminError;
 use event::EventError;
 use r#match::MatchError;
 use storage_types::{
-    Event, FinalizationBond, LeaderboardEntry, Match, OracleSubmission, ParticipantScore,
-    Prediction, StandingEntry,
+    CreatorVestingSchedule, Event, FinalizationBond, LeaderboardEntry, Match, OracleSubmission,
+    ParticipantScore, Prediction, StandingEntry,
 };
 use verification::VerificationError;
 use views::{EventStatistics, PlatformStatistics};
@@ -603,7 +603,29 @@ impl CreatorEventManagerContract {
             Err(MatchError::InvalidMatchTime) => panic!("invalid_match_time"),
             Err(MatchError::InvalidPointsMultiplier) => panic!("invalid_points_multiplier"),
             Err(MatchError::MatchNotFound) => panic!("match_not_found"),
+            Err(MatchError::InvalidLockLeadTime) => panic!("invalid_lock_lead_time"),
         }
+    }
+
+    /// Configure the prediction lock lead-time (seconds before `match_time`)
+    /// applied to newly created matches. Only the admin may call this.
+    /// Existing matches keep the lock timestamp computed at their own
+    /// creation time.
+    ///
+    /// # Panics
+    /// * `"unauthorized"` — caller is not the admin.
+    pub fn set_prediction_lock_lead_seconds(env: Env, caller: Address, lock_lead_seconds: u64) {
+        match admin::set_prediction_lock_lead_seconds(&env, caller, lock_lead_seconds) {
+            Ok(()) => {}
+            Err(AdminError::Unauthorized) => panic!("unauthorized"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Return the configured prediction lock lead-time (seconds), or `0` if
+    /// never configured.
+    pub fn get_prediction_lock_lead_seconds(env: Env) -> u64 {
+        admin::get_prediction_lock_lead_seconds(&env)
     }
 
     /// Retrieve all matches for an event, sorted by `match_time` ascending.
@@ -659,6 +681,95 @@ impl CreatorEventManagerContract {
             Err(fee::FeeError::InvalidAmount) => panic!("invalid_amount"),
             Err(fee::FeeError::InsufficientBalance) => panic!("insufficient_balance"),
             Err(fee::FeeError::TransferFailed) => panic!("transfer_failed"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    // =========================================================================
+    // Creator revenue share vesting
+    // =========================================================================
+
+    /// Configure the creator revenue vesting share (bps) and lock period
+    /// (seconds). Only the admin may call this.
+    ///
+    /// # Panics
+    /// * `"unauthorized"` — caller is not the admin.
+    /// * `"invalid_config"` — `vest_share_bps` exceeds 10000.
+    pub fn set_creator_vesting_config(
+        env: Env,
+        caller: Address,
+        vest_share_bps: u32,
+        vesting_period_seconds: u64,
+    ) {
+        match fee::set_creator_vesting_config(&env, caller, vest_share_bps, vesting_period_seconds)
+        {
+            Ok(()) => {}
+            Err(fee::FeeError::Unauthorized) => panic!("unauthorized"),
+            Err(fee::FeeError::InvalidConfig) => panic!("invalid_config"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Claim whatever portion of a creator's vesting schedule has unlocked
+    /// since their last claim. Only the allocated creator may claim.
+    ///
+    /// Returns the claimed amount (in stroops).
+    ///
+    /// # Panics
+    /// * `"no_vesting_schedule"` — no schedule exists for this (creator, event_id).
+    /// * `"already_settled"` — the schedule already reached a terminal state.
+    /// * `"nothing_to_claim"` — no additional amount has unlocked yet.
+    /// * `"transfer_failed"` — the payout transfer failed.
+    pub fn claim_vested_revenue(env: Env, creator: Address, event_id: u64) -> i128 {
+        match fee::claim_vested_revenue(&env, creator, event_id) {
+            Ok(amount) => amount,
+            Err(fee::FeeError::NoVestingSchedule) => panic!("no_vesting_schedule"),
+            Err(fee::FeeError::AlreadySettled) => panic!("already_settled"),
+            Err(fee::FeeError::NothingToClaim) => panic!("nothing_to_claim"),
+            Err(fee::FeeError::TransferFailed) => panic!("transfer_failed"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Forfeit the unclaimed remainder of a creator's vesting schedule to
+    /// treasury — e.g. when the event's finalization is later invalidated.
+    /// Only the admin may call this.
+    ///
+    /// Returns the forfeited amount (in stroops).
+    ///
+    /// # Panics
+    /// * `"unauthorized"` — caller is not the admin.
+    /// * `"no_vesting_schedule"` — no schedule exists for this (creator, event_id).
+    /// * `"already_settled"` — the schedule already reached a terminal state.
+    /// * `"transfer_failed"` — the treasury sweep transfer failed.
+    pub fn forfeit_creator_vesting(
+        env: Env,
+        caller: Address,
+        creator: Address,
+        event_id: u64,
+    ) -> i128 {
+        match fee::forfeit_creator_vesting(&env, caller, creator, event_id) {
+            Ok(amount) => amount,
+            Err(fee::FeeError::Unauthorized) => panic!("unauthorized"),
+            Err(fee::FeeError::NoVestingSchedule) => panic!("no_vesting_schedule"),
+            Err(fee::FeeError::AlreadySettled) => panic!("already_settled"),
+            Err(fee::FeeError::TransferFailed) => panic!("transfer_failed"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Return a creator's vesting schedule for an event.
+    ///
+    /// # Panics
+    /// * `"no_vesting_schedule"` — no schedule exists for this (creator, event_id).
+    pub fn get_creator_vesting_schedule(
+        env: Env,
+        creator: Address,
+        event_id: u64,
+    ) -> CreatorVestingSchedule {
+        match fee::get_creator_vesting_schedule(&env, creator, event_id) {
+            Some(schedule) => schedule,
+            None => panic!("no_vesting_schedule"),
         }
     }
 
@@ -1090,7 +1201,12 @@ impl CreatorEventManagerContract {
     /// * `"unauthorized"` — caller is not the admin.
     /// * `"invalid_oracle_config"` — `min_sources` is `0` or exceeds the
     ///   number of sources, or `sources` contains a duplicate address.
-    pub fn configure_oracle_sources(env: Env, caller: Address, sources: Vec<Address>, min_sources: u32) {
+    pub fn configure_oracle_sources(
+        env: Env,
+        caller: Address,
+        sources: Vec<Address>,
+        min_sources: u32,
+    ) {
         match oracle::configure_oracle_sources(&env, caller, sources, min_sources) {
             Ok(()) => {}
             Err(oracle::OracleError::Unauthorized) => panic!("unauthorized"),
