@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useWallet } from "@/context/WalletContext";
 import { MobileMenu } from "./header/MobileMenu";
-import { NavLinks } from "./header/NavLinks";
+import { NavLinks } from "./header/NavLinksComponent";
 import { UserWalletControls } from "./header/UserWalletControls";
 import { isActivePath } from "./header/navLinks";
 
