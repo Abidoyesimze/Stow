@@ -4,6 +4,18 @@ import Footer from "@/component/Footer";
 import Header from "@/component/Header";
 import PageBackground from "@/component/PageBackground";
 
+function getContractId(value: string | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : "Not configured";
+}
+
+const PREDICTION_CONTRACT_ID = getContractId(
+  process.env.NEXT_PUBLIC_PREDICTION_CONTRACT,
+);
+const REWARD_CONTRACT_ID = getContractId(
+  process.env.NEXT_PUBLIC_REWARD_CONTRACT,
+);
+
 const CONTRACT_MODULES = [
   {
     name: "Market",
@@ -50,13 +62,13 @@ const CONTRACT_MODULES = [
 const DEPLOYED_ADDRESSES = [
   {
     network: "Testnet",
-    contractId: "CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
-    status: "Active",
+    contractId: PREDICTION_CONTRACT_ID,
+    status: PREDICTION_CONTRACT_ID === "Not configured" ? "Pending" : "Active",
   },
   {
     network: "Mainnet",
-    contractId: "TBD",
-    status: "Pending",
+    contractId: REWARD_CONTRACT_ID,
+    status: REWARD_CONTRACT_ID === "Not configured" ? "Pending" : "Active",
   },
 ];
 
