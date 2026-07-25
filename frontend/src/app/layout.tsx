@@ -8,6 +8,7 @@ import { WalletProvider } from "@/context/WalletContext";
 import { CreatorEventsProvider } from "@/context/CreatorEventsContext";
 import { ToastProvider } from "@/context/ToastContext";
 import { ConfirmProvider } from "@/context/ConfirmContext";
+import { FavoritesProvider } from "@/context/FavoritesContext";
 
 import "./globals.css";
 
@@ -88,24 +89,26 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className="font-sans antialiased bg-[#141824] text-white">
         <WalletProvider>
-          <CreatorEventsProvider>
-            <ToastProvider>
-              <ConfirmProvider>
-                <Suspense fallback={null}>
-                  <RouteProgress />
-                </Suspense>
-                <PwaManager />
-                <a href="#main-content" className="skip-link">
-                  Skip to main content
-                </a>
-                <div id="main-content" tabIndex={-1}>
-                  <Suspense fallback={<StandardPageLoadingSkeleton />}>
-                    {children}
+          <FavoritesProvider>
+            <CreatorEventsProvider>
+              <ToastProvider>
+                <ConfirmProvider>
+                  <Suspense fallback={null}>
+                    <RouteProgress />
                   </Suspense>
-                </div>
-              </ConfirmProvider>
-            </ToastProvider>
-          </CreatorEventsProvider>
+                  <PwaManager />
+                  <a href="#main-content" className="skip-link">
+                    Skip to main content
+                  </a>
+                  <div id="main-content" tabIndex={-1}>
+                    <Suspense fallback={<StandardPageLoadingSkeleton />}>
+                      {children}
+                    </Suspense>
+                  </div>
+                </ConfirmProvider>
+              </ToastProvider>
+            </CreatorEventsProvider>
+          </FavoritesProvider>
         </WalletProvider>
       </body>
     </html>
