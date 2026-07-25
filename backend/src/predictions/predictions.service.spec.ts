@@ -5,6 +5,7 @@ import {
   ConflictException,
   ForbiddenException,
   NotFoundException,
+  HttpStatus,
 } from '@nestjs/common';
 import { Repository, ObjectLiteral } from 'typeorm';
 import { PredictionsService } from './predictions.service';
@@ -13,6 +14,8 @@ import { Market } from '../markets/entities/market.entity';
 import { PredictionStatus } from './dto/list-my-predictions.dto';
 import { User } from '../users/entities/user.entity';
 import { SorobanService } from '../soroban/soroban.service';
+import { SlippageCheckerService } from './services/slippage-checker.service';
+import { SlippageExceededException } from './exceptions/slippage-exceeded.exception';
 
 type MockRepo<T extends ObjectLiteral> = jest.Mocked<
   Pick<Repository<T>, 'findOne' | 'create' | 'save' | 'findAndCount' | 'find'>
@@ -62,6 +65,7 @@ describe('PredictionsService', () => {
   let mockPredictionsRepo: MockRepo<Prediction>;
   let mockMarketsRepo: MockRepo<Market>;
   let mockSoroban: jest.Mocked<SorobanService>;
+  let mockSlippageChecker: jest.Mocked<SlippageCheckerService>;
   let submitPrediction: jest.SpyInstance;
   let qbMock: {
     update: jest.Mock;
@@ -99,11 +103,19 @@ describe('PredictionsService', () => {
     };
 
     mockSoroban = {
-      submitPrediction: jest.fn().mockResolvedValue({ tx_hash: 'abc123' }),
+      submitPrediction: jest.fn().mockResolvedValue({
+        tx_hash: 'abc123',
+        realized_price: '5000000',
+        shares_received: '2000000',
+      }),
       claimPayout: jest.fn(),
       getEvents: jest.fn(),
     } as unknown as jest.Mocked<SorobanService>;
     submitPrediction = jest.spyOn(mockSoroban, 'submitPrediction');
+
+    mockSlippageChecker = {
+      checkSlippage: jest.fn(),
+    } as unknown as jest.Mocked<SlippageCheckerService>;
 
     const mockDataSource = {
       transaction: jest.fn((cb: (manager: unknown) => Promise<Prediction>) => {
@@ -129,6 +141,7 @@ describe('PredictionsService', () => {
         { provide: getRepositoryToken(Market), useValue: mockMarketsRepo },
         { provide: getRepositoryToken(User), useValue: {} },
         { provide: SorobanService, useValue: mockSoroban },
+        { provide: SlippageCheckerService, useValue: mockSlippageChecker },
         { provide: getDataSourceToken(), useValue: mockDataSource },
       ],
     }).compile();
@@ -137,7 +150,7 @@ describe('PredictionsService', () => {
   });
 
   describe('submit', () => {
-    it('returns prediction on happy path', async () => {
+    it('returns prediction with realized price and shares on happy path', async () => {
       const user = makeUser();
       const market = makeMarket();
       mockMarketsRepo.findOne.mockResolvedValue(market);
@@ -152,10 +165,14 @@ describe('PredictionsService', () => {
         user,
       );
 
-      // tx_hash 'abc123' in the result proves SorobanService.submitPrediction was called.
+      // Check response structure includes realized_price and shares_received
       expect(result).toMatchObject({
-        tx_hash: 'abc123',
-        chosen_outcome: 'Yes',
+        prediction: {
+          tx_hash: 'abc123',
+          chosen_outcome: 'Yes',
+        },
+        realized_price: '5000000',
+        shares_received: '2000000',
       });
       expect(qbMock.setParameter).toHaveBeenCalledWith(
         'stakeAmount',
@@ -271,6 +288,168 @@ describe('PredictionsService', () => {
         ),
       ).rejects.toThrow(ConflictException);
       expect(mockSoroban.submitPrediction).not.toHaveBeenCalled();
+    });
+
+    it('accepts prediction when slippage is within maxPrice tolerance', async () => {
+      const user = makeUser();
+      const market = makeMarket();
+      mockMarketsRepo.findOne.mockResolvedValue(market);
+      mockPredictionsRepo.findOne.mockResolvedValue(null);
+
+      const result = await service.submit(
+        {
+          market_id: market.id,
+          chosen_outcome: 'Yes',
+          stake_amount_stroops: '10000000',
+          maxPrice: '6000000', // realized_price (5000000) is under this
+        },
+        user,
+      );
+
+      expect(result.realized_price).toBe('5000000');
+      expect(mockSlippageChecker.checkSlippage).toHaveBeenCalledWith(
+        '6000000',
+        undefined,
+        '5000000',
+        '2000000',
+      );
+    });
+
+    it('accepts prediction when slippage is within minSharesOut tolerance', async () => {
+      const user = makeUser();
+      const market = makeMarket();
+      mockMarketsRepo.findOne.mockResolvedValue(market);
+      mockPredictionsRepo.findOne.mockResolvedValue(null);
+
+      const result = await service.submit(
+        {
+          market_id: market.id,
+          chosen_outcome: 'Yes',
+          stake_amount_stroops: '10000000',
+          minSharesOut: '1500000', // shares_received (2000000) is above this
+        },
+        user,
+      );
+
+      expect(result.shares_received).toBe('2000000');
+      expect(mockSlippageChecker.checkSlippage).toHaveBeenCalledWith(
+        undefined,
+        '1500000',
+        '5000000',
+        '2000000',
+      );
+    });
+
+    it('rejects prediction when price exceeds maxPrice', async () => {
+      const user = makeUser();
+      const market = makeMarket();
+      mockMarketsRepo.findOne.mockResolvedValue(market);
+      mockPredictionsRepo.findOne.mockResolvedValue(null);
+      mockSlippageChecker.checkSlippage.mockImplementation(() => {
+        throw new SlippageExceededException('4000000', '5000000', '0', '2000000');
+      });
+
+      await expect(
+        service.submit(
+          {
+            market_id: market.id,
+            chosen_outcome: 'Yes',
+            stake_amount_stroops: '10000000',
+            maxPrice: '4000000',
+          },
+          user,
+        ),
+      ).rejects.toThrow(SlippageExceededException);
+      expect(mockSlippageChecker.checkSlippage).toHaveBeenCalled();
+    });
+
+    it('rejects prediction when shares fall below minSharesOut', async () => {
+      const user = makeUser();
+      const market = makeMarket();
+      mockMarketsRepo.findOne.mockResolvedValue(market);
+      mockPredictionsRepo.findOne.mockResolvedValue(null);
+      mockSlippageChecker.checkSlippage.mockImplementation(() => {
+        throw new SlippageExceededException('0', '5000000', '3000000', '2000000');
+      });
+
+      await expect(
+        service.submit(
+          {
+            market_id: market.id,
+            chosen_outcome: 'Yes',
+            stake_amount_stroops: '10000000',
+            minSharesOut: '3000000',
+          },
+          user,
+        ),
+      ).rejects.toThrow(SlippageExceededException);
+      expect(mockSlippageChecker.checkSlippage).toHaveBeenCalled();
+    });
+
+    it('checks both maxPrice and minSharesOut slippage bounds', async () => {
+      const user = makeUser();
+      const market = makeMarket();
+      mockMarketsRepo.findOne.mockResolvedValue(market);
+      mockPredictionsRepo.findOne.mockResolvedValue(null);
+
+      await service.submit(
+        {
+          market_id: market.id,
+          chosen_outcome: 'Yes',
+          stake_amount_stroops: '10000000',
+          maxPrice: '6000000',
+          minSharesOut: '1500000',
+        },
+        user,
+      );
+
+      expect(mockSlippageChecker.checkSlippage).toHaveBeenCalledWith(
+        '6000000',
+        '1500000',
+        '5000000',
+        '2000000',
+      );
+    });
+
+    it('does not check slippage when bounds are not provided', async () => {
+      const user = makeUser();
+      const market = makeMarket();
+      mockMarketsRepo.findOne.mockResolvedValue(market);
+      mockPredictionsRepo.findOne.mockResolvedValue(null);
+
+      await service.submit(
+        {
+          market_id: market.id,
+          chosen_outcome: 'Yes',
+          stake_amount_stroops: '10000000',
+        },
+        user,
+      );
+
+      expect(mockSlippageChecker.checkSlippage).not.toHaveBeenCalled();
+    });
+
+    it('returns default zeros when contract returns undefined price/shares', async () => {
+      const user = makeUser();
+      const market = makeMarket();
+      mockMarketsRepo.findOne.mockResolvedValue(market);
+      mockPredictionsRepo.findOne.mockResolvedValue(null);
+      mockSoroban.submitPrediction.mockResolvedValue({
+        tx_hash: 'abc123',
+        // No realized_price or shares_received
+      });
+
+      const result = await service.submit(
+        {
+          market_id: market.id,
+          chosen_outcome: 'Yes',
+          stake_amount_stroops: '10000000',
+        },
+        user,
+      );
+
+      expect(result.realized_price).toBe('0');
+      expect(result.shares_received).toBe('0');
     });
   });
 

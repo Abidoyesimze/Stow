@@ -1,4 +1,4 @@
-use soroban_sdk::{token, Address, Env, Vec};
+use soroban_sdk::{symbol_short, token, Address, Env, Vec};
 
 use crate::config::{self, PERSISTENT_BUMP, PERSISTENT_THRESHOLD};
 use crate::errors::InsightArenaError;
@@ -369,5 +369,124 @@ pub fn get_treasury_balance(env: &Env) -> i128 {
     env.storage()
         .persistent()
         .get(&DataKey::Treasury)
+        .unwrap_or(0)
+}
+
+// ── Slashed-funds insurance pool ─────────────────────────────────────────────
+
+fn emit_insurance_pool_contribution(env: &Env, amount: i128) {
+    env.events()
+        .publish((symbol_short!("ins"), symbol_short!("contrib")), amount);
+}
+
+fn emit_insurance_pool_draw(env: &Env, admin: &Address, to: &Address, amount: i128) {
+    env.events().publish(
+        (symbol_short!("ins"), symbol_short!("draw")),
+        (admin.clone(), to.clone(), amount),
+    );
+}
+
+/// Split a slashed bond/forfeiture between the insurance pool and the
+/// protocol treasury according to the configured `insurance_pool_share_bps`,
+/// crediting each accounting balance. Used wherever slashed funds from bad
+/// actors (failed disputes/appeals) are forfeited, so a reserve is built up
+/// to cover future accounting/settlement shortfalls instead of the full
+/// amount being redistributed immediately.
+pub(crate) fn slash_funds(env: &Env, amount: i128) -> Result<(), InsightArenaError> {
+    if amount <= 0 {
+        return Ok(());
+    }
+
+    let mut cfg = config::get_config(env)?;
+
+    let insurance_share = amount
+        .checked_mul(cfg.insurance_pool_share_bps as i128)
+        .ok_or(InsightArenaError::Overflow)?
+        .checked_div(10_000)
+        .ok_or(InsightArenaError::Overflow)?;
+    let treasury_share = amount
+        .checked_sub(insurance_share)
+        .ok_or(InsightArenaError::Overflow)?;
+
+    if insurance_share > 0 {
+        cfg.insurance_pool_balance = cfg
+            .insurance_pool_balance
+            .checked_add(insurance_share)
+            .ok_or(InsightArenaError::Overflow)?;
+        env.storage().persistent().set(&DataKey::Config, &cfg);
+        config::extend_config_ttl(env);
+        emit_insurance_pool_contribution(env, insurance_share);
+    }
+
+    add_to_treasury_balance(env, treasury_share);
+
+    Ok(())
+}
+
+/// Draw `amount` from the insurance pool to `to`, to cover a documented
+/// accounting/settlement shortfall. Caller must be the platform admin
+/// (governance).
+///
+/// # Errors
+/// - `InvalidInput` when `amount <= 0`.
+/// - `Unauthorized` when caller is not the configured admin.
+/// - `InsufficientFunds` when `amount` exceeds the tracked pool balance
+///   (over-draw prevention).
+/// - `EscrowEmpty` if the live token balance cannot cover the transfer.
+pub fn draw_insurance_pool(
+    env: Env,
+    admin: Address,
+    to: Address,
+    amount: i128,
+) -> Result<(), InsightArenaError> {
+    if amount <= 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    admin.require_auth();
+    let mut cfg = config::get_config(&env)?;
+    if admin != cfg.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    if amount > cfg.insurance_pool_balance {
+        return Err(InsightArenaError::InsufficientFunds);
+    }
+
+    let client = token::Client::new(&env, &cfg.xlm_token);
+    let contract = env.current_contract_address();
+    if client.balance(&contract) < amount {
+        return Err(InsightArenaError::EscrowEmpty);
+    }
+
+    client.transfer(&contract, &to, &amount);
+
+    cfg.insurance_pool_balance = cfg
+        .insurance_pool_balance
+        .checked_sub(amount)
+        .ok_or(InsightArenaError::Overflow)?;
+    cfg.insurance_pool_payouts_total = cfg
+        .insurance_pool_payouts_total
+        .checked_add(amount)
+        .ok_or(InsightArenaError::Overflow)?;
+    env.storage().persistent().set(&DataKey::Config, &cfg);
+    config::extend_config_ttl(&env);
+
+    emit_insurance_pool_draw(&env, &admin, &to, amount);
+
+    Ok(())
+}
+
+/// Return the current insurance pool balance (stroops).
+pub fn get_insurance_pool_balance(env: &Env) -> i128 {
+    config::get_config_readonly(env)
+        .map(|c| c.insurance_pool_balance)
+        .unwrap_or(0)
+}
+
+/// Return the cumulative total ever paid out of the insurance pool (stroops).
+pub fn get_insurance_pool_payouts_total(env: &Env) -> i128 {
+    config::get_config_readonly(env)
+        .map(|c| c.insurance_pool_payouts_total)
         .unwrap_or(0)
 }

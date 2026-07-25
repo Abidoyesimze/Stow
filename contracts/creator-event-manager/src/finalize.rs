@@ -14,11 +14,12 @@ use soroban_sdk::{Address, Env, Symbol, Vec};
 
 use crate::admin;
 use crate::event::{self, EventError};
+use crate::fee;
 use crate::leaderboard;
 use crate::storage::{self, TTL_LEDGERS};
 use crate::storage_types::{
-    DataKey, FinalizationBond, PrizeAllocation, CLAIM_PERIOD_SECONDS, FINALIZATION_BOND_STROOPS,
-    FINALIZATION_CHALLENGE_WINDOW_SECONDS,
+    CreatorVestingSchedule, DataKey, FinalizationBond, PrizeAllocation, CLAIM_PERIOD_SECONDS,
+    FINALIZATION_BOND_STROOPS, FINALIZATION_CHALLENGE_WINDOW_SECONDS,
 };
 use crate::token::TokenHelper;
 
@@ -191,12 +192,49 @@ pub fn finalize_event(
         payouts.push_back((entry.user.clone(), amount));
     }
 
-    // Refund the unallocated percentage + integer-division dust to the creator
-    // in a single transfer. With zero participants this is the full prize pool.
+    // The unallocated percentage + integer-division dust goes to the creator
+    // (the full prize pool with zero participants). Per the configured
+    // creator-vesting share, a portion is paid immediately and the rest is
+    // staged into a linear vesting schedule instead of transferred outright,
+    // giving the creator an ongoing stake in the event's dispute outcome.
     let refund_to_creator = prize_pool - total_distributed;
     if refund_to_creator > 0 {
-        TokenHelper::distribute_winnings(env, &xlm_token, &event.creator, refund_to_creator)
-            .map_err(|_| EventError::TransferFailed)?;
+        let vest_share_bps = fee::get_creator_vest_share_bps(env) as i128;
+        let vested_amount = refund_to_creator * vest_share_bps / 10_000;
+        let immediate_amount = refund_to_creator - vested_amount;
+
+        if immediate_amount > 0 {
+            TokenHelper::distribute_winnings(env, &xlm_token, &event.creator, immediate_amount)
+                .map_err(|_| EventError::TransferFailed)?;
+        }
+
+        if vested_amount > 0 {
+            let vesting_period = fee::get_creator_vesting_period_seconds(env);
+            let schedule = CreatorVestingSchedule {
+                creator: event.creator.clone(),
+                event_id,
+                total_amount: vested_amount,
+                claimed_amount: 0,
+                forfeited_amount: 0,
+                start_time: now,
+                unlock_time: now.saturating_add(vesting_period),
+                settled: false,
+            };
+            storage::set_creator_vesting(env, &schedule);
+
+            env.events().publish(
+                (
+                    Symbol::new(env, "creator"),
+                    Symbol::new(env, "vesting_scheduled"),
+                ),
+                (
+                    event_id,
+                    event.creator.clone(),
+                    vested_amount,
+                    schedule.unlock_time,
+                ),
+            );
+        }
     }
 
     // Mark finalized and persist.

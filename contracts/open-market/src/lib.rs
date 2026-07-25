@@ -581,6 +581,73 @@ impl InsightArenaContract {
         escrow::transfer_fee(&env, &admin, &to, amount)
     }
 
+    // ── Slashed-funds insurance pool ─────────────────────────────────────────
+
+    /// Update the share (bps) of every slashed bond routed into the
+    /// insurance pool. Caller must be the current admin.
+    pub fn set_insurance_pool_share_bps(
+        env: Env,
+        admin: Address,
+        new_share_bps: u32,
+    ) -> Result<(), InsightArenaError> {
+        config::set_insurance_pool_share_bps(&env, admin, new_share_bps)
+    }
+
+    /// Draw `amount` from the insurance pool to `to`, to cover a documented
+    /// accounting/settlement shortfall. Caller must be the current admin.
+    pub fn draw_insurance_pool(
+        env: Env,
+        admin: Address,
+        to: Address,
+        amount: i128,
+    ) -> Result<(), InsightArenaError> {
+        escrow::draw_insurance_pool(env, admin, to, amount)
+    }
+
+    /// Return the current insurance pool balance (stroops).
+    pub fn get_insurance_pool_balance(env: Env) -> i128 {
+        escrow::get_insurance_pool_balance(&env)
+    }
+
+    /// Return the cumulative total ever paid out of the insurance pool.
+    pub fn get_insurance_pool_payouts_total(env: Env) -> i128 {
+        escrow::get_insurance_pool_payouts_total(&env)
+    }
+
+    // ── Per-outcome liquidity caps ────────────────────────────────────────────
+
+    /// Update the global maximum liquidity a single outcome's AMM reserve
+    /// may hold (`0` = unlimited). Caller must be the current admin.
+    pub fn set_max_liquidity_per_outcome(
+        env: Env,
+        admin: Address,
+        new_cap: i128,
+    ) -> Result<(), InsightArenaError> {
+        config::set_max_liquidity_per_outcome(&env, admin, new_cap)
+    }
+
+    /// Set a per-market override for the maximum liquidity a single
+    /// outcome's AMM reserve may hold (`0` clears the override). Caller
+    /// must be the current admin.
+    pub fn set_market_liquidity_cap(
+        env: Env,
+        admin: Address,
+        market_id: u64,
+        cap: i128,
+    ) -> Result<(), InsightArenaError> {
+        market::set_market_liquidity_cap(&env, admin, market_id, cap)
+    }
+
+    /// Return the remaining liquidity capacity for `outcome` in `market_id`,
+    /// or `None` if no cap applies (unlimited).
+    pub fn get_remaining_outcome_capacity(
+        env: Env,
+        market_id: u64,
+        outcome: Symbol,
+    ) -> Result<Option<i128>, InsightArenaError> {
+        liquidity::get_remaining_outcome_capacity(&env, market_id, outcome)
+    }
+
     // ── Invite ────────────────────────────────────────────────────────────────
 
     /// Generate a unique 8-character invite code for a private market.

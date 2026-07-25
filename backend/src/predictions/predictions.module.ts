@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { Prediction } from './entities/prediction.entity';
 import { PredictionsService } from './predictions.service';
 import { PredictionsController } from './predictions.controller';
+import { SlippageCheckerService } from './services/slippage-checker.service';
 import { UsersModule } from '../users/users.module';
 import { MarketsModule } from '../markets/markets.module';
 import { SorobanModule } from '../soroban/soroban.module';
@@ -19,7 +20,7 @@ import { Market } from '../markets/entities/market.entity';
     CommonModule,
   ],
   controllers: [PredictionsController],
-  providers: [PredictionsService],
+  providers: [PredictionsService, SlippageCheckerService],
   exports: [PredictionsService],
 })
-export class PredictionsModule {}
+export class PredictionsModule { }

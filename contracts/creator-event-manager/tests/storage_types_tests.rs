@@ -239,6 +239,7 @@ fn make_match(env: &Env, match_id: u64, event_id: u64, match_time: u64) -> Match
         String::from_str(env, "Team Beta"),
         match_time,
         1u32,
+        0,
     )
 }
 
@@ -332,6 +333,7 @@ fn test_match_validation_empty_team_a() {
         String::from_str(&env, "Beta"),
         0,
         1u32,
+        0,
     );
     assert!(m.validate().is_err());
 }
@@ -346,6 +348,7 @@ fn test_match_validation_empty_team_b() {
         String::from_str(&env, ""),
         0,
         1u32,
+        0,
     );
     assert!(m.validate().is_err());
 }
@@ -354,7 +357,7 @@ fn test_match_validation_empty_team_b() {
 fn test_match_validation_same_teams() {
     let env = Env::default();
     let name = String::from_str(&env, "Same");
-    let m = Match::new(1, 100, name.clone(), name, 0, 1u32);
+    let m = Match::new(1, 100, name.clone(), name, 0, 1u32, 0);
     assert!(m.validate().is_err());
 }
 
