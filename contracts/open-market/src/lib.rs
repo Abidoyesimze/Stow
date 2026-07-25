@@ -30,8 +30,8 @@ pub use crate::storage_types::{
     ConditionalChain, ConditionalMarket, CreatorLeaderboardEntry, CreatorStats, DataKey,
     DependencyStatus, Dispute, Event, EventMatch, EventPrediction, FeeTier, FeeTierConfig,
     InviteCode, LPPosition, LeaderboardEntry, LeaderboardSnapshot, LiquidityPool, Market,
-    MarketFeeInfo, MarketStats, PlatformStats, Prediction, Season, SwapRecord, UserProfile,
-    VolatilityState, Winner,
+    MarketFeeInfo, MarketStats, PlatformStats, Prediction, PriceAccumulator, PriceObservation,
+    Season, SwapRecord, UserProfile, VolatilityState, Winner,
 };
 
 use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, Vec};
@@ -772,6 +772,18 @@ impl InsightArenaContract {
         market_id: u64,
     ) -> Result<i128, InsightArenaError> {
         liquidity::collect_lp_fees(&env, provider, market_id)
+    }
+
+    /// Compute the time-weighted average price of `outcome` over the trailing
+    /// `window` seconds. See `liquidity::TWAP_RING_BUFFER_CAPACITY` for the
+    /// maximum window the ring buffer can currently honor.
+    pub fn get_twap(
+        env: Env,
+        market_id: u64,
+        outcome: Symbol,
+        window: u64,
+    ) -> Result<i128, InsightArenaError> {
+        liquidity::get_twap(&env, market_id, outcome, window)
     }
 
     // ── Dynamic Swap Fee ──────────────────────────────────────────────────────

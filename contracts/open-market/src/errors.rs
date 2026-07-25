@@ -169,4 +169,18 @@ pub enum InsightArenaError {
     // ── Batch Operations ──────────────────────────────────────────────────────
     /// The number of items in a batch operation exceeds the maximum allowed size.
     BatchSizeExceeded = 107,
+
+    // ── TWAP Price Oracle ─────────────────────────────────────────────────────
+    /// `get_twap` was called with a zero-second window, which cannot produce a
+    /// meaningful average.
+    TwapEmptyWindow = 108,
+    /// Not enough retained price history to cover the requested window: either
+    /// this outcome has never had a price-changing operation, or the window's
+    /// start predates the oldest observation still held in the ring buffer
+    /// (older samples were evicted by wraparound). Raised instead of silently
+    /// truncating the window or dividing by an under-covered interval.
+    TwapInsufficientHistory = 109,
+    /// The elapsed time between the window's start and now collapsed to zero
+    /// seconds, which would require dividing the price integral by zero.
+    TwapDivideByZero = 110,
 }
