@@ -5,7 +5,8 @@ use crate::errors::InsightArenaError;
 use crate::escrow;
 use crate::reputation;
 use crate::storage_types::{
-    ConditionalMarket, DataKey, Market, MarketStats, PlatformStats, Prediction, UserProfile,
+    ConditionalMarket, DataKey, DependencyStatus, Market, MarketStats, PlatformStats, Prediction,
+    UserProfile,
 };
 
 // ── Params struct ─────────────────────────────────────────────────────────────
@@ -157,6 +158,16 @@ fn emit_market_cancelled(env: &Env, market_id: u64, caller: &Address) {
     );
 }
 
+/// Emitted when `create_market` rejects an attempt for insufficient reputation.
+/// Carries the attempted creator's address so indexers/clients can surface why
+/// the transaction reverted with `InsufficientReputation`.
+fn emit_market_creation_denied(env: &Env, creator: &Address) {
+    env.events().publish(
+        (symbol_short!("mkt"), symbol_short!("rep_den")),
+        creator.clone(),
+    );
+}
+
 pub fn emit_market_resolved(env: &Env, market_id: u64, resolved_outcome: Symbol) {
     env.events().publish(
         (symbol_short!("mkt"), symbol_short!("reslvd")),
@@ -209,9 +220,14 @@ fn has_duplicate_outcomes(outcomes: &Vec<Symbol>) -> bool {
 /// 3. `end_time` must be strictly after the current ledger timestamp
 /// 4. `resolution_time` must be >= `end_time`
 /// 5. At least two distinct outcomes required
-/// 6. `category` must be in the admin-managed whitelist
-/// 7. `creator_fee_bps` must not exceed the platform cap
-/// 8. `min_stake` >= platform minimum; `max_stake` >= `min_stake`
+/// 6. Creator's reputation score must meet the governance-configured
+///    `Config::min_creator_reputation` threshold, unless the creator is on
+///    the trusted-creator allowlist — reverts with `InsufficientReputation`
+///    and emits a `MarketCreationDenied` event (with the attempted creator's
+///    address) otherwise.
+/// 7. `category` must be in the admin-managed whitelist
+/// 8. `creator_fee_bps` must not exceed the platform cap
+/// 9. `min_stake` >= platform minimum; `max_stake` >= `min_stake`
 pub fn create_market(
     env: &Env,
     creator: Address,
@@ -242,18 +258,27 @@ pub fn create_market(
         return Err(InsightArenaError::InvalidInput);
     }
 
-    // ── Load config for fee and stake floor checks ────────────────────────────
+    // ── Load config for reputation, fee, and stake floor checks ───────────────
     let cfg = config::get_config(env)?;
+
+    // ── Guard 6: creator reputation must meet the governance threshold ────────
+    // Trusted-creator allowlist bypasses the score check entirely. The denial
+    // event fires before the error so indexers can see who was rejected and why.
+    if !reputation::meets_creation_threshold(env, &creator, cfg.min_creator_reputation) {
+        emit_market_creation_denied(env, &creator);
+        return Err(InsightArenaError::InsufficientReputation);
+    }
+
     if !load_categories(env).contains(params.category.clone()) {
         return Err(InsightArenaError::InvalidInput);
     }
 
-    // ── Guard 6: creator fee must not exceed the platform cap ─────────────────
+    // ── Guard 7: creator fee must not exceed the platform cap ─────────────────
     if params.creator_fee_bps > cfg.max_creator_fee_bps {
         return Err(InsightArenaError::InvalidFee);
     }
 
-    // ── Guard 7: stake bounds ─────────────────────────────────────────────────
+    // ── Guard 8: stake bounds ─────────────────────────────────────────────────
     if params.min_stake < cfg.min_stake_xlm {
         return Err(InsightArenaError::StakeTooLow);
     }
@@ -357,6 +382,7 @@ pub fn list_markets(env: &Env, start: u64, limit: u32) -> Vec<Market> {
 }
 
 pub fn add_category(env: &Env, admin: Address, category: Symbol) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(env)?;
     require_admin(env, &admin)?;
 
     let mut categories = load_categories(env);
@@ -373,6 +399,7 @@ pub fn remove_category(
     admin: Address,
     category: Symbol,
 ) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(env)?;
     require_admin(env, &admin)?;
 
     let mut categories = load_categories(env);
@@ -437,6 +464,8 @@ pub fn get_markets_by_category(env: &Env, category: Symbol, start: u64, limit: u
 /// On success the market's `is_closed` flag is set to `true`, the record is
 /// re-saved to persistent storage, and a `MarketClosed` event is emitted.
 pub fn close_market(env: &Env, caller: Address, market_id: u64) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(env)?;
+
     // ── Guard 1: market must exist ────────────────────────────────────────────
     let mut market = get_market(env, market_id)?;
 
@@ -601,6 +630,8 @@ pub fn extend_market_end_time(
 ///   corresponding `Prediction` record is loaded and `escrow::refund` is called.
 /// - A `MarketCancelled` event is emitted.
 pub fn cancel_market(env: &Env, caller: Address, market_id: u64) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(env)?;
+
     // ── Guard 1: market must exist ────────────────────────────────────────────
     let mut market = get_market(env, market_id)?;
 
@@ -665,18 +696,22 @@ pub fn cancel_market(env: &Env, caller: Address, market_id: u64) -> Result<(), I
 /// 1. `oracle` address must provide valid cryptographic authorisation.
 /// 2. `oracle` must match the `oracle_address` stored in global configuration.
 /// 3. Market must exist in persistent storage.
-/// 4. `current_time >= market.resolution_time` — resolution window must be open.
-/// 5. `market.is_resolved == false` — prevents double-resolution.
-/// 6. `market.is_cancelled == false` — a cancelled market already refunded all
+/// 4. If this market is a conditional child, its immediate parent must
+///    already be resolved — reverts with `ParentNotResolved` otherwise, so a
+///    chain can never settle out of order.
+/// 5. `current_time >= market.resolution_time` — resolution window must be open.
+/// 6. `market.is_resolved == false` — prevents double-resolution.
+/// 7. `market.is_cancelled == false` — a cancelled market already refunded all
 ///    stakes, so resolving it would reopen the payout path and let predictors
 ///    extract funds a second time.
-/// 7. `resolved_outcome` must be one of the symbols in `market.outcome_options`.
+/// 8. `resolved_outcome` must be one of the symbols in `market.outcome_options`.
 pub fn resolve_market(
     env: Env,
     oracle: Address,
     market_id: u64,
     resolved_outcome: Symbol,
 ) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(&env)?;
     oracle.require_auth();
 
     let cfg = config::get_config(&env)?;
@@ -685,6 +720,17 @@ pub fn resolve_market(
     }
 
     let mut market = get_market(&env, market_id)?;
+
+    if let Some(parent_market_id) = env
+        .storage()
+        .persistent()
+        .get::<_, u64>(&DataKey::ConditionalParent(market_id))
+    {
+        let parent_market = get_market(&env, parent_market_id)?;
+        if !parent_market.is_resolved {
+            return Err(InsightArenaError::ParentNotResolved);
+        }
+    }
 
     let now = env.ledger().timestamp();
     if now < market.resolution_time {
@@ -774,6 +820,7 @@ pub fn create_conditional_market(
     required_outcome: Symbol,
     params: CreateMarketParams,
 ) -> Result<u64, InsightArenaError> {
+    config::ensure_not_paused(env)?;
     validate_conditional_params(env, parent_market_id, &required_outcome, &params)?;
 
     let parent_depth = calculate_conditional_depth(env, parent_market_id);
@@ -926,6 +973,42 @@ pub fn calculate_conditional_depth(env: &Env, market_id: u64) -> u32 {
         cursor = parent_id;
     }
     depth
+}
+
+/// Return the conditional-dependency status for a market: whether it is a
+/// conditional child, its immediate parent (if any), and whether that parent
+/// has resolved. `resolve_market` blocks on `parent_resolved == false`.
+///
+/// Non-conditional (root) markets report `is_conditional: false`,
+/// `parent_market_id: None`, and `parent_resolved: true` — there is no parent
+/// dependency to block resolution.
+pub fn get_dependency_status(
+    env: &Env,
+    market_id: u64,
+) -> Result<DependencyStatus, InsightArenaError> {
+    if !env.storage().persistent().has(&DataKey::Market(market_id)) {
+        return Err(InsightArenaError::MarketNotFound);
+    }
+
+    let parent_market_id = env
+        .storage()
+        .persistent()
+        .get::<_, u64>(&DataKey::ConditionalParent(market_id));
+
+    let (is_conditional, parent_resolved) = match parent_market_id {
+        Some(parent_id) => {
+            let parent_market = get_market(env, parent_id)?;
+            (true, parent_market.is_resolved)
+        }
+        None => (false, true),
+    };
+
+    Ok(DependencyStatus {
+        market_id,
+        is_conditional,
+        parent_market_id,
+        parent_resolved,
+    })
 }
 
 fn validate_conditional_params(

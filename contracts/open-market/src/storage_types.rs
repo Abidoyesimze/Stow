@@ -106,6 +106,27 @@ pub enum DataKey {
     TreasuryBalance,
 }
 
+/// Lifecycle state of a governance proposal, derived from its stored flags and
+/// the current ledger time rather than persisted directly.
+///
+/// `Voting -> Queued -> Executable -> (Executed | Vetoed | Cancelled)`
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProposalState {
+    /// Voting window is still open.
+    Voting,
+    /// Voting passed and `ready_at` has been recorded, but the timelock has not elapsed.
+    Queued,
+    /// The timelock has elapsed; the proposal may now be executed.
+    Executable,
+    /// The proposal's effect has been applied.
+    Executed,
+    /// The proposer or admin withdrew the proposal before execution.
+    Cancelled,
+    /// The guardian vetoed the proposal during the timelock window.
+    Vetoed,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Dispute {
@@ -694,6 +715,23 @@ impl ConditionalMarket {
 pub struct ConditionalChain {
     pub market_ids: Vec<u64>,
     pub depth: u32,
+}
+
+/// Read-only view of a market's conditional-dependency status, returned by
+/// `get_dependency_status`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DependencyStatus {
+    pub market_id: u64,
+    /// True if this market has a `ConditionalParent` entry (i.e. it was
+    /// created via `create_conditional_market`).
+    pub is_conditional: bool,
+    /// The immediate parent's market_id, if any.
+    pub parent_market_id: Option<u64>,
+    /// True when there is no parent, or when the parent has resolved.
+    /// `resolve_market` on this market is blocked with `ParentNotResolved`
+    /// while this is false.
+    pub parent_resolved: bool,
 }
 
 // ── Creator Event Types ───────────────────────────────────────────────────────

@@ -138,4 +138,21 @@ pub enum InsightArenaError {
     // ── Conditional Markets ───────────────────────────────────────────────────
     /// The maximum allowed depth for nested conditional markets has been exceeded.
     ConditionalDepthExceeded = 103,
+    /// A conditional market's parent has not yet been resolved.
+    /// Raised when `resolve_market` is called on a child before its immediate
+    /// parent market has settled.
+    ParentNotResolved = 105,
+
+    // ── Governance Timelock ───────────────────────────────────────────────────
+    /// A passed proposal was queued but its timelock `ready_at` timestamp has not
+    /// yet elapsed. Raised when `execute_proposal` is called too early.
+    TimelockNotElapsed = 104,
+
+    // ── Reputation ────────────────────────────────────────────────────────────
+    /// The creator's reputation score is below the governance-configured
+    /// `Config::min_creator_reputation` and the creator is not present in the
+    /// `DataKey::TrustedCreator` allowlist. Raised by `market::create_market`
+    /// before any market state is persisted; a `MarketCreationDenied` event is
+    /// emitted with the attempted creator's address before this error returns.
+    InsufficientReputation = 105,
 }
