@@ -33,11 +33,22 @@ fn ttl_threshold(max: u32) -> u32 {
 }
 
 pub fn extend_market_ttl(env: &Env, market_id: u64) {
+    let extension = market_ttl_extension_amount(env);
     env.storage().persistent().extend_ttl(
         &DataKey::Market(market_id),
-        ttl_threshold(LEDGER_BUMP_MARKET),
-        LEDGER_BUMP_MARKET,
+        ttl_threshold(extension),
+        extension,
     );
+}
+
+/// Number of ledgers to extend a market's TTL by on each interaction and via
+/// the explicit `market::extend_market_ttl` maintenance entrypoint. Reads the
+/// admin-configurable `Config::market_ttl_extension`, falling back to
+/// `LEDGER_BUMP_MARKET` if the contract has not been initialized yet.
+fn market_ttl_extension_amount(env: &Env) -> u32 {
+    get_config_readonly(env)
+        .map(|c| c.market_ttl_extension)
+        .unwrap_or(LEDGER_BUMP_MARKET)
 }
 
 pub fn extend_prediction_ttl(env: &Env, market_id: u64, predictor: &Address) {
@@ -137,6 +148,12 @@ pub struct Config {
     /// `ProposalType::UpdateMinReputation` (timelocked governance). Defaults
     /// to `0` at initialization, which disables the gate entirely.
     pub min_creator_reputation: u32,
+    /// Number of ledgers a market's persistent-storage entry is extended by
+    /// on each interaction (`market::bump_market`) and by the explicit
+    /// `extend_market_ttl` maintenance entrypoint. Admin-configurable via
+    /// `set_market_ttl_extension`. Defaults to `LEDGER_BUMP_MARKET` (~30
+    /// days) at initialization.
+    pub market_ttl_extension: u32,
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -205,6 +222,7 @@ pub fn initialize(
         is_paused: false,
         timelock_delay: DEFAULT_TIMELOCK_DELAY,
         min_creator_reputation: 0, // gate disabled by default; admin/governance opt in
+        market_ttl_extension: LEDGER_BUMP_MARKET,
     };
 
     env.storage().persistent().set(&DataKey::Config, &config);
@@ -469,6 +487,42 @@ fn emit_min_reputation_updated(env: &Env, old_threshold: u32, new_threshold: u32
     env.events().publish(
         (symbol_short!("cfg"), symbol_short!("rep_upd")),
         (old_threshold, new_threshold),
+    );
+}
+
+/// Update the number of ledgers a market's TTL is extended by, both on each
+/// interaction and via the explicit `extend_market_ttl` maintenance
+/// entrypoint. Caller must be the stored admin.
+pub fn set_market_ttl_extension(
+    env: &Env,
+    admin: Address,
+    new_extension: u32,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    if new_extension == 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    let old_extension = config.market_ttl_extension;
+    config.market_ttl_extension = new_extension;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_market_ttl_extension_updated(env, old_extension, new_extension);
+
+    Ok(())
+}
+
+fn emit_market_ttl_extension_updated(env: &Env, old_extension: u32, new_extension: u32) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("ttl_upd")),
+        (old_extension, new_extension),
     );
 }
 

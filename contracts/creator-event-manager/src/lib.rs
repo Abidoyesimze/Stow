@@ -20,7 +20,9 @@ use soroban_sdk::{contract, contractimpl, Address, Env, String, Symbol, Vec};
 use admin::AdminError;
 use event::EventError;
 use r#match::MatchError;
-use storage_types::{Event, LeaderboardEntry, Match, ParticipantScore, Prediction, StandingEntry};
+use storage_types::{
+    Event, LeaderboardEntry, Match, OracleSubmission, ParticipantScore, Prediction, StandingEntry,
+};
 use verification::VerificationError;
 use views::{EventStatistics, PlatformStatistics};
 
@@ -953,6 +955,86 @@ impl CreatorEventManagerContract {
     /// predictions, unique participants, and total fees collected.
     pub fn get_platform_statistics(env: Env) -> PlatformStatistics {
         views::get_platform_statistics(&env)
+    }
+
+    // =========================================================================
+    // Multi-source oracle median aggregation (#1347)
+    // =========================================================================
+
+    /// Configure the set of authorized oracle sources and the minimum number
+    /// of distinct sources required before their submissions can be
+    /// aggregated into a median. Only the admin may call this.
+    ///
+    /// # Panics
+    /// * `"unauthorized"` — caller is not the admin.
+    /// * `"invalid_oracle_config"` — `min_sources` is `0` or exceeds the
+    ///   number of sources, or `sources` contains a duplicate address.
+    pub fn configure_oracle_sources(env: Env, caller: Address, sources: Vec<Address>, min_sources: u32) {
+        match oracle::configure_oracle_sources(&env, caller, sources, min_sources) {
+            Ok(()) => {}
+            Err(oracle::OracleError::Unauthorized) => panic!("unauthorized"),
+            Err(oracle::OracleError::InvalidOracleConfig) => panic!("invalid_oracle_config"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Submit a numeric resolution value for a match as an authorized oracle
+    /// source.
+    ///
+    /// # Panics
+    /// * `"contract_paused"` — the contract is paused.
+    /// * `"match_not_found"` — no match exists with the given ID.
+    /// * `"not_an_oracle_source"` — caller is not a configured oracle source.
+    /// * `"duplicate_oracle_submission"` — caller already submitted a value
+    ///   for this match.
+    pub fn submit_oracle_value(env: Env, source: Address, match_id: u64, value: i128) {
+        match oracle::submit_oracle_value(&env, source, match_id, value) {
+            Ok(()) => {}
+            Err(oracle::OracleError::Paused) => panic!("contract_paused"),
+            Err(oracle::OracleError::MatchNotFound) => panic!("match_not_found"),
+            Err(oracle::OracleError::NotAnOracleSource) => panic!("not_an_oracle_source"),
+            Err(oracle::OracleError::DuplicateOracleSubmission) => {
+                panic!("duplicate_oracle_submission")
+            }
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Return every oracle submission recorded for a match, for
+    /// auditability. Returns an empty `Vec` when no source has submitted a
+    /// value yet.
+    pub fn get_oracle_submissions(env: Env, match_id: u64) -> Vec<OracleSubmission> {
+        oracle::get_oracle_submissions(&env, match_id)
+    }
+
+    /// Compute the median of the numeric values submitted for a match by
+    /// authorized oracle sources.
+    ///
+    /// # Panics
+    /// * `"insufficient_oracle_sources"` — fewer sources have reported than
+    ///   the configured minimum.
+    /// * `"overflow"` — averaging the two middle values overflowed i128.
+    pub fn get_oracle_median(env: Env, match_id: u64) -> i128 {
+        match oracle::compute_oracle_median(&env, match_id) {
+            Ok(median) => median,
+            Err(oracle::OracleError::InsufficientOracleSources) => {
+                panic!("insufficient_oracle_sources")
+            }
+            Err(oracle::OracleError::Overflow) => panic!("overflow"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Return the configured set of authorized oracle sources (empty if
+    /// never configured).
+    pub fn get_oracle_sources(env: Env) -> Vec<Address> {
+        storage::get_oracle_sources(&env)
+    }
+
+    /// Return the configured minimum oracle source count (0 if never
+    /// configured).
+    pub fn get_oracle_min_sources(env: Env) -> u32 {
+        storage::get_oracle_min_sources(&env)
     }
 
     /// Return the total number of events created on the platform.

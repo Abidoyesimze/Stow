@@ -1619,3 +1619,161 @@ fn list_markets_ids_are_in_ascending_order() {
         assert!(curr > prev, "market_id not ascending at index {}: {} >= {}", i, prev, curr);
     }
 }
+
+// ============================================================================
+// Category pagination boundary tests — issue #1261
+// ============================================================================
+
+/// Create 12 markets interleaved across two categories: 7 "Sports", 5
+/// "Crypto". Pattern: S C S C S C S C S C S S — mostly alternating, with an
+/// unavoidable trailing repeat since 7 > 12/2, so creation order is never
+/// grouped by category. Returns (sports_ids, crypto_ids) in creation order.
+fn create_interleaved_category_markets(
+    env: &Env,
+    client: &InsightArenaContractClient<'_>,
+    creator: &Address,
+) -> (Vec<u64>, Vec<u64>) {
+    let sports = Symbol::new(env, "Sports");
+    let crypto = Symbol::new(env, "Crypto");
+
+    let is_sports = [
+        true, false, true, false, true, false, true, false, true, false, true, true,
+    ];
+
+    let mut sports_ids: Vec<u64> = Vec::new(env);
+    let mut crypto_ids: Vec<u64> = Vec::new(env);
+
+    for &sport in is_sports.iter() {
+        let mut params = default_params(env);
+        params.category = if sport { sports.clone() } else { crypto.clone() };
+        let id = client.create_market(creator, &params);
+        if sport {
+            sports_ids.push_back(id);
+        } else {
+            crypto_ids.push_back(id);
+        }
+    }
+
+    (sports_ids, crypto_ids)
+}
+
+#[test]
+fn get_markets_by_category_interleaved_pages_tile_with_zero_overlap() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+    let sports = Symbol::new(&env, "Sports");
+
+    let (sports_ids, crypto_ids) = create_interleaved_category_markets(&env, &client, &creator);
+    assert_eq!(sports_ids.len(), 7);
+    assert_eq!(crypto_ids.len(), 5);
+
+    // Page 1: first 5 sports markets (zero-based offset into the category index).
+    let page1 = client.get_markets_by_category(&sports, &0_u64, &5_u32);
+    assert_eq!(page1.len(), 5);
+    for i in 0..5_u32 {
+        assert_eq!(page1.get(i).unwrap().market_id, sports_ids.get(i).unwrap());
+    }
+
+    // Page 2: the remaining 2 sports markets.
+    let page2 = client.get_markets_by_category(&sports, &5_u64, &5_u32);
+    assert_eq!(page2.len(), 2);
+    for i in 0..2_u32 {
+        assert_eq!(
+            page2.get(i).unwrap().market_id,
+            sports_ids.get(5 + i).unwrap()
+        );
+    }
+
+    // Union of both pages equals all 7 sports markets, with zero overlap.
+    let mut seen: Vec<u64> = Vec::new(&env);
+    for m in page1.iter() {
+        assert!(
+            !seen.contains(m.market_id),
+            "duplicate market_id {} across sports pages",
+            m.market_id
+        );
+        seen.push_back(m.market_id);
+    }
+    for m in page2.iter() {
+        assert!(
+            !seen.contains(m.market_id),
+            "duplicate market_id {} across sports pages",
+            m.market_id
+        );
+        seen.push_back(m.market_id);
+    }
+    assert_eq!(seen.len(), 7);
+    for id in sports_ids.iter() {
+        assert!(
+            seen.contains(id),
+            "sports market {} missing from paginated union",
+            id
+        );
+    }
+}
+
+#[test]
+fn get_markets_by_category_never_leaks_other_category() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+    let sports = Symbol::new(&env, "Sports");
+    let crypto = Symbol::new(&env, "Crypto");
+
+    let (sports_ids, crypto_ids) = create_interleaved_category_markets(&env, &client, &creator);
+
+    let sports_page1 = client.get_markets_by_category(&sports, &0_u64, &5_u32);
+    let sports_page2 = client.get_markets_by_category(&sports, &5_u64, &5_u32);
+    for m in sports_page1.iter().chain(sports_page2.iter()) {
+        assert!(
+            !crypto_ids.contains(m.market_id),
+            "crypto market {} leaked into sports results",
+            m.market_id
+        );
+    }
+
+    let crypto_page = client.get_markets_by_category(&crypto, &0_u64, &5_u32);
+    assert_eq!(crypto_page.len(), 5);
+    for m in crypto_page.iter() {
+        assert!(
+            !sports_ids.contains(m.market_id),
+            "sports market {} leaked into crypto results",
+            m.market_id
+        );
+    }
+}
+
+#[test]
+fn get_markets_by_category_out_of_range_page_returns_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+    let crypto = Symbol::new(&env, "Crypto");
+
+    let (_sports_ids, crypto_ids) = create_interleaved_category_markets(&env, &client, &creator);
+    assert_eq!(crypto_ids.len(), 5);
+
+    // Crypto has exactly 5 markets: start=5 is out of range for a zero-based
+    // offset, so this must return empty rather than panicking.
+    let result = client.get_markets_by_category(&crypto, &5_u64, &5_u32);
+    assert_eq!(result.len(), 0);
+}
+
+#[test]
+fn get_markets_by_category_zero_markets_returns_empty_without_panic() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    // Create markets only in Sports/Crypto; Politics has zero markets.
+    create_interleaved_category_markets(&env, &client, &creator);
+
+    let politics = Symbol::new(&env, "Politics");
+    let result = client.get_markets_by_category(&politics, &0_u64, &5_u32);
+    assert_eq!(result.len(), 0);
+}

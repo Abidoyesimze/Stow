@@ -290,6 +290,21 @@ pub enum DataKey {
     /// verification for an event so far  (event_id). Written by
     /// `verification::submit_verification`.
     EventVerificationSigners(u64),
+
+    // ── Multi-source oracle aggregation (#1347) ──────────────────────────────
+    /// Vec<Address> of addresses authorized to submit numeric oracle values.
+    /// Written by `oracle::configure_oracle_sources`.
+    OracleSources,
+
+    /// Minimum number of distinct oracle sources required before their
+    /// submissions can be aggregated into a median. Written by
+    /// `oracle::configure_oracle_sources`.
+    OracleMinSources,
+
+    /// Vec<OracleSubmission> of numeric values submitted by authorized
+    /// oracle sources for a match  (match_id). Written by
+    /// `oracle::submit_oracle_value`.
+    OracleSubmissions(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -1067,4 +1082,29 @@ impl StandingEntry {
         }
         self.user < other.user
     }
+}
+
+// ---------------------------------------------------------------------------
+// OracleSubmission (#1347)
+// ---------------------------------------------------------------------------
+
+/// A single numeric value submitted by an authorized oracle source for a
+/// match, contributing to the median aggregation computed by
+/// `oracle::compute_oracle_median`.
+///
+/// Stored in `Vec<OracleSubmission>` under `DataKey::OracleSubmissions(match_id)`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleSubmission {
+    /// Address of the authorized oracle source that submitted this value.
+    pub source: Address,
+
+    /// Match this submission contributes a resolution value for.
+    pub match_id: u64,
+
+    /// The submitted numeric value.
+    pub value: i128,
+
+    /// Unix timestamp when the value was submitted.
+    pub submitted_at: u64,
 }

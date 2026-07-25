@@ -112,6 +112,16 @@ impl InsightArenaContract {
         config::set_min_creator_reputation(&env, admin, new_threshold)
     }
 
+    /// Update the number of ledgers a market's TTL is extended by on each
+    /// interaction and via `extend_market_ttl`. Caller must be the current admin.
+    pub fn set_market_ttl_extension(
+        env: Env,
+        admin: Address,
+        new_extension: u32,
+    ) -> Result<(), InsightArenaError> {
+        config::set_market_ttl_extension(&env, admin, new_extension)
+    }
+
     // ── Market ────────────────────────────────────────────────────────────────
 
     /// Create a new prediction market. Returns the auto-assigned `market_id`.
@@ -207,6 +217,17 @@ impl InsightArenaContract {
         market_id: u64,
     ) -> Result<(), InsightArenaError> {
         market::cancel_market(&env, caller, market_id)
+    }
+
+    /// Explicitly extend a market's persistent-storage TTL by the configured
+    /// extension amount. Permissionless maintenance entrypoint — anyone may
+    /// call this to keep a long-running market's storage from expiring.
+    pub fn extend_market_ttl(
+        env: Env,
+        caller: Address,
+        market_id: u64,
+    ) -> Result<(), InsightArenaError> {
+        market::extend_market_ttl(&env, caller, market_id)
     }
 
     // ── Conditional Markets ───────────────────────────────────────────────────

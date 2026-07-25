@@ -1,9 +1,9 @@
-use soroban_sdk::{Address, Env, Symbol};
+use soroban_sdk::{Address, Env, Symbol, Vec};
 
 use crate::admin;
 use crate::leaderboard;
 use crate::storage::{self, StorageError};
-use crate::storage_types::{Event, Match, MatchResult};
+use crate::storage_types::{DataKey, Event, Match, MatchResult, OracleSubmission};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -35,6 +35,16 @@ pub enum OracleError {
     ResultAlreadySubmitted = 9,
     /// The match has not started yet (current time < match_time). (#810)
     MatchNotStarted = 10,
+    /// Caller is not a configured oracle source. (#1347)
+    NotAnOracleSource = 11,
+    /// This source has already submitted a value for this match. (#1347)
+    DuplicateOracleSubmission = 12,
+    /// Fewer sources have reported than the configured minimum. (#1347)
+    InsufficientOracleSources = 13,
+    /// The oracle-source configuration is invalid: zero sources, a threshold
+    /// of zero or greater than the source count, or a duplicate source
+    /// address. (#1347)
+    InvalidOracleConfig = 14,
 }
 
 impl From<StorageError> for OracleError {
@@ -59,6 +69,23 @@ fn emit_match_result_submitted(
             Symbol::new(env, "result_submitted"),
         ),
         (match_id, winning_team.clone(), submitted_by.clone()),
+    );
+}
+
+fn emit_oracle_sources_configured(env: &Env, source_count: u32, min_sources: u32) {
+    env.events().publish(
+        (Symbol::new(env, "oracle"), Symbol::new(env, "sources_set")),
+        (source_count, min_sources),
+    );
+}
+
+fn emit_oracle_value_submitted(env: &Env, match_id: u64, source: &Address, value: i128) {
+    env.events().publish(
+        (
+            Symbol::new(env, "oracle"),
+            Symbol::new(env, "value_submitted"),
+        ),
+        (match_id, source.clone(), value),
     );
 }
 
@@ -248,6 +275,166 @@ pub fn get_user_score(
 #[allow(dead_code)]
 pub fn get_creation_fee(env: &Env) -> Result<i128, OracleError> {
     admin::get_creation_fee(env).ok_or(OracleError::CreationFeeNotSet)
+}
+
+// ---------------------------------------------------------------------------
+// Multi-source oracle median aggregation (#1347)
+// ---------------------------------------------------------------------------
+
+/// Configure the set of authorized oracle sources and the minimum number of
+/// distinct sources required before their submissions can be aggregated.
+///
+/// Only the admin may call this. Replaces any previously configured source
+/// set and threshold atomically.
+///
+/// # Errors
+/// * [`OracleError::Unauthorized`] — caller is not the admin.
+/// * [`OracleError::InvalidOracleConfig`] — `min_sources` is `0` or exceeds
+///   `sources.len()`, or `sources` contains a duplicate address.
+pub fn configure_oracle_sources(
+    env: &Env,
+    caller: Address,
+    sources: Vec<Address>,
+    min_sources: u32,
+) -> Result<(), OracleError> {
+    caller.require_auth();
+
+    let is_admin = env
+        .storage()
+        .persistent()
+        .get::<DataKey, Address>(&DataKey::Admin(caller.clone()))
+        .is_some();
+    if !is_admin {
+        return Err(OracleError::Unauthorized);
+    }
+
+    let source_count = sources.len();
+    if min_sources == 0 || min_sources > source_count {
+        return Err(OracleError::InvalidOracleConfig);
+    }
+
+    for i in 0..sources.len() {
+        for j in (i + 1)..sources.len() {
+            if sources.get(i) == sources.get(j) {
+                return Err(OracleError::InvalidOracleConfig);
+            }
+        }
+    }
+
+    storage::set_oracle_sources(env, &sources);
+    storage::set_oracle_min_sources(env, min_sources);
+
+    emit_oracle_sources_configured(env, source_count, min_sources);
+
+    Ok(())
+}
+
+/// Submit a numeric resolution value for a match as an authorized oracle
+/// source.
+///
+/// # Errors
+/// * [`OracleError::Paused`] — the contract is paused.
+/// * [`OracleError::MatchNotFound`] — no match with the given id.
+/// * [`OracleError::NotAnOracleSource`] — `source` is not in the configured
+///   oracle source set.
+/// * [`OracleError::DuplicateOracleSubmission`] — `source` has already
+///   submitted a value for this match.
+pub fn submit_oracle_value(
+    env: &Env,
+    source: Address,
+    match_id: u64,
+    value: i128,
+) -> Result<(), OracleError> {
+    source.require_auth();
+
+    if admin::is_paused(env) {
+        return Err(OracleError::Paused);
+    }
+
+    let sources = storage::get_oracle_sources(env);
+    if !sources.contains(source.clone()) {
+        return Err(OracleError::NotAnOracleSource);
+    }
+
+    // Match must exist.
+    storage::get_match(env, match_id).map_err(|_| OracleError::MatchNotFound)?;
+
+    let existing = storage::get_oracle_submissions(env, match_id);
+    for submission in existing.iter() {
+        if submission.source == source {
+            return Err(OracleError::DuplicateOracleSubmission);
+        }
+    }
+
+    let submission = OracleSubmission {
+        source: source.clone(),
+        match_id,
+        value,
+        submitted_at: env.ledger().timestamp(),
+    };
+    storage::add_oracle_submission(env, match_id, &submission);
+
+    emit_oracle_value_submitted(env, match_id, &source, value);
+
+    Ok(())
+}
+
+/// Return every oracle submission recorded for a match, for auditability.
+///
+/// Returns an empty `Vec` when no source has submitted a value yet.
+pub fn get_oracle_submissions(env: &Env, match_id: u64) -> Vec<OracleSubmission> {
+    storage::get_oracle_submissions(env, match_id)
+}
+
+/// Compute the median of the numeric values submitted for a match by
+/// authorized oracle sources.
+///
+/// # Errors
+/// * [`OracleError::InsufficientOracleSources`] — fewer sources have
+///   reported than the configured minimum.
+/// * [`OracleError::Overflow`] — averaging the two middle values (even
+///   submission count) overflowed i128.
+pub fn compute_oracle_median(env: &Env, match_id: u64) -> Result<i128, OracleError> {
+    let submissions = storage::get_oracle_submissions(env, match_id);
+    let min_sources = storage::get_oracle_min_sources(env);
+
+    if submissions.len() < min_sources {
+        return Err(OracleError::InsufficientOracleSources);
+    }
+
+    let mut values: Vec<i128> = Vec::new(env);
+    for submission in submissions.iter() {
+        values.push_back(submission.value);
+    }
+
+    // Simple insertion sort — submission counts are small, bounded by the
+    // configured oracle source set.
+    let n = values.len();
+    for i in 1..n {
+        let mut j = i;
+        while j > 0 {
+            let a = values.get(j).unwrap();
+            let b = values.get(j - 1).unwrap();
+            if a < b {
+                values.set(j, b);
+                values.set(j - 1, a);
+                j -= 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    let mid = n / 2;
+    let median = if n % 2 == 1 {
+        values.get(mid).unwrap()
+    } else {
+        let a = values.get(mid - 1).unwrap();
+        let b = values.get(mid).unwrap();
+        a.checked_add(b).ok_or(OracleError::Overflow)? / 2
+    };
+
+    Ok(median)
 }
 
 // ---------------------------------------------------------------------------
