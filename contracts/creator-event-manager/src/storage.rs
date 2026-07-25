@@ -9,8 +9,8 @@
 use soroban_sdk::{Address, Env, Vec};
 
 use crate::storage_types::{
-    DataKey, Event, Match, OracleSubmission, ParticipantScore, Prediction, PrizeAllocation,
-    StandingEntry,
+    DataKey, Event, FinalizationBond, Match, OracleSubmission, ParticipantScore, Prediction,
+    PrizeAllocation, StandingEntry,
 };
 
 // ---------------------------------------------------------------------------
@@ -488,6 +488,37 @@ pub fn add_oracle_submission(env: &Env, match_id: u64, submission: &OracleSubmis
     let mut list = get_oracle_submissions(env, match_id);
     list.push_back(submission.clone());
     env.storage().persistent().set(&key, &list);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+}
+
+// ---------------------------------------------------------------------------
+// Finalization bond helpers (#1344)
+// ---------------------------------------------------------------------------
+
+/// Read the finalization bond record for an event, if any.
+pub fn get_finalization_bond(env: &Env, event_id: u64) -> Option<FinalizationBond> {
+    let key = DataKey::FinalizationBond(event_id);
+    match env
+        .storage()
+        .persistent()
+        .get::<DataKey, FinalizationBond>(&key)
+    {
+        Some(bond) => {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+            Some(bond)
+        }
+        None => None,
+    }
+}
+
+/// Persist a finalization bond record and set its TTL.
+pub fn set_finalization_bond(env: &Env, bond: &FinalizationBond) {
+    let key = DataKey::FinalizationBond(bond.event_id);
+    env.storage().persistent().set(&key, bond);
     env.storage()
         .persistent()
         .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);

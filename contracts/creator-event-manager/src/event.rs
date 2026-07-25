@@ -66,6 +66,21 @@ pub enum EventError {
     AlreadyClaimed = 24,
     /// clawback_unclaimed called before the event's claim deadline has passed.
     ClaimPeriodNotExpired = 25,
+    /// finalize_event called without locking the required finalization bond,
+    /// or the caller's balance/allowance cannot cover it (#1344).
+    BondRequired = 26,
+    /// challenge_finalization / settle_finalization_bond found no bond record
+    /// for the event (#1344).
+    BondNotFound = 27,
+    /// challenge_finalization called after the challenge window closed (#1344).
+    ChallengeWindowClosed = 28,
+    /// settle_finalization_bond called before the challenge window ends (#1344).
+    ChallengeWindowOpen = 29,
+    /// Bond was already returned or slashed (#1344).
+    BondAlreadySettled = 30,
+    /// challenge_finalization called by an address that is neither admin nor
+    /// a configured verifier signer (#1344).
+    UnauthorizedChallenge = 31,
 }
 
 impl From<InviteError> for EventError {

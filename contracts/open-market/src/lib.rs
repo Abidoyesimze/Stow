@@ -122,6 +122,18 @@ impl InsightArenaContract {
         config::set_market_ttl_extension(&env, admin, new_extension)
     }
 
+    /// Update the global per-prediction min/max stake bounds.
+    /// Caller must be the current admin. Reverts when `min_stake > max_stake`
+    /// or when either bound is non-positive.
+    pub fn set_stake_bounds(
+        env: Env,
+        admin: Address,
+        min_stake: i128,
+        max_stake: i128,
+    ) -> Result<(), InsightArenaError> {
+        config::set_stake_bounds(&env, admin, min_stake, max_stake)
+    }
+
     // ── Market ────────────────────────────────────────────────────────────────
 
     /// Create a new prediction market. Returns the auto-assigned `market_id`.

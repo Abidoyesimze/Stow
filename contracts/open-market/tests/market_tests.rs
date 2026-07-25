@@ -316,17 +316,37 @@ fn test_create_market_unauthorised() {
 }
 
 #[test]
-fn create_market_fails_stake_too_low() {
+fn create_market_fails_when_resolved_min_exceeds_max() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    // Override min above override max — rejected at create time.
+    let mut params = default_params(&env);
+    params.min_stake = 100_000_000;
+    params.max_stake = 10_000_000;
+
+    let result = client.try_create_market(&creator, &params);
+    assert!(matches!(result, Err(Ok(InsightArenaError::InvalidInput))));
+}
+
+#[test]
+fn create_market_inherits_global_bounds_when_zero() {
     let env = Env::default();
     env.mock_all_auths();
     let client = deploy(&env);
     let creator = Address::generate(&env);
 
     let mut params = default_params(&env);
-    params.min_stake = 1;
+    // 0 = inherit global Config bounds at prediction time.
+    params.min_stake = 0;
+    params.max_stake = 0;
 
-    let result = client.try_create_market(&creator, &params);
-    assert!(matches!(result, Err(Ok(InsightArenaError::StakeTooLow))));
+    let market_id = client.create_market(&creator, &params);
+    let market = client.get_market(&market_id);
+    assert_eq!(market.min_stake, 0);
+    assert_eq!(market.max_stake, 0);
 }
 
 #[test]

@@ -9,7 +9,7 @@
 //!   score components are exposed for transparency, and standings are
 //!   idempotent across repeated recomputation (including finalize).
 
-use creator_event_manager::storage_types::{
+use creator_event_manager::storage_types::{FINALIZATION_BOND_STROOPS, 
     weighted_contribution, StandingEntry, EARLY_PREDICTION_BONUS_BPS,
     EARLY_PREDICTION_LEAD_SECONDS, UNDERDOG_BONUS_BPS, WEIGHT_BASE_BPS,
 };
@@ -494,6 +494,7 @@ fn test_lifecycle_standings_idempotent_through_finalize() {
     // Finalize (recomputes standings again) — snapshot must be unchanged.
     env.ledger().set_timestamp(t0 + 200_000);
     let caller = Address::generate(&env);
+    fund(&env, &xlm_token, &caller, FINALIZATION_BOND_STROOPS);
     client.finalize_event(&caller, &event_id);
     assert!(client.is_event_finalized(&event_id));
 

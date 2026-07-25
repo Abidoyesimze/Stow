@@ -226,7 +226,9 @@ fn has_duplicate_outcomes(outcomes: &Vec<Symbol>) -> bool {
 ///    address) otherwise.
 /// 7. `category` must be in the admin-managed whitelist
 /// 8. `creator_fee_bps` must not exceed the platform cap
-/// 9. `min_stake` >= platform minimum; `max_stake` >= `min_stake`
+/// 9. Stake bounds: `min_stake`/`max_stake` of `0` inherit the global Config
+///    bounds; non-zero values are per-market overrides. The resolved pair must
+///    satisfy `min <= max` with both sides strictly positive.
 pub fn create_market(
     env: &Env,
     creator: Address,
@@ -278,12 +280,14 @@ pub fn create_market(
     }
 
     // ── Guard 8: stake bounds ─────────────────────────────────────────────────
-    if params.min_stake < cfg.min_stake_xlm {
-        return Err(InsightArenaError::StakeTooLow);
-    }
-    if params.max_stake < params.min_stake {
+    // A zero min/max on the market means "inherit the global Config bound" and
+    // is resolved at prediction time. Non-zero values are per-market overrides
+    // that take precedence. Validate the resolved pair so create cannot store
+    // an inconsistent override / inherit combination.
+    if params.min_stake < 0 || params.max_stake < 0 {
         return Err(InsightArenaError::InvalidInput);
     }
+    let (_, _) = config::resolve_stake_bounds(env, params.min_stake, params.max_stake)?;
 
     // ── Atomically assign a new market ID ────────────────────────────────────
     let market_id = next_market_id(env)?;

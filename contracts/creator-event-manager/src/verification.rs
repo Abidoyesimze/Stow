@@ -310,6 +310,86 @@ pub fn get_event_verification_count(env: &Env, event_id: u64) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
+// Finalization challenge (#1344)
+// ---------------------------------------------------------------------------
+
+/// Challenge a recently finalized event result and slash the finalizer's bond.
+///
+/// **Documented slash rule:** on success, **100%** of the locked finalization
+/// bond is transferred to the contract treasury. The bond record is marked
+/// `challenged` and `settled` so it cannot be returned later.
+///
+/// Only the contract admin or a configured verifier signer may challenge,
+/// and only while the challenge window is still open.
+///
+/// # Errors
+/// Mapped onto [`crate::event::EventError`] by the contract entry point:
+/// * `UnauthorizedChallenge` — caller is neither admin nor a verifier signer.
+/// * `BondNotFound` — event was never finalized with a bond.
+/// * `BondAlreadySettled` — bond already challenged or returned.
+/// * `ChallengeWindowClosed` — the challenge window has elapsed.
+/// * `TransferFailed` — treasury transfer failed.
+pub fn challenge_finalization(
+    env: &Env,
+    challenger: Address,
+    event_id: u64,
+) -> Result<i128, crate::event::EventError> {
+    use crate::event::EventError;
+    use crate::storage_types::FINALIZATION_CHALLENGE_WINDOW_SECONDS;
+    use crate::token::TokenHelper;
+
+    challenger.require_auth();
+
+    let is_admin = env
+        .storage()
+        .persistent()
+        .get::<DataKey, Address>(&DataKey::Admin(challenger.clone()))
+        .is_some();
+    let is_verifier = crate::admin::get_verifier_signers(env)
+        .iter()
+        .any(|addr| addr == challenger);
+    if !is_admin && !is_verifier {
+        return Err(EventError::UnauthorizedChallenge);
+    }
+
+    let mut bond = crate::storage::get_finalization_bond(env, event_id)
+        .ok_or(EventError::BondNotFound)?;
+
+    if bond.settled || bond.challenged {
+        return Err(EventError::BondAlreadySettled);
+    }
+
+    let now = env.ledger().timestamp();
+    let window_end = bond
+        .finalized_at
+        .saturating_add(FINALIZATION_CHALLENGE_WINDOW_SECONDS);
+    if now >= window_end {
+        return Err(EventError::ChallengeWindowClosed);
+    }
+
+    let treasury = crate::admin::get_treasury(env).unwrap_or_else(|| panic!("not_initialized"));
+    let xlm_token = crate::admin::get_xlm_token(env).unwrap_or_else(|| panic!("not_initialized"));
+
+    // Slash rule: 100% of the bond → treasury.
+    TokenHelper::distribute_winnings(env, &xlm_token, &treasury, bond.bond)
+        .map_err(|_| EventError::TransferFailed)?;
+
+    bond.challenged = true;
+    bond.settled = true;
+    crate::storage::set_finalization_bond(env, &bond);
+
+    env.events().publish(
+        (
+            Symbol::new(env, "verification"),
+            Symbol::new(env, "bond_slashed"),
+        ),
+        (event_id, challenger, bond.finalizer.clone(), bond.bond),
+    );
+
+    Ok(bond.bond)
+}
+
+// ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
 

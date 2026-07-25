@@ -21,6 +21,13 @@ pub const MAX_EVENT_DURATION_SECONDS: u64 = 7_776_000;
 /// their allocation before it becomes eligible for `clawback_unclaimed` to
 /// treasury (#1312).
 pub const CLAIM_PERIOD_SECONDS: u64 = 2_592_000; // 30 days
+/// XLM bond (in stroops) that must be locked to call `finalize_event` (#1344).
+/// Held during the challenge window; returned if unchallenged, or fully
+/// slashed to treasury if a challenge succeeds.
+pub const FINALIZATION_BOND_STROOPS: i128 = 10_000_000; // 1 XLM
+/// Challenge window (seconds) after finalization during which the result may
+/// be disputed via `challenge_finalization` (#1344).
+pub const FINALIZATION_CHALLENGE_WINDOW_SECONDS: u64 = 86_400; // 1 day
 /// Valid predicted outcome symbols
 pub const OUTCOME_TEAM_A: &str = "TEAM_A";
 pub const OUTCOME_TEAM_B: &str = "TEAM_B";
@@ -305,6 +312,18 @@ pub enum DataKey {
     /// oracle sources for a match  (match_id). Written by
     /// `oracle::submit_oracle_value`.
     OracleSubmissions(u64),
+
+    // ── Finalization challenge bond (#1344) ──────────────────────────────────
+    /// Bond locked by the caller of `finalize_event` for an event  (event_id).
+    /// Settled either by `challenge_finalization` (slash to treasury) or by
+    /// `settle_finalization_bond` (return to finalizer after the window).
+    FinalizationBond(u64),
+
+    // ── Two-step admin handover (#1356) ──────────────────────────────────────
+    /// Pending admin nominee awaiting acceptance. Absent when no nomination
+    /// is outstanding. Written by `nominate_admin`, cleared by `accept_admin`
+    /// or `cancel_admin_nomination`.
+    PendingAdmin,
 }
 
 // ---------------------------------------------------------------------------
@@ -852,6 +871,14 @@ impl Prediction {
 /// and deterministic tie-breaking. This replaces the binary Winner model to
 /// support top-N prize splits and flexible reward distributions.
 ///
+/// ## Documented tie-break order (#1343)
+/// Applied consistently by [`LeaderboardEntry::outranks`] and every ranking
+/// path that builds the leaderboard:
+/// 1. Higher `total_points` (descending)
+/// 2. Higher `exact_scores` (descending)
+/// 3. Lower `tie_break_key` — earliest qualifying prediction timestamp (ascending)
+/// 4. Smaller `user` address (ascending, final deterministic key)
+///
 /// Stored in Vec<LeaderboardEntry> (typically temporary, computed on-demand).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -874,9 +901,14 @@ pub struct LeaderboardEntry {
     /// Total number of predictions this user submitted for the event
     pub matches_played: u32,
 
-    /// Unix timestamp of this user's most recent prediction
-    /// (used as tiebreaker — earlier submission = higher rank)
+    /// Unix timestamp of this user's most recent prediction (informational).
     pub last_prediction_time: u64,
+
+    /// Deterministic tie-break key: the earliest prediction timestamp for
+    /// this participant in the event (`u64::MAX` when they have none).
+    /// Stored alongside the entry so clients can audit ranking without
+    /// recomputing (#1343).
+    pub tie_break_key: u64,
 
     /// 1-based rank after sorting (1 is the top-ranked participant).
     /// Set by `get_event_leaderboard` after sorting all entries.
@@ -893,6 +925,7 @@ impl LeaderboardEntry {
         exact_scores: u32,
         matches_played: u32,
         last_prediction_time: u64,
+        tie_break_key: u64,
     ) -> Self {
         Self {
             user,
@@ -902,35 +935,27 @@ impl LeaderboardEntry {
             exact_scores,
             matches_played,
             last_prediction_time,
+            tie_break_key,
             rank: 0, // Will be assigned during leaderboard finalization
         }
     }
 
-    /// Returns `true` if this entry outranks `other` according to the tiebreaker rules.
-    ///
-    /// Sort order (all descending except last_prediction_time):
-    /// 1. Higher `total_points` wins
-    /// 2. On tie: Higher `exact_scores` wins
-    /// 3. On tie: Earlier `last_prediction_time` wins (lower timestamp = better rank)
-    /// 4. On tie: Compare addresses (deterministic final tiebreaker)
+    /// Returns `true` if this entry outranks `other` according to the
+    /// documented tie-break order (#1343):
+    /// 1. Higher `total_points`
+    /// 2. Higher `exact_scores`
+    /// 3. Earlier `tie_break_key` (lower timestamp = better rank)
+    /// 4. Smaller address (final deterministic tiebreaker)
     pub fn outranks(&self, other: &LeaderboardEntry) -> bool {
-        // Primary: higher total_points
         if self.total_points != other.total_points {
             return self.total_points > other.total_points;
         }
-
-        // Secondary: higher exact_scores
         if self.exact_scores != other.exact_scores {
             return self.exact_scores > other.exact_scores;
         }
-
-        // Tertiary: earlier last_prediction_time (lower = better)
-        if self.last_prediction_time != other.last_prediction_time {
-            return self.last_prediction_time < other.last_prediction_time;
+        if self.tie_break_key != other.tie_break_key {
+            return self.tie_break_key < other.tie_break_key;
         }
-
-        // Final tiebreaker: address comparison (deterministic)
-        // Compare the addresses directly; Soroban Address implements Ord
         self.user < other.user
     }
 }
@@ -1107,4 +1132,38 @@ pub struct OracleSubmission {
 
     /// Unix timestamp when the value was submitted.
     pub submitted_at: u64,
+}
+
+// ---------------------------------------------------------------------------
+// FinalizationBond (#1344)
+// ---------------------------------------------------------------------------
+
+/// Bond locked by a finalizer when calling `finalize_event`.
+///
+/// Documented slash rule: on a successful challenge, **100%** of `bond` is
+/// transferred to the contract treasury. If the challenge window closes
+/// without a successful challenge, the full `bond` is returned to
+/// `finalizer`.
+///
+/// Stored under `DataKey::FinalizationBond(event_id)`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FinalizationBond {
+    /// Event this bond secures.
+    pub event_id: u64,
+
+    /// Address that called `finalize_event` and locked the bond.
+    pub finalizer: Address,
+
+    /// Bond amount in stroops (always [`FINALIZATION_BOND_STROOPS`] at lock).
+    pub bond: i128,
+
+    /// Ledger timestamp when finalization (and bond lock) occurred.
+    pub finalized_at: u64,
+
+    /// `true` once a successful `challenge_finalization` has slashed the bond.
+    pub challenged: bool,
+
+    /// `true` once the bond has been returned or slashed (terminal state).
+    pub settled: bool,
 }

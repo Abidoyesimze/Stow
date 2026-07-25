@@ -21,7 +21,8 @@ use admin::AdminError;
 use event::EventError;
 use r#match::MatchError;
 use storage_types::{
-    Event, LeaderboardEntry, Match, OracleSubmission, ParticipantScore, Prediction, StandingEntry,
+    Event, FinalizationBond, LeaderboardEntry, Match, OracleSubmission, ParticipantScore,
+    Prediction, StandingEntry,
 };
 use verification::VerificationError;
 use views::{EventStatistics, PlatformStatistics};
@@ -158,6 +159,58 @@ impl CreatorEventManagerContract {
             Err(AdminError::NotPaused) => panic!("not_paused"),
             Err(_) => panic!("unexpected_error"),
         }
+    }
+
+    /// Nominate a new admin. Current admin stays in place until acceptance (#1356).
+    ///
+    /// # Panics
+    /// * `"unauthorized"` — caller is not the admin.
+    /// * `"invalid_address"` — nominee equals the contract address.
+    /// * `"nomination_pending"` — a nomination is already outstanding.
+    pub fn nominate_admin(env: Env, caller: Address, nominee: Address) {
+        match admin::nominate_admin(&env, caller, nominee) {
+            Ok(()) => {}
+            Err(AdminError::Unauthorized) => panic!("unauthorized"),
+            Err(AdminError::InvalidAddress) => panic!("invalid_address"),
+            Err(AdminError::NominationPending) => panic!("nomination_pending"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Accept a pending admin nomination. Only the nominee may accept (#1356).
+    ///
+    /// # Panics
+    /// * `"no_pending_nomination"` — no nomination is outstanding.
+    /// * `"not_nominee"` — caller is not the pending nominee.
+    pub fn accept_admin(env: Env, caller: Address) {
+        match admin::accept_admin(&env, caller) {
+            Ok(()) => {}
+            Err(AdminError::NoPendingNomination) => panic!("no_pending_nomination"),
+            Err(AdminError::NotNominee) => panic!("not_nominee"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Cancel a pending admin nomination. Only the current admin may cancel (#1356).
+    ///
+    /// # Panics
+    /// * `"unauthorized"` — caller is not the admin.
+    /// * `"no_pending_nomination"` — no nomination is outstanding.
+    pub fn cancel_admin_nomination(env: Env, caller: Address) {
+        match admin::cancel_admin_nomination(&env, caller) {
+            Ok(()) => {}
+            Err(AdminError::Unauthorized) => panic!("unauthorized"),
+            Err(AdminError::NoPendingNomination) => panic!("no_pending_nomination"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Return the pending admin nominee, or panics if none (#1356).
+    ///
+    /// # Panics
+    /// * `"no_pending_nomination"` — no nomination is outstanding.
+    pub fn get_pending_admin(env: Env) -> Address {
+        admin::get_pending_admin(&env).unwrap_or_else(|| panic!("no_pending_nomination"))
     }
 
     /// Returns `true` if the contract has been initialised.
@@ -788,6 +841,21 @@ impl CreatorEventManagerContract {
         }
     }
 
+    /// Return the resolved 1-based leaderboard rank for `user` in `event_id` (#1343).
+    ///
+    /// Identical to the `rank` field on the matching [`LeaderboardEntry`].
+    /// Returns `0` when the user is not a participant.
+    ///
+    /// # Panics
+    /// * `"event_not_found"` — no event exists with the given ID.
+    pub fn get_user_rank(env: Env, event_id: u64, user: Address) -> u32 {
+        match views::get_user_rank(&env, event_id, user) {
+            Ok(rank) => rank,
+            Err(EventError::EventNotFound) => panic!("event_not_found"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
     /// Return the stored weighted standings for an event (#1311).
     ///
     /// Standings weight each correct prediction by documented multipliers:
@@ -866,7 +934,60 @@ impl CreatorEventManagerContract {
             Err(EventError::EventNotEnded) => panic!("event_not_ended"),
             Err(EventError::MatchesNotComplete) => panic!("matches_not_complete"),
             Err(EventError::TransferFailed) => panic!("transfer_failed"),
+            Err(EventError::BondRequired) => panic!("bond_required"),
             Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Return a finalizer's bond after the challenge window closes unchallenged (#1344).
+    ///
+    /// # Panics
+    /// * `"bond_not_found"` — no bond was locked for this event.
+    /// * `"bond_already_settled"` — bond already returned or slashed.
+    /// * `"challenge_window_open"` — challenge window has not closed yet.
+    /// * `"transfer_failed"` — bond return transfer failed.
+    pub fn settle_finalization_bond(env: Env, caller: Address, event_id: u64) -> i128 {
+        match finalize::settle_finalization_bond(&env, caller, event_id) {
+            Ok(amount) => amount,
+            Err(EventError::BondNotFound) => panic!("bond_not_found"),
+            Err(EventError::BondAlreadySettled) => panic!("bond_already_settled"),
+            Err(EventError::ChallengeWindowOpen) => panic!("challenge_window_open"),
+            Err(EventError::TransferFailed) => panic!("transfer_failed"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Challenge a finalization and slash 100% of the finalizer's bond to treasury (#1344).
+    ///
+    /// Only the admin or a configured verifier signer may challenge, and only
+    /// while the challenge window is open.
+    ///
+    /// # Panics
+    /// * `"unauthorized_challenge"` — caller is neither admin nor verifier.
+    /// * `"bond_not_found"` — no bond was locked for this event.
+    /// * `"bond_already_settled"` — bond already returned or slashed.
+    /// * `"challenge_window_closed"` — challenge window has elapsed.
+    /// * `"transfer_failed"` — slash transfer failed.
+    pub fn challenge_finalization(env: Env, challenger: Address, event_id: u64) -> i128 {
+        match verification::challenge_finalization(&env, challenger, event_id) {
+            Ok(amount) => amount,
+            Err(EventError::UnauthorizedChallenge) => panic!("unauthorized_challenge"),
+            Err(EventError::BondNotFound) => panic!("bond_not_found"),
+            Err(EventError::BondAlreadySettled) => panic!("bond_already_settled"),
+            Err(EventError::ChallengeWindowClosed) => panic!("challenge_window_closed"),
+            Err(EventError::TransferFailed) => panic!("transfer_failed"),
+            Err(_) => panic!("unexpected_error"),
+        }
+    }
+
+    /// Return the finalization bond record for an event (#1344).
+    ///
+    /// # Panics
+    /// * `"bond_not_found"` — no bond was locked for this event.
+    pub fn get_finalization_bond(env: Env, event_id: u64) -> FinalizationBond {
+        match finalize::get_finalization_bond(&env, event_id) {
+            Some(bond) => bond,
+            None => panic!("bond_not_found"),
         }
     }
 

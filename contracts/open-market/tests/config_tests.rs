@@ -189,3 +189,58 @@ fn transfer_admin_revokes_old_admin_privileges() {
     assert!(client.try_transfer_admin(&admin_a).is_err());
     assert_eq!(client.get_config().admin, admin_b);
 }
+
+// ── Stake bounds (#1345) ──────────────────────────────────────────────────────
+
+#[test]
+fn set_stake_bounds_updates_config() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    client.initialize(&admin, &oracle, &200_u32, &register_token(&env));
+
+    let cfg_before = client.get_config();
+    assert_eq!(cfg_before.min_stake_xlm, 10_000_000);
+    assert_eq!(cfg_before.max_stake_xlm, 1_000_000_000_000);
+
+    client.set_stake_bounds(&admin, &5_000_000_i128, &50_000_000_i128);
+
+    let cfg = client.get_config();
+    assert_eq!(cfg.min_stake_xlm, 5_000_000);
+    assert_eq!(cfg.max_stake_xlm, 50_000_000);
+}
+
+#[test]
+fn set_stake_bounds_rejects_min_greater_than_max() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    client.initialize(&admin, &oracle, &200_u32, &register_token(&env));
+
+    let result = client.try_set_stake_bounds(&admin, &100_i128, &50_i128);
+    assert!(matches!(result, Err(Ok(InsightArenaError::InvalidInput))));
+
+    let cfg = client.get_config();
+    assert_eq!(cfg.min_stake_xlm, 10_000_000);
+    assert_eq!(cfg.max_stake_xlm, 1_000_000_000_000);
+}
+
+#[test]
+fn set_stake_bounds_rejects_non_positive() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    client.initialize(&admin, &oracle, &200_u32, &register_token(&env));
+
+    let result = client.try_set_stake_bounds(&admin, &0_i128, &50_i128);
+    assert!(matches!(result, Err(Ok(InsightArenaError::InvalidInput))));
+
+    let result = client.try_set_stake_bounds(&admin, &10_i128, &0_i128);
+    assert!(matches!(result, Err(Ok(InsightArenaError::InvalidInput))));
+}

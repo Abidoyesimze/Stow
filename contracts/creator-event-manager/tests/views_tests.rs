@@ -1,6 +1,6 @@
 /// Tests for aggregate event statistics views.
 use creator_event_manager::storage;
-use creator_event_manager::storage_types::{Match, MatchResult, Prediction};
+use creator_event_manager::storage_types::{FINALIZATION_BOND_STROOPS, Match, MatchResult, Prediction};
 use creator_event_manager::CreatorEventManagerContractClient;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::testutils::Ledger as _;
@@ -690,6 +690,7 @@ fn test_is_event_finalized_states() {
     env.ledger().with_mut(|l| l.timestamp = end_time2 + 10);
 
     // Finalize the event
+    fund(&env, &xlm_token, &creator2, FINALIZATION_BOND_STROOPS);
     client.finalize_event(&creator2, &event_id2);
 
     assert!(client.is_event_finalized(&event_id2));
@@ -944,6 +945,7 @@ fn test_get_event_prize_pool_post_finalize_is_readable() {
     // Advance past end_time, submit result, then finalize.
     env.ledger().with_mut(|l| l.timestamp = end_time + 10);
     client.submit_match_result(&ai_agent, &match_id, &1u32, &0u32);
+    fund(&env, &xlm_token, &creator, FINALIZATION_BOND_STROOPS);
     client.finalize_event(&creator, &event_id);
 
     assert!(client.get_event(&event_id).is_finalized);

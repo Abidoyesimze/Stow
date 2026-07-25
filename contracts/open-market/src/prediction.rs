@@ -325,9 +325,8 @@ pub fn submit_predictions_batch(
 /// 2. Market exists (else `MarketNotFound`)
 /// 3. `current_time < market.end_time` (else `MarketExpired`)
 /// 4. `chosen_outcome` is present in `market.outcome_options` (else `InvalidOutcome`)
-/// 5. `stake_amount >= market.min_stake` (else `StakeTooLow`)
-/// 6. `stake_amount <= market.max_stake` (else `StakeTooHigh`)
-/// 7. Predictor has not already submitted a prediction for this market (else `AlreadyPredicted`)
+/// 5. `stake_amount` within the effective `[min, max]` window (market override
+///    if set, otherwise global Config bounds) — else `StakeTooLow` / `StakeTooHigh`
 ///
 /// On success:
 /// - XLM is locked in escrow via `escrow::lock_stake`.
@@ -399,11 +398,14 @@ fn do_submit_prediction(
         );
     }
 
-    // ── Guard 5 & 6: stake_amount must be within [min_stake, max_stake] ───────
-    if stake_amount < market.min_stake {
+    // ── Guard 5 & 6: stake_amount must be within effective [min, max] ─────────
+    // Per-market non-zero bounds override the global Config bounds.
+    let (min_stake, max_stake) =
+        config::resolve_stake_bounds(env, market.min_stake, market.max_stake)?;
+    if stake_amount < min_stake {
         return Err(InsightArenaError::StakeTooLow);
     }
-    if stake_amount > market.max_stake {
+    if stake_amount > max_stake {
         return Err(InsightArenaError::StakeTooHigh);
     }
 

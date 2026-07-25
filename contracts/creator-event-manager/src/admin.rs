@@ -36,6 +36,12 @@ pub enum AdminError {
     /// The `signers` list passed to `set_verifier_config` contains the same
     /// address more than once.
     DuplicateSigner = 8,
+    /// No pending admin nomination exists to accept or cancel (#1356).
+    NoPendingNomination = 9,
+    /// Caller tried to accept an admin nomination that is not addressed to them (#1356).
+    NotNominee = 10,
+    /// A nomination already exists; cancel it before nominating another (#1356).
+    NominationPending = 11,
 }
 
 // ---------------------------------------------------------------------------
@@ -474,6 +480,130 @@ pub fn get_verifier_threshold(env: &Env) -> u32 {
         .persistent()
         .get::<DataKey, u32>(&DataKey::VerifierThreshold)
         .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Two-step admin handover (#1356)
+// ---------------------------------------------------------------------------
+
+/// Nominate a new admin. The current admin remains in force until the nominee
+/// explicitly accepts via [`accept_admin`].
+///
+/// # Errors
+/// * [`AdminError::Unauthorized`] — caller is not the admin.
+/// * [`AdminError::InvalidAddress`] — nominee equals the contract address.
+/// * [`AdminError::NominationPending`] — a nomination is already outstanding.
+///
+/// # Events
+/// Emits `(Symbol("admin"), Symbol("nominated"))` with data
+/// `(current_admin, nominee)`.
+pub fn nominate_admin(env: &Env, caller: Address, nominee: Address) -> Result<(), AdminError> {
+    require_is_admin(env, &caller)?;
+
+    if nominee == env.current_contract_address() {
+        return Err(AdminError::InvalidAddress);
+    }
+
+    let storage = env.storage().persistent();
+    if storage.has(&DataKey::PendingAdmin) {
+        return Err(AdminError::NominationPending);
+    }
+
+    storage.set(&DataKey::PendingAdmin, &nominee);
+    storage.extend_ttl(&DataKey::PendingAdmin, TTL_LEDGERS, TTL_LEDGERS);
+
+    env.events().publish(
+        (Symbol::new(env, "admin"), Symbol::new(env, "nominated")),
+        (caller, nominee),
+    );
+
+    Ok(())
+}
+
+/// Accept a pending admin nomination. Only the nominated address may accept.
+/// On success the previous admin loses privileges and the nominee becomes the
+/// sole admin.
+///
+/// # Errors
+/// * [`AdminError::NoPendingNomination`] — no nomination is outstanding.
+/// * [`AdminError::NotNominee`] — caller is not the pending nominee.
+///
+/// # Events
+/// Emits `(Symbol("admin"), Symbol("accepted"))` with data
+/// `(old_admin, new_admin)`.
+pub fn accept_admin(env: &Env, caller: Address) -> Result<(), AdminError> {
+    caller.require_auth();
+
+    let storage = env.storage().persistent();
+    let nominee: Address = storage
+        .get(&DataKey::PendingAdmin)
+        .ok_or(AdminError::NoPendingNomination)?;
+
+    if caller != nominee {
+        return Err(AdminError::NotNominee);
+    }
+
+    let old_admin: Address = storage
+        .get::<DataKey, Address>(&DataKey::CurrentAdmin)
+        .unwrap_or_else(|| panic!("not_initialized"));
+
+    // Revoke old admin key and install the new one.
+    storage.remove(&DataKey::Admin(old_admin.clone()));
+    storage.set(&DataKey::Admin(caller.clone()), &caller);
+    storage.extend_ttl(&DataKey::Admin(caller.clone()), TTL_LEDGERS, TTL_LEDGERS);
+
+    storage.set(&DataKey::CurrentAdmin, &caller);
+    storage.extend_ttl(&DataKey::CurrentAdmin, TTL_LEDGERS, TTL_LEDGERS);
+
+    storage.remove(&DataKey::PendingAdmin);
+
+    env.events().publish(
+        (Symbol::new(env, "admin"), Symbol::new(env, "accepted")),
+        (old_admin, caller),
+    );
+
+    Ok(())
+}
+
+/// Cancel a pending admin nomination. Only the current admin may cancel.
+///
+/// # Errors
+/// * [`AdminError::Unauthorized`] — caller is not the admin.
+/// * [`AdminError::NoPendingNomination`] — no nomination is outstanding.
+///
+/// # Events
+/// Emits `(Symbol("admin"), Symbol("cancelled"))` with data
+/// `(admin, cancelled_nominee)`.
+pub fn cancel_admin_nomination(env: &Env, caller: Address) -> Result<(), AdminError> {
+    require_is_admin(env, &caller)?;
+
+    let storage = env.storage().persistent();
+    let nominee: Address = storage
+        .get(&DataKey::PendingAdmin)
+        .ok_or(AdminError::NoPendingNomination)?;
+
+    storage.remove(&DataKey::PendingAdmin);
+
+    env.events().publish(
+        (Symbol::new(env, "admin"), Symbol::new(env, "cancelled")),
+        (caller, nominee),
+    );
+
+    Ok(())
+}
+
+/// Return the pending admin nominee, if any.
+pub fn get_pending_admin(env: &Env) -> Option<Address> {
+    env.storage()
+        .persistent()
+        .get::<DataKey, Address>(&DataKey::PendingAdmin)
+}
+
+/// Return the current admin address, or `None` if not initialised.
+pub fn get_admin(env: &Env) -> Option<Address> {
+    env.storage()
+        .persistent()
+        .get::<DataKey, Address>(&DataKey::CurrentAdmin)
 }
 
 // ---------------------------------------------------------------------------
