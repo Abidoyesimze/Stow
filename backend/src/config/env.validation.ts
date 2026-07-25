@@ -94,6 +94,24 @@ class EnvironmentVariables {
   @IsOptional()
   @IsString()
   ORACLE_ANOMALY_HOLD?: string;
+
+  // Dispute evidence attachments (#1363)
+  @IsOptional()
+  @IsNumber()
+  DISPUTE_EVIDENCE_MAX_SIZE_BYTES?: number;
+
+  @IsOptional()
+  @IsString()
+  DISPUTE_EVIDENCE_ALLOWED_MIME_TYPES?: string;
+
+  // Incoming webhook signature verification & replay protection (#1376)
+  @IsOptional()
+  @IsString()
+  WEBHOOK_HMAC_SECRET?: string;
+
+  @IsOptional()
+  @IsNumber()
+  WEBHOOK_REPLAY_WINDOW_SECONDS?: number;
 }
 
 export function validate(config: Record<string, unknown>) {
