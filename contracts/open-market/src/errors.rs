@@ -165,4 +165,8 @@ pub enum InsightArenaError {
     /// before any market state is persisted; a `MarketCreationDenied` event is
     /// emitted with the attempted creator's address before this error returns.
     InsufficientReputation = 106,
+
+    // ── Batch Operations ──────────────────────────────────────────────────────
+    /// The number of items in a batch operation exceeds the maximum allowed size.
+    BatchSizeExceeded = 107,
 }
