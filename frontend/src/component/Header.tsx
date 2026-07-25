@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { useWallet } from "@/context/WalletContext";
+import { useConfirm } from "@/hooks/useConfirm";
+import { useToast } from "@/hooks/useToast";
 import { MobileMenu } from "./header/MobileMenu";
 import { NavLinks } from "./header/NavLinks";
 import { UserWalletControls } from "./header/UserWalletControls";
@@ -14,6 +16,8 @@ const MOBILE_MENU_ID = "mobile-navigation-menu";
 export default function Header() {
   const pathname = usePathname();
   const { address, isAuthenticated, isRestoring, logout, openConnectModal } = useWallet();
+  const confirm = useConfirm();
+  const toast = useToast();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -90,10 +94,18 @@ export default function Header() {
     }
   };
 
-  const handleDisconnect = () => {
-    logout();
+  const handleDisconnect = async () => {
     setIsDropdownOpen(false);
     setIsMobileMenuOpen(false);
+    const confirmed = await confirm({
+      title: "Disconnect wallet?",
+      description: "You'll need to reconnect your wallet to trade or view your account.",
+      confirmLabel: "Disconnect",
+      variant: "destructive",
+    });
+    if (!confirmed) return;
+    logout();
+    toast.success("Wallet disconnected");
   };
 
   return (
