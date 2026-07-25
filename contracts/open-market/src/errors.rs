@@ -65,6 +65,10 @@ pub enum InsightArenaError {
     DisputeAlreadyFiled = 61,
     /// No active dispute exists for this market.
     DisputeNotFound = 62,
+    /// Maximum appeal tiers reached; no further appeals allowed.
+    MaxAppealTiersExceeded = 64,
+    /// A dispute has already been appealed at this tier.
+    DisputeAlreadyAppealed = 65,
 
     // ── Prediction ────────────────────────────────────────────────────────────
     /// No prediction exists for the given `(market_id, predictor)` pair.
@@ -183,4 +187,12 @@ pub enum InsightArenaError {
     /// The elapsed time between the window's start and now collapsed to zero
     /// seconds, which would require dividing the price integral by zero.
     TwapDivideByZero = 110,
+
+    // ── Commit-Reveal ────────────────────────────────────────────────────────
+    /// No commitment exists for the given (market_id, predictor) pair.
+    CommitmentNotFound = 111,
+    /// Reveal window has not opened yet; the minimum time between commit and reveal has not elapsed.
+    RevealWindowNotOpen = 112,
+    /// The revealed outcome/amount/salt does not hash to the stored commitment.
+    CommitmentMismatch = 113,
 }

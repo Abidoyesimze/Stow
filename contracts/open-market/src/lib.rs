@@ -287,6 +287,26 @@ impl InsightArenaContract {
         dispute::resolve_dispute(env, admin, market_id, uphold)
     }
 
+    /// Appeal an active dispute with an escalated bond.
+    pub fn appeal_dispute(
+        env: Env,
+        appealer: Address,
+        market_id: u64,
+        appeal_bond: i128,
+    ) -> Result<(), InsightArenaError> {
+        dispute::appeal_dispute(env, appealer, market_id, appeal_bond)
+    }
+
+    /// Resolve an appeal (admin-only).
+    pub fn resolve_appeal(
+        env: Env,
+        admin: Address,
+        market_id: u64,
+        uphold: bool,
+    ) -> Result<(), InsightArenaError> {
+        dispute::resolve_appeal(env, admin, market_id, uphold)
+    }
+
     /// Enumerate all markets that currently have an active dispute.
     pub fn list_active_disputes(env: Env) -> Vec<u64> {
         dispute::list_active_disputes(&env)
@@ -308,6 +328,40 @@ impl InsightArenaContract {
         stake_amount: i128,
     ) -> Result<(), InsightArenaError> {
         prediction::submit_prediction(&env, predictor, market_id, chosen_outcome, stake_amount)
+    }
+
+    /// Submit a prediction using a pre-approved token allowance (transfer_from).
+    pub fn submit_prediction_via_allowance(
+        env: Env,
+        predictor: Address,
+        market_id: u64,
+        chosen_outcome: Symbol,
+        stake_amount: i128,
+    ) -> Result<(), InsightArenaError> {
+        prediction::submit_prediction_via_allowance(&env, predictor, market_id, chosen_outcome, stake_amount)
+    }
+
+    /// Commit to a prediction with a hash (outcome + amount + salt).
+    pub fn commit_prediction(
+        env: Env,
+        predictor: Address,
+        market_id: u64,
+        commitment_hash: soroban_sdk::BytesN<32>,
+        reveal_delay_seconds: u64,
+    ) -> Result<(), InsightArenaError> {
+        prediction::commit_prediction(&env, predictor, market_id, commitment_hash, reveal_delay_seconds)
+    }
+
+    /// Reveal a committed prediction and lock funds.
+    pub fn reveal_prediction(
+        env: Env,
+        predictor: Address,
+        market_id: u64,
+        chosen_outcome: Symbol,
+        stake_amount: i128,
+        salt: Vec<soroban_sdk::Val>,
+    ) -> Result<(), InsightArenaError> {
+        prediction::reveal_prediction(&env, predictor, market_id, chosen_outcome, stake_amount, salt)
     }
 
     /// Submit a batch of predictions atomically.
