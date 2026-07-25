@@ -1,58 +1,26 @@
-export type UserPayout = {
-  amountXlm: number;
-  claimed: boolean;
-  transactionHash?: string;
-};
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+import { apiClient, ApiError } from '@/lib/api';
 
-async function parseJsonResponse<T>(response: Response): Promise<T> {
-  if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `Request failed with status ${response.status}`);
+export interface RewardPayload {
+  eventId: string;
+  userId: string;
+  amount: number;
+}
+
+export interface RewardResponse {
+  success: boolean;
+  transactionId: string;
+}
+
+export async function claimEventReward(payload: RewardPayload): Promise<RewardResponse> {
+  try {
+    const result = await apiClient.post<RewardResponse>('/rewards/claim', payload);
+    return result;
+  } catch (error) {
+    if (error instanceof ApiError) {
+      console.error(`Failed to claim reward (${error.status}): ${error.message}`);
+      throw error; 
+    }
+    throw new Error('An unexpected error occurred while claiming the reward.');
   }
-
-  return response.json() as Promise<T>;
-}
-
-export async function finalizeEvent(eventId: string) {
-  const response = await fetch(
-    `${API_BASE_URL}/api/creator-events/${eventId}/finalize`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    },
-  );
-
-  return parseJsonResponse(response);
-}
-
-export async function claimPayout(eventId: string, walletAddress: string) {
-  const response = await fetch(
-    `${API_BASE_URL}/api/creator-events/${eventId}/payouts/${walletAddress}/claim`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    },
-  );
-
-  return parseJsonResponse<UserPayout>(response);
-}
-
-export async function getUserPayout(
-  eventId: string,
-  walletAddress: string,
-): Promise<UserPayout | null> {
-  const response = await fetch(
-    `${API_BASE_URL}/api/creator-events/${eventId}/payouts/${walletAddress}`,
-    {
-      cache: "no-store",
-    },
-  );
-
-  if (response.status === 404) {
-    return null;
-  }
-
-  return parseJsonResponse<UserPayout>(response);
 }
