@@ -28,6 +28,9 @@ pub enum MatchError {
     InvalidPointsMultiplier = 7,
     /// No match found for the given match_id.
     MatchNotFound = 8,
+    /// The configured lock lead-time would push `prediction_lock_time` to or
+    /// before the current time, leaving no window to predict at all.
+    InvalidLockLeadTime = 9,
 }
 
 // ---------------------------------------------------------------------------
@@ -107,6 +110,15 @@ pub fn create_match(
         return Err(MatchError::InvalidPointsMultiplier);
     }
 
+    // Step 7b: Compute and validate the prediction lock timestamp from the
+    // configured lock lead-time. The lock time must leave a strictly
+    // positive window after "now" for predictions to be placed at all.
+    let lock_lead_seconds = admin::get_prediction_lock_lead_seconds(env);
+    let prediction_lock_time = match_time.saturating_sub(lock_lead_seconds);
+    if prediction_lock_time <= current_time {
+        return Err(MatchError::InvalidLockLeadTime);
+    }
+
     // Step 8: Assign a new match_id
     let match_id = storage::next_match_id(env);
 
@@ -118,6 +130,7 @@ pub fn create_match(
         team_b.clone(),
         match_time,
         points_multiplier,
+        lock_lead_seconds,
     );
 
     // Step 10: Persist the match

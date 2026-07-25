@@ -308,6 +308,12 @@ pub struct Market {
     pub participant_count: u32,
     /// Dispute window duration in seconds after resolution.
     pub dispute_window: u64,
+    /// Per-market override (stroops) for the maximum liquidity a single
+    /// outcome's AMM reserve may hold. `0` means "inherit the global
+    /// `Config::max_liquidity_per_outcome` cap". Set via
+    /// `market::set_market_liquidity_cap`; takes precedence over the global
+    /// cap whenever non-zero. See `liquidity::add_liquidity`.
+    pub outcome_liquidity_cap: i128,
 }
 
 impl Market {
@@ -351,6 +357,7 @@ impl Market {
             max_stake,
             participant_count: 0,
             dispute_window,
+            outcome_liquidity_cap: 0,
         }
     }
 }

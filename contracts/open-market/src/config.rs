@@ -160,6 +160,25 @@ pub struct Config {
     /// `set_market_ttl_extension`. Defaults to `LEDGER_BUMP_MARKET` (~30
     /// days) at initialization.
     pub market_ttl_extension: u32,
+    /// Share (bps, 0-10000) of every slashed bond (failed dispute/appeal
+    /// forfeiture) routed into the insurance pool rather than the protocol
+    /// treasury. Governance-configurable via `set_insurance_pool_share_bps`.
+    /// Defaults to `1000` (10%) at initialization.
+    pub insurance_pool_share_bps: u32,
+    /// Running balance (stroops) held in the insurance pool, funded by
+    /// `insurance_pool_share_bps` of every slashed bond. Drawn down only via
+    /// `escrow::draw_insurance_pool` (admin/governance-only) to cover
+    /// documented accounting/settlement shortfalls.
+    pub insurance_pool_balance: i128,
+    /// Cumulative total (stroops) ever paid out of the insurance pool via
+    /// `escrow::draw_insurance_pool`. Monotonic; never decreases.
+    pub insurance_pool_payouts_total: i128,
+    /// Global cap (stroops) on the liquidity any single outcome's AMM
+    /// reserve may hold. `0` means unlimited. Markets may override this with
+    /// a non-zero `Market::outcome_liquidity_cap`; see
+    /// `liquidity::add_liquidity`. Admin-configurable via
+    /// `set_max_liquidity_per_outcome`. Defaults to `0` at initialization.
+    pub max_liquidity_per_outcome: i128,
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -268,6 +287,10 @@ pub fn initialize(
         timelock_delay: DEFAULT_TIMELOCK_DELAY,
         min_creator_reputation: 0, // gate disabled by default; admin/governance opt in
         market_ttl_extension: LEDGER_BUMP_MARKET,
+        insurance_pool_share_bps: 1000, // 10% of every slashed bond reserved by default
+        insurance_pool_balance: 0,
+        insurance_pool_payouts_total: 0,
+        max_liquidity_per_outcome: 0, // unlimited until admin configures a cap
     };
 
     env.storage().persistent().set(&DataKey::Config, &config);
@@ -632,6 +655,77 @@ fn emit_stake_bounds_updated(
     env.events().publish(
         (symbol_short!("cfg"), symbol_short!("stk_bnd")),
         (old_min, old_max, new_min, new_max),
+    );
+}
+
+/// Update the share (bps) of every slashed bond routed into the insurance
+/// pool. Caller must be the stored admin.
+pub fn set_insurance_pool_share_bps(
+    env: &Env,
+    admin: Address,
+    new_share_bps: u32,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    if new_share_bps > 10_000 {
+        return Err(InsightArenaError::InvalidFee);
+    }
+
+    let old_share_bps = config.insurance_pool_share_bps;
+    config.insurance_pool_share_bps = new_share_bps;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_insurance_pool_share_updated(env, old_share_bps, new_share_bps);
+
+    Ok(())
+}
+
+fn emit_insurance_pool_share_updated(env: &Env, old_share_bps: u32, new_share_bps: u32) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("ins_upd")),
+        (old_share_bps, new_share_bps),
+    );
+}
+
+/// Update the global maximum liquidity a single outcome's AMM reserve may
+/// hold. `0` means unlimited. Caller must be the stored admin. See
+/// `market::set_market_liquidity_cap` for the per-market override.
+pub fn set_max_liquidity_per_outcome(
+    env: &Env,
+    admin: Address,
+    new_cap: i128,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    if new_cap < 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    let old_cap = config.max_liquidity_per_outcome;
+    config.max_liquidity_per_outcome = new_cap;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_max_liquidity_per_outcome_updated(env, old_cap, new_cap);
+
+    Ok(())
+}
+
+fn emit_max_liquidity_per_outcome_updated(env: &Env, old_cap: i128, new_cap: i128) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("liq_cap")),
+        (old_cap, new_cap),
     );
 }
 

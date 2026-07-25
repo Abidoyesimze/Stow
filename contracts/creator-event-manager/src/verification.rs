@@ -352,8 +352,8 @@ pub fn challenge_finalization(
         return Err(EventError::UnauthorizedChallenge);
     }
 
-    let mut bond = crate::storage::get_finalization_bond(env, event_id)
-        .ok_or(EventError::BondNotFound)?;
+    let mut bond =
+        crate::storage::get_finalization_bond(env, event_id).ok_or(EventError::BondNotFound)?;
 
     if bond.settled || bond.challenged {
         return Err(EventError::BondAlreadySettled);

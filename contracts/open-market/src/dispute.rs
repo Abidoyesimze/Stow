@@ -166,8 +166,10 @@ pub fn resolve_dispute(
             .set(&DataKey::Market(market_id), &market);
         config::extend_market_ttl(&env, market_id);
     } else {
-        // Forfeit bond to treasury (accounting balance) while funds remain in escrow.
-        escrow::add_to_treasury_balance(&env, dispute.bond);
+        // Slash bond: route the configured insurance-pool share to the
+        // reserve, with the remainder to treasury (accounting balances only,
+        // funds remain in escrow).
+        escrow::slash_funds(&env, dispute.bond)?;
     }
 
     // Remove market_id from active dispute list
@@ -319,7 +321,7 @@ pub fn resolve_appeal(
             .set(&DataKey::Market(market_id), &market);
         config::extend_market_ttl(&env, market_id);
     } else {
-        escrow::add_to_treasury_balance(&env, dispute.appeal_bond);
+        escrow::slash_funds(&env, dispute.appeal_bond)?;
     }
 
     dispute.appealer = None;
