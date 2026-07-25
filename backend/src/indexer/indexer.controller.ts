@@ -21,6 +21,7 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { IndexerService } from './indexer.service';
 import { ReindexDto, ReindexQueryDto } from './dto/reindex.dto';
 import { IndexerMetricsDto } from './dto/indexer-metrics.dto';
+import { BackfillDto, BackfillResponseDto } from './dto/backfill.dto';
 
 @ApiTags('Indexer')
 @Controller('admin/indexer')
@@ -74,5 +75,18 @@ export class IndexerController {
   async retryFailed(): Promise<{ retried: number }> {
     const count = await this.indexerService.retryFailedEvents();
     return { retried: count };
+  }
+
+  @Post('backfill')
+  @ApiOperation({
+    summary: 'Backfill events over a historical ledger range',
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Backfill summary',
+    type: BackfillResponseDto,
+  })
+  async backfill(@Body() dto: BackfillDto): Promise<BackfillResponseDto> {
+    return this.indexerService.backfillEvents(dto.from_ledger, dto.to_ledger);
   }
 }
