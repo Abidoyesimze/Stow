@@ -612,6 +612,41 @@ pub fn extend_market_end_time(
     Ok(())
 }
 
+fn emit_market_ttl_extended(env: &Env, market_id: u64, caller: &Address, extension: u32) {
+    env.events().publish(
+        (symbol_short!("mkt"), symbol_short!("ttl_ext")),
+        (market_id, caller.clone(), extension),
+    );
+}
+
+/// Explicitly extend a market's persistent-storage TTL by the
+/// admin-configured extension amount (`Config::market_ttl_extension`).
+///
+/// Permissionless maintenance entrypoint — anyone may call this to keep a
+/// long-running market's storage from expiring between organic interactions;
+/// the caller must still authorize the call. Emits an event recording the
+/// extension.
+///
+/// # Errors
+/// * [`InsightArenaError::Paused`] — the platform is paused.
+/// * [`InsightArenaError::MarketNotFound`] — no market exists with the given ID.
+pub fn extend_market_ttl(
+    env: &Env,
+    caller: Address,
+    market_id: u64,
+) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(env)?;
+    caller.require_auth();
+
+    // Validates existence and bumps the market's TTL by the configured amount.
+    get_market(env, market_id)?;
+
+    let cfg = config::get_config(env)?;
+    emit_market_ttl_extended(env, market_id, &caller, cfg.market_ttl_extension);
+
+    Ok(())
+}
+
 /// Cancel a market that could not be resolved (oracle failure, creator error, etc.).
 ///
 /// Marks the market as cancelled and freezes all further mutations (predictions,

@@ -2667,3 +2667,120 @@ fn test_25pct_provider_exit_leaves_75pct_provider_position_unchanged() {
         "large provider's initial_deposit must not change when small provider exits"
     );
 }
+
+// ── AMM Swap Output Edge Cases — Issue #1262 ─────────────────────────────────
+
+#[test]
+fn test_swap_output_minimal_input_against_balanced_pool() {
+    // 1 stroop against a large balanced pool: output must be >= 0 and can
+    // never exceed the input amount itself.
+    let amount_in = 1_i128;
+    let reserve_in = 1_000_000_i128;
+    let reserve_out = 1_000_000_i128;
+    let fee_bps = 30_u32;
+
+    let amount_out = calculate_swap_output(amount_in, reserve_in, reserve_out, fee_bps).unwrap();
+    assert!(amount_out >= 0);
+    assert!(amount_out <= amount_in);
+}
+
+#[test]
+fn test_swap_output_heavily_imbalanced_reserves_both_directions() {
+    let fee_bps = 30_u32;
+
+    // Direction A: abundant input reserve, scarce output reserve (1,000,000 : 1).
+    // The output-side reserve is nearly exhausted, so output must stay
+    // strictly below it regardless of how large the input is.
+    let scarce_out = calculate_swap_output(10_000_i128, 1_000_000_i128, 1_i128, fee_bps).unwrap();
+    assert!(scarce_out >= 0);
+    assert!(scarce_out < 1_i128);
+    assert_eq!(scarce_out, 0); // Can only ever round down to 0 against a 1-unit reserve.
+
+    // Direction B: scarce input reserve, abundant output reserve (1 : 1,000,000).
+    // A modest input against a near-empty input-side reserve dominates the
+    // pool and must not panic or overflow.
+    let abundant_out =
+        calculate_swap_output(10_000_i128, 1_i128, 1_000_000_i128, fee_bps).unwrap();
+    assert!(abundant_out >= 0);
+    assert!(abundant_out < 1_000_000_i128);
+}
+
+#[test]
+fn test_swap_output_rounding_favors_pool_over_repeated_swaps() {
+    // With fee = 0, calculate_swap_output must floor (never round up) so
+    // that repeated tiny swaps can never extract more than the pool owes,
+    // i.e. the invariant k = reserve_in * reserve_out never decreases.
+    let mut reserve_in = 1_000_i128;
+    let mut reserve_out = 1_000_i128;
+    let k_initial = reserve_in * reserve_out;
+
+    for _ in 0..200 {
+        let amount_in = 1_i128;
+        let amount_out = calculate_swap_output(amount_in, reserve_in, reserve_out, 0).unwrap();
+
+        // Manually verify the result is the floor of the exact rational
+        // value — never rounded up, which would let a trader extract a
+        // fraction more than the pool actually owes.
+        let exact_numerator = amount_in * reserve_out;
+        let exact_denominator = reserve_in + amount_in;
+        assert_eq!(amount_out, exact_numerator / exact_denominator);
+
+        reserve_in += amount_in;
+        reserve_out -= amount_out;
+
+        let k_now = reserve_in * reserve_out;
+        assert!(k_now >= k_initial);
+    }
+}
+
+#[test]
+fn test_swap_output_never_exceeds_available_output_reserve() {
+    // A single trade attempting to drain far more than the pool holds must
+    // still return strictly less than the full output-side reserve.
+    let reserve_in = 5_000_i128;
+    let reserve_out = 5_000_i128;
+    let huge_amount_in = 10_000_000_i128;
+
+    let amount_out = calculate_swap_output(huge_amount_in, reserve_in, reserve_out, 30).unwrap();
+    assert!(amount_out < reserve_out);
+}
+
+#[test]
+fn test_swap_output_largest_input_without_overflow() {
+    // The largest amount_in that keeps `amount_in * reserve_out` within i128
+    // bounds must succeed without overflow.
+    let reserve_out = 1_000_i128;
+    let reserve_in = 1_000_i128;
+    let fee_bps = 30_u32;
+
+    // i128::MAX / reserve_out is the largest amount_in for which
+    // `amount_in * reserve_out` does not overflow i128.
+    let largest_safe_amount_in = i128::MAX / reserve_out;
+
+    let result = calculate_swap_output(largest_safe_amount_in, reserve_in, reserve_out, fee_bps);
+    assert!(result.is_ok());
+
+    // One stroop more overflows the numerator multiplication.
+    let result_overflow =
+        calculate_swap_output(largest_safe_amount_in + 1, reserve_in, reserve_out, fee_bps);
+    assert_eq!(result_overflow, Err(InsightArenaError::Overflow));
+}
+
+#[test]
+fn test_swap_output_invariant_k_never_decreases_with_fees() {
+    // Fees add extra value retained in the pool, so k after a fee-bearing
+    // swap must be >= k before.
+    let reserve_in = 100_000_i128;
+    let reserve_out = 100_000_i128;
+    let amount_in = 10_000_i128;
+    let fee_bps = 30_u32;
+
+    let k_before = reserve_in * reserve_out;
+    let amount_out = calculate_swap_output(amount_in, reserve_in, reserve_out, fee_bps).unwrap();
+
+    let new_reserve_in = reserve_in + amount_in;
+    let new_reserve_out = reserve_out - amount_out;
+    let k_after = new_reserve_in * new_reserve_out;
+
+    assert!(k_after >= k_before);
+}

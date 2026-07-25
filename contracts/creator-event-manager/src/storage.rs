@@ -9,7 +9,8 @@
 use soroban_sdk::{Address, Env, Vec};
 
 use crate::storage_types::{
-    DataKey, Event, Match, ParticipantScore, Prediction, PrizeAllocation, StandingEntry,
+    DataKey, Event, Match, OracleSubmission, ParticipantScore, Prediction, PrizeAllocation,
+    StandingEntry,
 };
 
 // ---------------------------------------------------------------------------
@@ -404,6 +405,88 @@ pub fn add_event_verification_signer(env: &Env, event_id: u64, signer: &Address)
     let key = DataKey::EventVerificationSigners(event_id);
     let mut list = get_event_verification_signers(env, event_id);
     list.push_back(signer.clone());
+    env.storage().persistent().set(&key, &list);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-source oracle aggregation helpers (#1347)
+// ---------------------------------------------------------------------------
+
+/// Return the configured set of authorized oracle sources, or an empty Vec
+/// if `oracle::configure_oracle_sources` has never been called.
+pub fn get_oracle_sources(env: &Env) -> Vec<Address> {
+    let key = DataKey::OracleSources;
+    match env.storage().persistent().get::<DataKey, Vec<Address>>(&key) {
+        Some(list) => {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+            list
+        }
+        None => Vec::new(env),
+    }
+}
+
+/// Write the configured set of authorized oracle sources and set its TTL.
+pub fn set_oracle_sources(env: &Env, sources: &Vec<Address>) {
+    let key = DataKey::OracleSources;
+    env.storage().persistent().set(&key, sources);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+}
+
+/// Return the configured minimum oracle source count, or `0` if
+/// `oracle::configure_oracle_sources` has never been called.
+pub fn get_oracle_min_sources(env: &Env) -> u32 {
+    let key = DataKey::OracleMinSources;
+    match env.storage().persistent().get::<DataKey, u32>(&key) {
+        Some(min_sources) => {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+            min_sources
+        }
+        None => 0,
+    }
+}
+
+/// Write the configured minimum oracle source count and set its TTL.
+pub fn set_oracle_min_sources(env: &Env, min_sources: u32) {
+    let key = DataKey::OracleMinSources;
+    env.storage().persistent().set(&key, &min_sources);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+}
+
+/// Return every oracle submission recorded for a match, or an empty Vec if
+/// none have been submitted yet. Extends the TTL on success.
+pub fn get_oracle_submissions(env: &Env, match_id: u64) -> Vec<OracleSubmission> {
+    let key = DataKey::OracleSubmissions(match_id);
+    match env
+        .storage()
+        .persistent()
+        .get::<DataKey, Vec<OracleSubmission>>(&key)
+    {
+        Some(list) => {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+            list
+        }
+        None => Vec::new(env),
+    }
+}
+
+/// Append an oracle submission to a match's submission list and set the TTL.
+pub fn add_oracle_submission(env: &Env, match_id: u64, submission: &OracleSubmission) {
+    let key = DataKey::OracleSubmissions(match_id);
+    let mut list = get_oracle_submissions(env, match_id);
+    list.push_back(submission.clone());
     env.storage().persistent().set(&key, &list);
     env.storage()
         .persistent()

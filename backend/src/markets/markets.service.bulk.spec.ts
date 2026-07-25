@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { MarketsService } from './markets.service';
+import { MarketSettlementScheduler } from './market-settlement.scheduler';
 import { Market } from './entities/market.entity';
 import { Comment } from './entities/comment.entity';
 import { MarketTemplate } from './entities/market-template.entity';
@@ -123,6 +124,13 @@ describe('MarketsService - Bulk Creation', () => {
             set: jest.fn(),
             del: jest.fn(),
             reset: jest.fn(),
+          },
+        },
+        {
+          provide: MarketSettlementScheduler,
+          useValue: {
+            getDeadLetterQueue: jest.fn(),
+            retrySettlement: jest.fn(),
           },
         },
       ],
