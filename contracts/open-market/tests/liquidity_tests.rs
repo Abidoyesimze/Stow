@@ -16,7 +16,7 @@ use insightarena_contract::{
 };
 use soroban_sdk::testutils::{Address as _, Events, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, TryIntoVal};
+use soroban_sdk::{symbol_short, vec, Address, BytesN, Env, String, Symbol, TryIntoVal};
 
 // ── Test Helpers ─────────────────────────────────────────────────────────────
 

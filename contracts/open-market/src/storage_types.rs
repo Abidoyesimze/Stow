@@ -315,6 +315,9 @@ pub struct Market {
     /// `market::set_market_liquidity_cap`; takes precedence over the global
     /// cap whenever non-zero. See `liquidity::add_liquidity`.
     pub outcome_liquidity_cap: i128,
+    /// SHA-256 content hash of off-chain market metadata. Set once at creation
+    /// and never mutated by any subsequent market operation.
+    pub metadata_hash: BytesN<32>,
 }
 
 impl Market {
@@ -360,6 +363,7 @@ impl Market {
             participant_count: 0,
             dispute_window,
             outcome_liquidity_cap: 0,
+            metadata_hash,
         }
     }
 }
