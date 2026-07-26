@@ -1,5 +1,12 @@
 use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol, Vec};
 
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReputationDecayMode {
+    Exponential,
+    Linear,
+}
+
 use crate::errors::InsightArenaError;
 use crate::storage_types::DataKey;
 
@@ -159,6 +166,13 @@ pub struct Config {
     /// `ProposalType::UpdateMinReputation` (timelocked governance). Defaults
     /// to `0` at initialization, which disables the gate entirely.
     pub min_creator_reputation: u32,
+    /// Half-life (seconds) used to decay a creator's live reputation score
+    /// toward zero as seconds pass since `CreatorStats::last_updated` with
+    /// no new activity. Read-time only — never mutates stored counters. See
+    /// `reputation::apply_reputation_decay`. Must be > 0.
+    pub reputation_half_life_seconds: u32,
+    /// Decay curve applied at read time. See `reputation::apply_reputation_decay`.
+    pub reputation_decay_mode: ReputationDecayMode,
     /// Number of ledgers a market's persistent-storage entry is extended by
     /// on each interaction (`market::bump_market`) and by the explicit
     /// `extend_market_ttl` maintenance entrypoint. Admin-configurable via
@@ -324,6 +338,8 @@ pub fn initialize(
         is_paused: false,
         timelock_delay: DEFAULT_TIMELOCK_DELAY,
         min_creator_reputation: 0, // gate disabled by default; admin/governance opt in
+        reputation_half_life_seconds: 2_592_000, // ~30 days
+        reputation_decay_mode: ReputationDecayMode::Exponential,
         market_ttl_extension: LEDGER_BUMP_MARKET,
         insurance_pool_share_bps: 1000, // 10% of every slashed bond reserved by default
         insurance_pool_balance: 0,
@@ -621,6 +637,51 @@ fn emit_min_reputation_updated(env: &Env, old_threshold: u32, new_threshold: u32
     env.events().publish(
         (symbol_short!("cfg"), symbol_short!("rep_upd")),
         (old_threshold, new_threshold),
+    );
+}
+
+fn validate_half_life(half_life_seconds: u32) -> Result<(), InsightArenaError> {
+    if half_life_seconds == 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+    Ok(())
+}
+
+/// Update the reputation decay half-life and curve. Caller must be the
+/// stored admin.
+pub fn set_reputation_decay_config(
+    env: &Env,
+    admin: Address,
+    half_life_seconds: u32,
+    mode: ReputationDecayMode,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    validate_half_life(half_life_seconds)?;
+
+    config.reputation_half_life_seconds = half_life_seconds;
+    config.reputation_decay_mode = mode;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_reputation_decay_config_updated(env, half_life_seconds, mode);
+
+    Ok(())
+}
+
+fn emit_reputation_decay_config_updated(env: &Env, half_life_seconds: u32, mode: ReputationDecayMode) {
+    let mode_sym = match mode {
+        ReputationDecayMode::Exponential => symbol_short!("exp"),
+        ReputationDecayMode::Linear => symbol_short!("linear"),
+    };
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("rdk_upd")),
+        (half_life_seconds, mode_sym),
     );
 }
 

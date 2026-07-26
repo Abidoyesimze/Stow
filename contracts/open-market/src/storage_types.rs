@@ -190,6 +190,7 @@ pub struct CreatorStats {
     pub average_participant_count: u32,
     pub dispute_count: u32,
     pub reputation_score: u32,
+    pub last_updated: u64, // ledger timestamp (unix seconds) at last mutating call
 }
 
 #[contracttype]
