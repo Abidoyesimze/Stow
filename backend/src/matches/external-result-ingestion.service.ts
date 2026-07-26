@@ -15,9 +15,9 @@ import {
 } from './entities/external-match-result.entity';
 import {
   EXTERNAL_RESULT_FEED_CLIENT,
-  ExternalResultFeedClient,
   ExternalMatchResultPayload,
 } from './external-result-feed.client';
+import type { ExternalResultFeedClient } from './external-result-feed.client';
 
 @Injectable()
 export class ExternalResultIngestionService
