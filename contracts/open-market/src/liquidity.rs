@@ -1,4 +1,4 @@
-use soroban_sdk::{Address, Env, Map, Symbol, Vec};
+use soroban_sdk::{symbol_short, Address, Env, Map, Symbol, Vec};
 
 use crate::config::{self, PERSISTENT_BUMP, PERSISTENT_THRESHOLD};
 use crate::errors::InsightArenaError;
@@ -842,10 +842,39 @@ pub fn swap_outcome(
         new_to_reserve,
     )?;
 
-    distribute_fees_to_lps(env, market_id, lp_fee_share)?;
-    if protocol_fee_share > 0 {
-        escrow::add_to_treasury_balance(env, protocol_fee_share);
+    // Further split the protocol's fee cut between the configured treasury
+    // address and liquidity providers, per `Config::treasury_split_bps` /
+    // `Config::lp_split_bps` (validated at configuration time — see
+    // `config::set_treasury_split` — to sum to exactly 10_000 bps). By
+    // default `treasury_split_bps == 10_000`, so the entire protocol fee
+    // share keeps flowing to the treasury exactly as it did before this
+    // split was introduced.
+    let cfg = config::get_config(env)?;
+    let treasury_amount = protocol_fee_share
+        .checked_mul(cfg.treasury_split_bps as i128)
+        .ok_or(InsightArenaError::Overflow)?
+        .checked_div(10_000)
+        .ok_or(InsightArenaError::Overflow)?;
+    let lp_amount_from_protocol = protocol_fee_share
+        .checked_sub(treasury_amount)
+        .ok_or(InsightArenaError::Overflow)?;
+    let total_lp_share = lp_fee_share
+        .checked_add(lp_amount_from_protocol)
+        .ok_or(InsightArenaError::Overflow)?;
+
+    distribute_fees_to_lps(env, market_id, total_lp_share)?;
+    if treasury_amount > 0 {
+        escrow::add_to_treasury_balance(env, treasury_amount);
     }
+
+    emit_treasury_fee_split(
+        env,
+        market_id,
+        &cfg.treasury_address,
+        fee_amount,
+        treasury_amount,
+        total_lp_share,
+    );
 
     let record = SwapRecord::new(
         trader,
@@ -871,6 +900,31 @@ pub fn swap_outcome(
     update_pool_volume(env, market_id, amount_in);
 
     Ok(amount_out)
+}
+
+/// Emit an event recording exactly how a swap's collected fee was split
+/// between the protocol treasury and liquidity providers. Published on every
+/// swap that reaches the fee-collection step, including zero-fee swaps (in
+/// which case both shares are `0`), so off-chain consumers can reconstruct a
+/// complete, gap-free accounting trail per market.
+fn emit_treasury_fee_split(
+    env: &Env,
+    market_id: u64,
+    treasury_address: &Address,
+    fee_amount: i128,
+    treasury_amount: i128,
+    lp_amount: i128,
+) {
+    env.events().publish(
+        (symbol_short!("fee"), symbol_short!("split")),
+        (
+            market_id,
+            treasury_address.clone(),
+            fee_amount,
+            treasury_amount,
+            lp_amount,
+        ),
+    );
 }
 
 fn distribute_fees_to_lps(

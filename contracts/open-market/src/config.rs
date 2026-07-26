@@ -179,6 +179,26 @@ pub struct Config {
     /// `liquidity::add_liquidity`. Admin-configurable via
     /// `set_max_liquidity_per_outcome`. Defaults to `0` at initialization.
     pub max_liquidity_per_outcome: i128,
+    /// Address that receives the protocol's share of every collected swap
+    /// fee (see `treasury_split_bps`), tracked via the internal treasury
+    /// balance (`escrow::get_treasury_balance` / `escrow::withdraw_treasury`).
+    /// Admin-configurable via `set_treasury_split`. Defaults to `admin` at
+    /// initialization.
+    pub treasury_address: Address,
+    /// Share (bps, 0-10000) of the protocol's fee cut — i.e. the portion of
+    /// every collected swap fee already earmarked for the protocol via
+    /// `FeeTierConfig::protocol_share_bps` (see `liquidity::swap_outcome`) —
+    /// that is routed to `treasury_address` rather than redistributed to
+    /// liquidity providers. Paired with `lp_split_bps`; the two must always
+    /// sum to exactly `10_000`, enforced by `set_treasury_split`. Defaults to
+    /// `10_000` (100%) at initialization, which preserves the pre-existing
+    /// behaviour where the entire protocol fee share accrues to the
+    /// treasury.
+    pub treasury_split_bps: u32,
+    /// Complement of `treasury_split_bps`: share (bps) of the protocol's fee
+    /// cut redirected to liquidity providers instead of the treasury.
+    /// Defaults to `0` at initialization. See `treasury_split_bps`.
+    pub lp_split_bps: u32,
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -200,6 +220,18 @@ fn load_config(env: &Env) -> Result<Config, InsightArenaError> {
 
 fn validate_protocol_fee(fee_bps: u32) -> Result<(), InsightArenaError> {
     if fee_bps > 10_000 {
+        return Err(InsightArenaError::InvalidFee);
+    }
+
+    Ok(())
+}
+
+/// Validate that a protocol-treasury-vs-LP fee split sums to exactly
+/// `10_000` bps. Reusing `InvalidFee` here matches the convention already
+/// used by `validate_protocol_fee` and `set_insurance_pool_share_bps` for
+/// bps-range validation.
+fn validate_treasury_split(treasury_split_bps: u32, lp_split_bps: u32) -> Result<(), InsightArenaError> {
+    if treasury_split_bps.checked_add(lp_split_bps) != Some(10_000) {
         return Err(InsightArenaError::InvalidFee);
     }
 
@@ -274,6 +306,7 @@ pub fn initialize(
 
     validate_protocol_fee(fee_bps)?;
 
+    let admin_for_treasury = admin.clone();
     let config = Config {
         guardian: admin.clone(),
         admin,
@@ -291,6 +324,9 @@ pub fn initialize(
         insurance_pool_balance: 0,
         insurance_pool_payouts_total: 0,
         max_liquidity_per_outcome: 0, // unlimited until admin configures a cap
+        treasury_address: admin_for_treasury,
+        treasury_split_bps: 10_000, // 100% to treasury, preserving prior behaviour
+        lp_split_bps: 0,
     };
 
     env.storage().persistent().set(&DataKey::Config, &config);
@@ -726,6 +762,81 @@ fn emit_max_liquidity_per_outcome_updated(env: &Env, old_cap: i128, new_cap: i12
     env.events().publish(
         (symbol_short!("cfg"), symbol_short!("liq_cap")),
         (old_cap, new_cap),
+    );
+}
+
+/// Update the protocol treasury address and the split (bps) of the
+/// protocol's fee cut between the treasury and liquidity providers. Caller
+/// must be the stored admin.
+///
+/// The actual per-swap split is applied in `liquidity::swap_outcome`, which
+/// further divides the fee share already earmarked for the protocol (via
+/// `FeeTierConfig::protocol_share_bps`) between `treasury_address`
+/// (`treasury_split_bps`) and liquidity providers (`lp_split_bps`), emitting
+/// a `(fee, split)` event on every swap that collects a non-zero fee.
+///
+/// # Errors
+/// - `Unauthorized` if `admin` is not the stored admin.
+/// - `InvalidFee` if `treasury_split_bps + lp_split_bps != 10_000`.
+pub fn set_treasury_split(
+    env: &Env,
+    admin: Address,
+    new_treasury_address: Address,
+    treasury_split_bps: u32,
+    lp_split_bps: u32,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    validate_treasury_split(treasury_split_bps, lp_split_bps)?;
+
+    let old_treasury_address = config.treasury_address.clone();
+    let old_treasury_split_bps = config.treasury_split_bps;
+    let old_lp_split_bps = config.lp_split_bps;
+
+    config.treasury_address = new_treasury_address.clone();
+    config.treasury_split_bps = treasury_split_bps;
+    config.lp_split_bps = lp_split_bps;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_treasury_split_updated(
+        env,
+        &old_treasury_address,
+        &new_treasury_address,
+        old_treasury_split_bps,
+        old_lp_split_bps,
+        treasury_split_bps,
+        lp_split_bps,
+    );
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_treasury_split_updated(
+    env: &Env,
+    old_treasury_address: &Address,
+    new_treasury_address: &Address,
+    old_treasury_split_bps: u32,
+    old_lp_split_bps: u32,
+    new_treasury_split_bps: u32,
+    new_lp_split_bps: u32,
+) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("trs_upd")),
+        (
+            old_treasury_address.clone(),
+            new_treasury_address.clone(),
+            old_treasury_split_bps,
+            old_lp_split_bps,
+            new_treasury_split_bps,
+            new_lp_split_bps,
+        ),
     );
 }
 
