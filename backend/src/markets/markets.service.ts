@@ -40,8 +40,10 @@ import { Comment } from './entities/comment.entity';
 import { MarketTemplate } from './entities/market-template.entity';
 import { Market, MarketSettlementState } from './entities/market.entity';
 import { UserBookmark } from './entities/user-bookmark.entity';
+import { MarketPriceSnapshot } from './entities/market-price-snapshot.entity';
 import { Prediction } from '../predictions/entities/prediction.entity';
 import { WebhookDispatcherService } from '../webhooks/services/webhook-dispatcher.service';
+import { PriceHistoryQueryDto, TimeRange, Interval } from './dto/price-history-query.dto';
 
 @Injectable()
 export class MarketsService {
@@ -69,6 +71,8 @@ export class MarketsService {
     private readonly userBookmarksRepository: Repository<UserBookmark>,
     @InjectRepository(Prediction)
     private readonly predictionsRepository: Repository<Prediction>,
+    @InjectRepository(MarketPriceSnapshot)
+    private readonly priceSnapshotRepository: Repository<MarketPriceSnapshot>,
     private readonly usersService: UsersService,
     private readonly sorobanService: SorobanService,
     private readonly dataSource: DataSource,
@@ -150,6 +154,64 @@ export class MarketsService {
     );
 
     return stats;
+  }
+
+  /**
+   * Retrieves the bucketted price history for a given market.
+   * Leverages PostgreSQL's date_trunc to downsample price points.
+   */
+  async getPriceHistory(
+    marketId: string,
+    query: PriceHistoryQueryDto,
+  ): Promise<any[]> {
+    const { timeRange, interval } = query;
+    const market = await this.findByIdOrOnChainId(marketId);
+
+    const qb = this.priceSnapshotRepository.createQueryBuilder('snapshot')
+      .where('snapshot.market_id = :marketId', { marketId: market.id });
+
+    if (timeRange !== TimeRange.ALL) {
+      let intervalStr = '';
+      if (timeRange === TimeRange.ONE_HOUR) intervalStr = '1 hour';
+      if (timeRange === TimeRange.ONE_DAY) intervalStr = '1 day';
+      if (timeRange === TimeRange.SEVEN_DAYS) intervalStr = '7 days';
+      if (timeRange === TimeRange.THIRTY_DAYS) intervalStr = '30 days';
+      
+      qb.andWhere(`snapshot.created_at >= NOW() - INTERVAL '${intervalStr}'`);
+    }
+
+    let pgInterval = 'hour';
+    if (interval === Interval.ONE_MINUTE) pgInterval = 'minute';
+    if (interval === Interval.ONE_HOUR) pgInterval = 'hour';
+    if (interval === Interval.ONE_DAY) pgInterval = 'day';
+
+    qb.select(`date_trunc('${pgInterval}', snapshot.created_at)`, 'timestamp')
+      .addSelect('snapshot.outcome_index', 'outcome_index')
+      .addSelect('AVG(snapshot.price)', 'price')
+      .groupBy(`date_trunc('${pgInterval}', snapshot.created_at)`)
+      .addGroupBy('snapshot.outcome_index')
+      .orderBy('timestamp', 'ASC')
+      .addOrderBy('snapshot.outcome_index', 'ASC');
+
+    const results = await qb.getRawMany();
+    
+    return results.map(row => ({
+      timestamp: row.timestamp,
+      outcome_index: row.outcome_index,
+      price: Number(row.price),
+    }));
+  }
+
+  /**
+   * Internal helper to record a new price point for an outcome
+   */
+  async snapshotPrice(marketId: string, outcomeIndex: number, price: number): Promise<void> {
+    const snapshot = this.priceSnapshotRepository.create({
+      market_id: marketId,
+      outcome_index: outcomeIndex,
+      price,
+    });
+    await this.priceSnapshotRepository.save(snapshot);
   }
 
   /**

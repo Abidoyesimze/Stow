@@ -18,6 +18,8 @@ import { AuthModule } from '../auth/auth.module';
 import { ApiKeyGuard } from '../common/guards/api-key.guard';
 import { PublicMarketsController } from './public-markets.controller';
 
+import { MarketPriceSnapshot } from './entities/market-price-snapshot.entity';
+
 @Module({
   imports: [
     TypeOrmModule.forFeature([
@@ -26,6 +28,7 @@ import { PublicMarketsController } from './public-markets.controller';
       MarketTemplate,
       UserBookmark,
       Prediction,
+      MarketPriceSnapshot,
     ]),
     UsersModule,
     AnalyticsModule,
