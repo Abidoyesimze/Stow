@@ -18,6 +18,7 @@ import { AnalyticsService } from '../analytics/analytics.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SorobanService } from '../soroban/soroban.service';
 import { FlagsService } from '../flags/flags.service';
+import { PredictionsService } from '../predictions/predictions.service';
 
 describe('AdminService (Bulk CSV Market Import)', () => {
   let service: AdminService;
@@ -62,6 +63,7 @@ describe('AdminService (Bulk CSV Market Import)', () => {
         { provide: NotificationsService, useValue: {} },
         { provide: SorobanService, useValue: {} },
         { provide: FlagsService, useValue: {} },
+        { provide: PredictionsService, useValue: {} },
       ],
     }).compile();
 

@@ -469,7 +469,7 @@ export class DisputesService {
       throw new NotFoundException('Arbiter user not found');
     }
 
-    if (arbiter.role !== Role.Admin && arbiter.role !== Role.Moderator) {
+    if (arbiter.role !== 'admin' && arbiter.role !== 'moderator') {
       throw new BadRequestException(
         'Arbiter must have the admin or moderator role',
       );

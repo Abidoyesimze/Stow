@@ -694,7 +694,13 @@ describe('DisputesService', () => {
     });
 
     it('throws NotFoundException when the arbiter user does not exist', async () => {
-      jest.spyOn(service, 'findOne').mockResolvedValue(mockDispute);
+      // Cloned rather than reusing the shared mockDispute: earlier describe
+      // blocks (e.g. 'resolve') mutate mockDispute.status in place via the
+      // service, so relying on the shared reference here is order-dependent.
+      jest.spyOn(service, 'findOne').mockResolvedValue({
+        ...mockDispute,
+        status: DisputeStatus.PENDING,
+      });
       jest.spyOn(usersRepository, 'findOne').mockResolvedValue(null);
 
       await expect(
@@ -703,7 +709,10 @@ describe('DisputesService', () => {
     });
 
     it('throws BadRequestException when the target user is not admin/moderator', async () => {
-      jest.spyOn(service, 'findOne').mockResolvedValue(mockDispute);
+      jest.spyOn(service, 'findOne').mockResolvedValue({
+        ...mockDispute,
+        status: DisputeStatus.PENDING,
+      });
       jest.spyOn(usersRepository, 'findOne').mockResolvedValue({
         ...mockUser,
         role: 'user',
