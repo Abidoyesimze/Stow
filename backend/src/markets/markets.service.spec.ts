@@ -1255,9 +1255,6 @@ describe('MarketsService settlement grace period workflow', () => {
     }) as Market;
 
   beforeEach(async () => {
-    jest.useFakeTimers();
-    jest.setSystemTime(currentNow);
-
     marketsRepository = {
       create: jest.fn(),
       save: jest.fn(),
@@ -1275,6 +1272,14 @@ describe('MarketsService settlement grace period workflow', () => {
         { provide: getRepositoryToken(MarketTemplate), useValue: {} },
         { provide: getRepositoryToken(UserBookmark), useValue: {} },
         { provide: getRepositoryToken(Prediction), useValue: {} },
+        {
+          provide: getRepositoryToken(MarketPriceSnapshot),
+          useValue: {
+            create: jest.fn(),
+            save: jest.fn(),
+            createQueryBuilder: jest.fn(),
+          },
+        },
         { provide: UsersService, useValue: {} },
         { provide: SorobanService, useValue: sorobanService },
         { provide: DataSource, useValue: {} },
@@ -1292,6 +1297,9 @@ describe('MarketsService settlement grace period workflow', () => {
         },
       ],
     }).compile();
+
+    jest.useFakeTimers();
+    jest.setSystemTime(currentNow);
 
     service = module.get<MarketsService>(MarketsService);
     webhookDispatcher = module.get(WebhookDispatcherService);
