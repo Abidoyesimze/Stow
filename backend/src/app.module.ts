@@ -59,6 +59,11 @@ import { AccountModule } from './account/account.module';
           ttl: config.get<number>('AUTH_THROTTLE_TTL_MS') ?? 60000,
           limit: config.get<number>('AUTH_THROTTLE_LIMIT') ?? 5,
         },
+        {
+          name: 'public',
+          ttl: config.get<number>('PUBLIC_API_THROTTLE_TTL_MS') ?? 60000,
+          limit: config.get<number>('PUBLIC_API_THROTTLE_LIMIT') ?? 60,
+        },
       ],
     }),
     LoggerModule.forRoot({

@@ -40,6 +40,16 @@ async function bootstrap() {
       },
       'api-key',
     )
+    .addApiKey(
+      {
+        type: 'apiKey',
+        name: 'x-api-key',
+        in: 'header',
+        description:
+          'Public API key. Keys must include the public:read scope and use the dedicated public rate-limit tier.',
+      },
+      'public-api-key',
+    )
     .build();
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api/v1/docs', app, document);

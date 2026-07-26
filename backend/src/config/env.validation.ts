@@ -122,6 +122,15 @@ class EnvironmentVariables {
   @IsNumber()
   AUTH_THROTTLE_TTL_MS?: number;
 
+  // Public API key tier rate limiting (#1393)
+  @IsOptional()
+  @IsNumber()
+  PUBLIC_API_THROTTLE_LIMIT?: number;
+
+  @IsOptional()
+  @IsNumber()
+  PUBLIC_API_THROTTLE_TTL_MS?: number;
+
   @IsOptional()
   @IsString()
   MATCH_RESULTS_FEED_URL?: string;
