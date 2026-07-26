@@ -2784,3 +2784,351 @@ fn test_swap_output_invariant_k_never_decreases_with_fees() {
 
     assert!(k_after >= k_before);
 }
+
+// ── Impermanent Loss Accounting Tests (Issue #1335) ──────────────────────────
+//
+// `calculate_impermanent_loss_bps` implements the standard 2-asset
+// constant-product IL formula `IL = 2*sqrt(k)/(1+k) - 1`, where `k` is the
+// ratio of (current reserve-ratio) over (entry reserve-ratio) for the pool's
+// designated IL-tracked pair (`Market::outcome_options[0]` / `[1]`). Because
+// the formula only depends on the *magnitude* of the ratio change, it is
+// symmetric under `k -> 1/k`: a price move that doubles outcome A's reserve
+// relative to B produces the same IL magnitude as one that halves it. This is
+// expected DeFi behavior (IL is a loss relative to holding regardless of
+// which side moved) and is exercised explicitly below, not a bug.
+
+#[test]
+fn test_il_no_price_change_is_zero() {
+    // k == 1 (entry ratio == current ratio) must give exactly 0 bps.
+    assert_eq!(calculate_impermanent_loss_bps(1000, 1000, 1000, 1000), Ok(0));
+    assert_eq!(
+        calculate_impermanent_loss_bps(500_000, 500_000, 2_000_000, 2_000_000),
+        Ok(0)
+    );
+    // Same *ratio*, different absolute reserves (pool grew, ratio held at 1:1).
+    assert_eq!(
+        calculate_impermanent_loss_bps(100_000, 100_000, 300_000, 300_000),
+        Ok(0)
+    );
+}
+
+#[test]
+fn test_il_price_ratio_quadruples_is_twenty_percent() {
+    // k == 4: IL = 2*sqrt(4)/(1+4) - 1 = 2*2/5 - 1 = 0.8 - 1 = -0.20, i.e. -2000 bps.
+    let il = calculate_impermanent_loss_bps(100_000, 100_000, 400_000, 100_000).unwrap();
+    assert_eq!(il, -2000);
+}
+
+#[test]
+fn test_il_symmetric_for_inverse_price_ratio() {
+    // k == 1/4 is the mirror image of k == 4 (same magnitude of relative price
+    // change, opposite direction) and must produce the same IL.
+    let il_k4 = calculate_impermanent_loss_bps(100_000, 100_000, 400_000, 100_000).unwrap();
+    let il_k_quarter = calculate_impermanent_loss_bps(100_000, 100_000, 100_000, 400_000).unwrap();
+    assert_eq!(il_k4, il_k_quarter);
+    assert_eq!(il_k_quarter, -2000);
+}
+
+#[test]
+fn test_il_moderate_price_move_k_2() {
+    // k == 2: IL = 2*sqrt(2)/3 - 1 ≈ -0.05719, i.e. ≈ -571.9 bps.
+    let il = calculate_impermanent_loss_bps(100_000, 100_000, 200_000, 100_000).unwrap();
+    let expected_float_bps = (2.0 * 2.0_f64.sqrt() / 3.0 - 1.0) * 10_000.0;
+    assert!(il < 0);
+    assert!((il as f64 - expected_float_bps).abs() <= 2.0);
+}
+
+#[test]
+fn test_il_never_positive() {
+    // By AM-GM, 2*sqrt(k)/(1+k) <= 1 for any k > 0, so IL must never be positive
+    // regardless of how extreme the price move is.
+    for (entry_a, entry_b, current_a, current_b) in [
+        (1_i128, 1_i128, 1_000_000_i128, 1_i128),
+        (1_i128, 1_000_000_i128, 1_i128, 1_i128),
+        (100_000_i128, 100_000_i128, 100_001_i128, 99_999_i128),
+    ] {
+        let il = calculate_impermanent_loss_bps(entry_a, entry_b, current_a, current_b).unwrap();
+        assert!(il <= 0);
+    }
+}
+
+#[test]
+fn test_il_rejects_non_positive_inputs() {
+    assert_eq!(
+        calculate_impermanent_loss_bps(0, 1000, 1000, 1000),
+        Err(InsightArenaError::InvalidInput)
+    );
+    assert_eq!(
+        calculate_impermanent_loss_bps(1000, 0, 1000, 1000),
+        Err(InsightArenaError::InvalidInput)
+    );
+    assert_eq!(
+        calculate_impermanent_loss_bps(1000, 1000, 0, 1000),
+        Err(InsightArenaError::InvalidInput)
+    );
+    assert_eq!(
+        calculate_impermanent_loss_bps(1000, 1000, 1000, 0),
+        Err(InsightArenaError::InvalidInput)
+    );
+    assert_eq!(
+        calculate_impermanent_loss_bps(-1000, 1000, 1000, 1000),
+        Err(InsightArenaError::InvalidInput)
+    );
+}
+
+#[test]
+fn test_get_position_il_zero_immediately_after_deposit() {
+    // No price movement has occurred yet, so the live IL for a freshly opened
+    // position must be exactly zero.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let creator = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let liquidity = 200_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    assert_eq!(client.get_position_il(&provider, &market_id), 0);
+
+    // The stored per-withdrawal cumulative figure also starts at zero.
+    let position = client.get_lp_position(&provider, &market_id);
+    assert_eq!(position.cumulative_il_bps, 0);
+}
+
+#[test]
+fn test_get_position_il_favorable_price_move() {
+    // Swapping YES for NO increases the YES reserve relative to NO, pushing
+    // the tracked pair's ratio above the 1:1 entry ratio (k > 1).
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let creator = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let liquidity = 1_000_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let position = client.get_lp_position(&provider, &market_id);
+    let (entry_a, entry_b) = (position.entry_reserve_a, position.entry_reserve_b);
+    assert_eq!(entry_a, entry_b); // 2-outcome pool: equal 1:1 entry split.
+
+    let swap_amount = 300_000_i128;
+    sa.mint(&trader, &swap_amount);
+    token.approve(&trader, &client.address, &swap_amount, &9999);
+    client.swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &swap_amount,
+        &0_i128,
+    );
+
+    let current_a = client.get_outcome_price(&market_id, &symbol_short!("yes"));
+    let current_b = client.get_outcome_price(&market_id, &symbol_short!("no"));
+    assert!(current_a > entry_a);
+    assert!(current_b < entry_b);
+
+    let expected_il =
+        calculate_impermanent_loss_bps(entry_a, entry_b, current_a, current_b).unwrap();
+    assert!(expected_il < 0);
+
+    let live_il = client.get_position_il(&provider, &market_id);
+    assert_eq!(live_il, expected_il);
+}
+
+#[test]
+fn test_get_position_il_adverse_price_move() {
+    // Swapping NO for YES is the mirror-image trade: it decreases the YES
+    // reserve relative to NO, pushing the ratio below the 1:1 entry ratio
+    // (k < 1). IL is still <= 0 (never a gain), consistent with the formula's
+    // symmetry under k -> 1/k.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let creator = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let liquidity = 1_000_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let position = client.get_lp_position(&provider, &market_id);
+    let (entry_a, entry_b) = (position.entry_reserve_a, position.entry_reserve_b);
+
+    let swap_amount = 300_000_i128;
+    sa.mint(&trader, &swap_amount);
+    token.approve(&trader, &client.address, &swap_amount, &9999);
+    client.swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("no"),
+        &symbol_short!("yes"),
+        &swap_amount,
+        &0_i128,
+    );
+
+    let current_a = client.get_outcome_price(&market_id, &symbol_short!("yes"));
+    let current_b = client.get_outcome_price(&market_id, &symbol_short!("no"));
+    assert!(current_a < entry_a);
+    assert!(current_b > entry_b);
+
+    let expected_il =
+        calculate_impermanent_loss_bps(entry_a, entry_b, current_a, current_b).unwrap();
+    assert!(expected_il < 0);
+
+    let live_il = client.get_position_il(&provider, &market_id);
+    assert_eq!(live_il, expected_il);
+}
+
+#[test]
+fn test_entry_snapshot_immutable_across_topup() {
+    // The entry snapshot must never change once a position exists, even when
+    // the same provider deposits again after the pool's price has moved.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let creator = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let first_deposit = 500_000_i128;
+    sa.mint(&provider, &first_deposit);
+    token.approve(&provider, &client.address, &first_deposit, &9999);
+    client.add_liquidity(&provider, &market_id, &first_deposit);
+
+    let position_before = client.get_lp_position(&provider, &market_id);
+    let (entry_a_before, entry_b_before) =
+        (position_before.entry_reserve_a, position_before.entry_reserve_b);
+
+    // Move the pool's price before the top-up.
+    let swap_amount = 200_000_i128;
+    sa.mint(&trader, &swap_amount);
+    token.approve(&trader, &client.address, &swap_amount, &9999);
+    client.swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &swap_amount,
+        &0_i128,
+    );
+
+    // Top-up deposit by the same provider.
+    let second_deposit = 100_000_i128;
+    sa.mint(&provider, &second_deposit);
+    token.approve(&provider, &client.address, &second_deposit, &9999);
+    client.add_liquidity(&provider, &market_id, &second_deposit);
+
+    let position_after = client.get_lp_position(&provider, &market_id);
+    assert_eq!(position_after.entry_reserve_a, entry_a_before);
+    assert_eq!(position_after.entry_reserve_b, entry_b_before);
+}
+
+#[test]
+fn test_cumulative_il_untouched_by_swaps_updated_on_withdrawal() {
+    // `cumulative_il_bps` must only change when the position is withdrawn
+    // from — not merely because the pool's price moved via a swap.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let creator = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let liquidity = 1_000_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    let lp_tokens = client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let swap_amount = 300_000_i128;
+    sa.mint(&trader, &swap_amount);
+    token.approve(&trader, &client.address, &swap_amount, &9999);
+    client.swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &swap_amount,
+        &0_i128,
+    );
+
+    // Price has moved, so the live IL is non-zero, but nothing has been
+    // withdrawn yet, so the stored cumulative figure is still zero.
+    let live_il_before_withdrawal = client.get_position_il(&provider, &market_id);
+    assert!(live_il_before_withdrawal < 0);
+    let position_before_withdrawal = client.get_lp_position(&provider, &market_id);
+    assert_eq!(position_before_withdrawal.cumulative_il_bps, 0);
+
+    // Withdraw part of the position; this must snapshot the current IL into
+    // `cumulative_il_bps`. `remove_liquidity` does not touch outcome_reserves,
+    // so the live figure right after should be unchanged from right before.
+    client.remove_liquidity(&provider, &market_id, &(lp_tokens / 2));
+
+    let position_after_withdrawal = client.get_lp_position(&provider, &market_id);
+    assert_eq!(
+        position_after_withdrawal.cumulative_il_bps,
+        live_il_before_withdrawal
+    );
+
+    let live_il_after_withdrawal = client.get_position_il(&provider, &market_id);
+    assert_eq!(live_il_after_withdrawal, live_il_before_withdrawal);
+}
+
+#[test]
+fn test_cumulative_il_zero_on_withdrawal_without_price_change() {
+    // Withdrawing without any prior swap must record zero IL.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let creator = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let liquidity = 200_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    let lp_tokens = client.add_liquidity(&provider, &market_id, &liquidity);
+
+    client.remove_liquidity(&provider, &market_id, &(lp_tokens / 2));
+
+    let position = client.get_lp_position(&provider, &market_id);
+    assert_eq!(position.cumulative_il_bps, 0);
+}

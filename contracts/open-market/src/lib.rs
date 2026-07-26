@@ -916,6 +916,21 @@ impl InsightArenaContract {
         liquidity::get_lp_position_public(&env, provider, market_id)
     }
 
+    /// Return the current impermanent loss (bps, always `<= 0`) for an open LP
+    /// position, computed live against the pool's current reserves relative to
+    /// the position's immutable entry-price snapshot. See
+    /// `liquidity::calculate_impermanent_loss_bps` for the formula and
+    /// `liquidity::get_position_il` for how it differs from the
+    /// `LPPosition::cumulative_il_bps` field (which only reflects the last
+    /// withdrawal).
+    pub fn get_position_il(
+        env: Env,
+        provider: Address,
+        market_id: u64,
+    ) -> Result<i128, InsightArenaError> {
+        liquidity::get_position_il(&env, provider, market_id)
+    }
+
     /// Get all active LP positions for a market.
     pub fn get_all_lp_providers(env: Env, market_id: u64) -> Vec<crate::storage_types::LPPosition> {
         liquidity::get_all_lp_providers(&env, market_id)

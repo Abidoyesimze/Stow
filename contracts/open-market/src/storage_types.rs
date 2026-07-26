@@ -408,15 +408,37 @@ pub struct LPPosition {
     pub initial_deposit: i128,
     pub fees_earned: i128,
     pub created_at: u64,
+    /// Reserve of the pool's first IL-tracked outcome (`Market::outcome_options[0]`)
+    /// at the moment this position was opened. An immutable entry-price snapshot:
+    /// set once in `LPPosition::new` / `liquidity::add_liquidity` and never
+    /// mutated afterward, even when the same provider tops up their position with
+    /// additional deposits. Used as the impermanent-loss baseline — see
+    /// `liquidity::calculate_impermanent_loss_bps`.
+    pub entry_reserve_a: i128,
+    /// Reserve of the pool's second IL-tracked outcome (`Market::outcome_options[1]`)
+    /// at the moment this position was opened. Immutable; see `entry_reserve_a`.
+    /// For single-outcome markets this mirrors `entry_reserve_a`, which yields a
+    /// price ratio of 1 (i.e. impermanent loss is always zero in that case).
+    pub entry_reserve_b: i128,
+    /// Impermanent loss, in basis points (always `<= 0`), computed relative to
+    /// `entry_reserve_a` / `entry_reserve_b` the last time this position was
+    /// withdrawn from via `liquidity::remove_liquidity`. Zero until the first
+    /// withdrawal. For the always-current figure, use `liquidity::get_position_il`,
+    /// which recomputes live against the pool's current reserves instead of
+    /// relying on this cached, withdrawal-time value.
+    pub cumulative_il_bps: i128,
 }
 
 impl LPPosition {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider: Address,
         market_id: u64,
         lp_tokens: i128,
         initial_deposit: i128,
         created_at: u64,
+        entry_reserve_a: i128,
+        entry_reserve_b: i128,
     ) -> Self {
         Self {
             provider,
@@ -425,6 +447,9 @@ impl LPPosition {
             initial_deposit,
             fees_earned: 0,
             created_at,
+            entry_reserve_a,
+            entry_reserve_b,
+            cumulative_il_bps: 0,
         }
     }
 }
