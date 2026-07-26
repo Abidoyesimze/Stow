@@ -22,6 +22,7 @@ import { MarketTemplate } from './entities/market-template.entity';
 import { Market, MarketSettlementState } from './entities/market.entity';
 import { UserBookmark } from './entities/user-bookmark.entity';
 import { Prediction } from '../predictions/entities/prediction.entity';
+import { MarketPriceSnapshot } from './entities/market-price-snapshot.entity';
 import { MarketsService } from './markets.service';
 import { MarketSettlementScheduler } from './market-settlement.scheduler';
 import { WebhookDispatcherService } from '../webhooks/services/webhook-dispatcher.service';
@@ -111,6 +112,14 @@ describe('MarketsService', () => {
           provide: getRepositoryToken(Prediction),
           useValue: {
             find: jest.fn(),
+          },
+        },
+        {
+          provide: getRepositoryToken(MarketPriceSnapshot),
+          useValue: {
+            create: jest.fn(),
+            save: jest.fn(),
+            createQueryBuilder: jest.fn(),
           },
         },
         {

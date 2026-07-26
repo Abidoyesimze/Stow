@@ -5,6 +5,18 @@ import { MarketPriceSnapshot } from './entities/market-price-snapshot.entity';
 import { Market } from './entities/market.entity';
 import { PriceHistoryQueryDto, TimeRange, Interval } from './dto/price-history-query.dto';
 
+// Missing imports added based on user's guidance
+import { Comment } from './entities/comment.entity';
+import { MarketTemplate } from './entities/market-template.entity';
+import { UserBookmark } from './entities/user-bookmark.entity';
+import { Prediction } from '../predictions/entities/prediction.entity';
+import { UsersService } from '../users/users.service';
+import { SorobanService } from '../soroban/soroban.service';
+import { DataSource } from 'typeorm';
+import { WebhookDispatcherService } from '../webhooks/services/webhook-dispatcher.service';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { MarketSettlementScheduler } from './market-settlement.scheduler';
+
 describe('MarketsService - getPriceHistory', () => {
   let service: MarketsService;
   let mockSnapshotRepo: any;
@@ -13,25 +25,25 @@ describe('MarketsService - getPriceHistory', () => {
 
   beforeEach(async () => {
     mockQueryBuilder = {
-      where: vi.fn().mockReturnThis(),
-      andWhere: vi.fn().mockReturnThis(),
-      select: vi.fn().mockReturnThis(),
-      addSelect: vi.fn().mockReturnThis(),
-      groupBy: vi.fn().mockReturnThis(),
-      addGroupBy: vi.fn().mockReturnThis(),
-      orderBy: vi.fn().mockReturnThis(),
-      addOrderBy: vi.fn().mockReturnThis(),
-      getRawMany: vi.fn().mockResolvedValue([]),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      select: jest.fn().mockReturnThis(),
+      addSelect: jest.fn().mockReturnThis(),
+      groupBy: jest.fn().mockReturnThis(),
+      addGroupBy: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      addOrderBy: jest.fn().mockReturnThis(),
+      getRawMany: jest.fn().mockResolvedValue([]),
     };
 
     mockSnapshotRepo = {
-      createQueryBuilder: vi.fn().mockReturnValue(mockQueryBuilder),
-      create: vi.fn(),
-      save: vi.fn(),
+      createQueryBuilder: jest.fn().mockReturnValue(mockQueryBuilder),
+      create: jest.fn(),
+      save: jest.fn(),
     };
 
     mockMarketsRepo = {
-      findOne: vi.fn().mockResolvedValue({ id: 'market-1' }),
+      findOne: jest.fn().mockResolvedValue({ id: 'market-1' }),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -45,27 +57,27 @@ describe('MarketsService - getPriceHistory', () => {
           provide: getRepositoryToken(Market),
           useValue: mockMarketsRepo,
         },
-        // Provide other dependencies as mocks to allow instantiation
-        { provide: 'CommentRepository', useValue: {} },
-        { provide: 'MarketTemplateRepository', useValue: {} },
-        { provide: 'UserBookmarkRepository', useValue: {} },
-        { provide: 'PredictionRepository', useValue: {} },
-        { provide: 'UsersService', useValue: {} },
-        { provide: 'SorobanService', useValue: {} },
-        { provide: 'DataSource', useValue: {} },
-        { provide: 'WebhookDispatcherService', useValue: {} },
-        { provide: 'CACHE_MANAGER', useValue: {} },
-        { provide: 'MarketSettlementScheduler', useValue: {} },
+        { provide: getRepositoryToken(Comment), useValue: {} },
+        { provide: getRepositoryToken(MarketTemplate), useValue: {} },
+        { provide: getRepositoryToken(UserBookmark), useValue: {} },
+        { provide: getRepositoryToken(Prediction), useValue: {} },
+        { provide: UsersService, useValue: {} },
+        { provide: SorobanService, useValue: {} },
+        { provide: DataSource, useValue: {} },
+        { provide: WebhookDispatcherService, useValue: { emit: jest.fn() } },
+        { provide: CACHE_MANAGER, useValue: {} },
+        { provide: MarketSettlementScheduler, useValue: {} },
       ],
     }).compile();
 
     service = module.get<MarketsService>(MarketsService);
+    
     // Stub findByIdOrOnChainId so it doesn't try to query the real repo
-    vi.spyOn(service as any, 'findByIdOrOnChainId').mockResolvedValue({ id: 'market-1' } as Market);
+    jest.spyOn(service as any, 'findByIdOrOnChainId').mockResolvedValue({ id: 'market-1' } as Market);
   });
 
   afterEach(() => {
-    vi.clearAllMocks();
+    jest.clearAllMocks();
   });
 
   it('should query all data when timeRange is ALL', async () => {
