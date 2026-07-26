@@ -24,12 +24,16 @@ export enum WinningTeam {
 @Index(['result_submitted', 'match_time'])
 @Index(['match_time'])
 @Index(['submitted_by'])
+@Index(['external_id'], { unique: true })
 export class Match {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ type: 'bigint' })
   on_chain_match_id: number;
+
+  @Column({ type: 'varchar', length: 255, nullable: true })
+  external_id: string | null;
 
   @ManyToOne(() => CreatorEvent, (event) => event.matches, {
     onDelete: 'CASCADE',

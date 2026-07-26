@@ -6,8 +6,8 @@ import { apiClient, ApiError } from "@/lib/api";
 import { useFavorites } from "@/context/FavoritesContext";
 import { useInfiniteScroll } from "@/hooks/useInfiniteScroll";
 import MarketCard from "@/component/MarketCard";
+import { MarketsPageLoadingSkeleton } from "@/component/loading-route-skeletons";
 import { EmptyState } from "@/component/ui/empty-state";
-import { Skeleton } from "@/component/ui/skeleton";
 import { Heart, AlertCircle, Inbox, Loader2 } from "lucide-react";
 
 interface Market {
@@ -191,30 +191,7 @@ export default function MarketsPage() {
     return counts;
   }, [markets]);
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-gray-900 via-black to-gray-900 p-6 md:p-10">
-        <div className="mx-auto max-w-7xl space-y-8">
-          <div>
-            <div className="mb-4 flex items-center justify-between">
-              <div>
-                <h1 className="text-3xl font-bold text-white">Markets</h1>
-                <p className="mt-2 text-gray-400">
-                  Browse and predict on various markets
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-            {Array.from({ length: 6 }).map((_, idx) => (
-              <Skeleton key={idx} className="h-64 rounded-lg bg-white/10" />
-            ))}
-          </div>
-        </div>
-      </div>
-    );
-  }
+  if (loading || favoritesLoading) return <MarketsPageLoadingSkeleton />;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-black to-gray-900 p-6 md:p-10">
