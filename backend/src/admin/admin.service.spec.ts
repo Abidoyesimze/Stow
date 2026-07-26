@@ -148,6 +148,10 @@ describe('AdminService (Verified Addresses)', () => {
           provide: require('../flags/flags.service').FlagsService,
           useValue: { listFlags: jest.fn(), resolveFlag: jest.fn() },
         },
+        {
+          provide: require('../markets/markets.service').MarketsService,
+          useValue: { createMarketRowTransactional: jest.fn() },
+        },
       ],
     }).compile();
 
