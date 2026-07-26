@@ -612,6 +612,14 @@ describe('MarketsService.update', () => {
           },
         },
         {
+          provide: getRepositoryToken(MarketPriceSnapshot),
+          useValue: {
+            create: jest.fn(),
+            save: jest.fn(),
+            createQueryBuilder: jest.fn(),
+          },
+        },
+        {
           provide: UsersService,
           useValue: {},
         },
@@ -831,6 +839,14 @@ describe('MarketsService.getPredictionStats', () => {
           useValue: predictionsRepository,
         },
         {
+          provide: getRepositoryToken(MarketPriceSnapshot),
+          useValue: {
+            create: jest.fn(),
+            save: jest.fn(),
+            createQueryBuilder: jest.fn(),
+          },
+        },
+        {
           provide: UsersService,
           useValue: {},
         },
@@ -980,6 +996,14 @@ describe('MarketsService.cancelMarket', () => {
         { provide: getRepositoryToken(MarketTemplate), useValue: {} },
         { provide: getRepositoryToken(UserBookmark), useValue: {} },
         { provide: getRepositoryToken(Prediction), useValue: {} },
+        {
+          provide: getRepositoryToken(MarketPriceSnapshot),
+          useValue: {
+            create: jest.fn(),
+            save: jest.fn(),
+            createQueryBuilder: jest.fn(),
+          },
+        },
         { provide: UsersService, useValue: {} },
         { provide: SorobanService, useValue: sorobanService },
         { provide: DataSource, useValue: {} },
@@ -1130,6 +1154,14 @@ describe('MarketsService pause/resume cache invalidation', () => {
         { provide: getRepositoryToken(MarketTemplate), useValue: {} },
         { provide: getRepositoryToken(UserBookmark), useValue: {} },
         { provide: getRepositoryToken(Prediction), useValue: {} },
+        {
+          provide: getRepositoryToken(MarketPriceSnapshot),
+          useValue: {
+            create: jest.fn(),
+            save: jest.fn(),
+            createQueryBuilder: jest.fn(),
+          },
+        },
         { provide: UsersService, useValue: {} },
         { provide: SorobanService, useValue: sorobanService },
         { provide: DataSource, useValue: {} },
