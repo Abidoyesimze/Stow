@@ -20,6 +20,7 @@ import {
 import { OracleService } from './oracle.service';
 import { OracleAuthGuard } from './guards/oracle-auth.guard';
 import { WebhookAuthGuard } from './guards/webhook-auth.guard';
+import { OracleReliabilityService } from './oracle-reliability.service';
 import {
   ListPendingMatchesQueryDto,
   PaginatedPendingMatchesResponse,
@@ -49,6 +50,7 @@ export class OracleController {
     private readonly oracleService: OracleService,
     private readonly webhookService: WebhookService,
     private readonly submissionHistoryService: SubmissionHistoryService,
+    private readonly reliabilityService: OracleReliabilityService,
   ) {}
 
   @Get('pending-matches')
@@ -132,6 +134,16 @@ export class OracleController {
     @Query() query: GetFlagsQueryDto,
   ): Promise<PaginatedFlagsResponse> {
     return this.submissionHistoryService.getFlags(query);
+  }
+
+  @Get('sources/reliability')
+  @UseGuards(OracleAuthGuard)
+  @ApiSecurity('api-key')
+  @ApiOperation({ summary: 'Get reliability scores for all oracle sources' })
+  @ApiResponse({ status: 200, description: 'List of source reliability scores' })
+  @ApiResponse({ status: 401, description: 'Unauthorized - invalid API key' })
+  async getSourceReliability() {
+    return this.reliabilityService.getScores();
   }
 
   @Post('submissions/:id/review')
