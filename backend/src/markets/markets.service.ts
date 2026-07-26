@@ -234,6 +234,64 @@ export class MarketsService {
     }
   }
 
+  /**
+   * Creates a single market with its own dedicated transaction. Used by the
+   * admin CSV bulk-import path so each row commits or rolls back
+   * independently, without aborting other valid rows in the same import.
+   */
+  async createMarketRowTransactional(
+    dto: CreateMarketDto,
+    user: User,
+  ): Promise<Market> {
+    const endTime = new Date(dto.end_time);
+    if (endTime <= new Date()) {
+      throw new BadRequestException('end_time must be in the future');
+    }
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+    try {
+      let onChainMarketId: string;
+      try {
+        const result = await this.sorobanService.createMarket(
+          dto.title,
+          dto.description,
+          dto.category,
+          dto.outcome_options,
+          dto.end_time,
+          dto.resolution_time,
+        );
+        onChainMarketId = result.market_id;
+      } catch (err) {
+        this.logger.error('Soroban createMarket failed (CSV row)', err);
+        throw new BadGatewayException('Failed to create market on Soroban');
+      }
+      const market = queryRunner.manager.create(Market, {
+        on_chain_market_id: onChainMarketId,
+        creator: user,
+        title: dto.title,
+        description: dto.description,
+        category: dto.category,
+        outcome_options: dto.outcome_options,
+        end_time: new Date(dto.end_time),
+        resolution_time: new Date(dto.resolution_time),
+        is_public: dto.is_public,
+        is_resolved: false,
+        is_cancelled: false,
+        total_pool_stroops: '0',
+        participant_count: 0,
+      });
+      const saved = await queryRunner.manager.save(market);
+      await queryRunner.commitTransaction();
+      return saved;
+    } catch (err) {
+      await queryRunner.rollbackTransaction();
+      throw err;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
   async createMarket(dto: CreateMarketDto, user: User): Promise<Market> {
     const endTime = new Date(dto.end_time);
     if (endTime <= new Date()) {
@@ -253,7 +311,7 @@ export class MarketsService {
       );
       onChainMarketId = result.market_id;
       this.logger.log(
-        `Soroban createMarket called for "${dto.title}" — on_chain_id: ${onChainMarketId}`,
+        `Soroban createMarket called for "${dto.title}" â€” on_chain_id: ${onChainMarketId}`,
       );
     } catch (err) {
       this.logger.error('Soroban createMarket failed', err);
@@ -396,7 +454,7 @@ export class MarketsService {
 
   /**
    * Propose a resolution outcome for an ended market. Starts the
-   * configurable grace/challenge window instead of resolving immediately —
+   * configurable grace/challenge window instead of resolving immediately â€”
    * the market only reaches SETTLED once MarketSettlementScheduler sweeps it
    * (or an admin resolves a challenge) after the window elapses.
    */
@@ -507,7 +565,7 @@ export class MarketsService {
 
   /**
    * Admin adjudication of a challenged market. Settles immediately on-chain
-   * and in the DB — a challenged market has already lost its grace window,
+   * and in the DB â€” a challenged market has already lost its grace window,
    * so there's nothing left for the scheduler to wait on.
    */
   async resolveChallenge(

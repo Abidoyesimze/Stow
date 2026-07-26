@@ -24,6 +24,7 @@ import { ResolveFlagDto } from '../flags/dto/resolve-flag.dto';
 import { AdminService } from './admin.service';
 import { ActivityLogQueryDto } from './dto/activity-log-query.dto';
 import { BanUserDto } from './dto/ban-user.dto';
+import { BulkImportMarketsDto } from './dto/bulk-import-markets.dto';
 import { BulkUserActionDto } from './dto/bulk-user-action.dto';
 import { DateRangeQueryDto } from './dto/date-range-query.dto';
 import { FeeStatsResponseDto } from './dto/fee-stats-response.dto';
@@ -203,6 +204,24 @@ export class AdminController {
     return this.adminService.resolveFlag(
       id,
       dto,
+      (req as { user: { id: string } }).user.id,
+    );
+  }
+
+  @Post('markets/bulk-import')
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary:
+      'Bulk-import markets from a CSV string. Admin-only. Valid rows are ' +
+      'created; invalid rows are reported with reasons and do not abort ' +
+      'the rest of the import.',
+  })
+  async bulkImportMarkets(
+    @Body() dto: BulkImportMarketsDto,
+    @Request() req: any,
+  ) {
+    return this.adminService.importMarketsFromCsv(
+      dto.csv,
       (req as { user: { id: string } }).user.id,
     );
   }
