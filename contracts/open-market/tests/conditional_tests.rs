@@ -817,7 +817,7 @@ fn test_check_conditional_activation_multiple_outcomes() {
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: true,
-        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
+        metadata_hash: BytesN::from_array(&env, &[0u8; 32]),
     };
 
     let parent_id = client.create_market(&creator, &parent_params);

@@ -49,7 +49,7 @@ fn market_ttl_is_extended_after_market_read() {
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: true,
-        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
+        metadata_hash: BytesN::from_array(&env, &[0u8; 32]),
     };
 
     let market_id = client.create_market(&creator, &params);
@@ -86,7 +86,7 @@ fn prediction_ttl_extends_before_claim_and_shortens_after_claim() {
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: true,
-        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
+        metadata_hash: BytesN::from_array(&env, &[0u8; 32]),
     };
 
     let market_id = client.create_market(&creator, &params);
@@ -137,7 +137,7 @@ fn test_ttl_multiple_extensions() {
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: true,
-        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
+        metadata_hash: BytesN::from_array(&env, &[0u8; 32]),
     };
 
     let market_id = client.create_market(&creator, &params);
@@ -179,7 +179,7 @@ fn test_ttl_after_prediction_submission() {
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: true,
-        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
+        metadata_hash: BytesN::from_array(&env, &[0u8; 32]),
     };
 
     let market_id = client.create_market(&creator, &params);

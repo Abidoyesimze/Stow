@@ -325,7 +325,7 @@ fn test_generate_invite_code_rejects_public_market() {
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: true,
-        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
+        metadata_hash: BytesN::from_array(&env, &[0u8; 32]),
     };
     let market_id = client.create_market(&creator, &params);
 
@@ -361,7 +361,7 @@ fn test_generate_invite_code_succeeds_for_private_market() {
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: false,
-        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
+        metadata_hash: BytesN::from_array(&env, &[0u8; 32]),
     };
     let market_id = client.create_market(&creator, &params);
 
