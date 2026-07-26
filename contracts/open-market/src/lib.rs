@@ -26,7 +26,7 @@ pub use crate::storage_types::ProposalState;
 pub use crate::liquidity::{calculate_liquidity_value, calculate_lp_tokens, calculate_swap_output};
 pub use crate::market::CreateMarketParams;
 pub use crate::storage_types::{
-    BatchPredictionRequest,
+    ArbiterAssignment, ArbiterTally, BatchPredictionRequest,
     ConditionalChain, ConditionalMarket, CreatorLeaderboardEntry, CreatorStats, DataKey,
     DependencyStatus, Dispute, Event, EventMatch, EventPrediction, FeeTier, FeeTierConfig,
     InviteCode, LPPosition, LeaderboardEntry, LeaderboardSnapshot, LiquidityPool, Market,
@@ -359,6 +359,73 @@ impl InsightArenaContract {
     /// Get the total count of currently open disputes.
     pub fn get_open_dispute_count(env: Env) -> u32 {
         dispute::get_open_dispute_count(&env)
+    }
+
+    // ── Weighted arbiter quorum voting ───────────────────────────────────────
+
+    /// Deposit a bond making `arbiter` eligible for panel assignment via
+    /// `assign_arbiters`. Cumulative; no withdrawal path in this iteration.
+    pub fn stake_as_arbiter(env: Env, arbiter: Address, amount: i128) -> Result<(), InsightArenaError> {
+        dispute::stake_as_arbiter(env, arbiter, amount)
+    }
+
+    /// Return `arbiter`'s current staked bond (stroops). `0` if never staked.
+    pub fn get_arbiter_stake(env: Env, arbiter: Address) -> i128 {
+        dispute::get_arbiter_stake(&env, &arbiter)
+    }
+
+    /// Assign a weighted arbiter panel to a pending dispute (admin-only).
+    /// Each address must have a positive arbiter stake; weight is snapshotted
+    /// at assignment time from stake and current reputation.
+    pub fn assign_arbiters(
+        env: Env,
+        admin: Address,
+        market_id: u64,
+        arbiters: Vec<Address>,
+    ) -> Result<(), InsightArenaError> {
+        dispute::assign_arbiters(env, admin, market_id, arbiters)
+    }
+
+    /// Cast a single vote as an assigned arbiter on a dispute.
+    pub fn cast_arbiter_vote(
+        env: Env,
+        arbiter: Address,
+        market_id: u64,
+        uphold: bool,
+    ) -> Result<(), InsightArenaError> {
+        dispute::cast_arbiter_vote(env, arbiter, market_id, uphold)
+    }
+
+    /// Read-only tally, quorum progress, and per-arbiter participation for a
+    /// dispute's arbiter panel.
+    pub fn get_arbiter_tally(
+        env: Env,
+        market_id: u64,
+    ) -> Result<crate::storage_types::ArbiterTally, InsightArenaError> {
+        dispute::get_arbiter_tally(env, market_id)
+    }
+
+    /// Finalize a dispute's arbiter panel (admin-only): requires the voting
+    /// window closed and quorum met, slashes non-voters and redistributes to
+    /// voters, then settles the dispute per the vote outcome.
+    pub fn finalize_arbiter_vote(
+        env: Env,
+        caller: Address,
+        market_id: u64,
+    ) -> Result<(), InsightArenaError> {
+        dispute::finalize_arbiter_vote(env, caller, market_id)
+    }
+
+    /// Update the arbiter quorum threshold, slash share, and voting period
+    /// (admin-only). Only affects panels assigned after this call.
+    pub fn set_arbiter_config(
+        env: Env,
+        admin: Address,
+        quorum_bps: u32,
+        slash_bps: u32,
+        voting_period_seconds: u64,
+    ) -> Result<(), InsightArenaError> {
+        config::set_arbiter_config(&env, admin, quorum_bps, slash_bps, voting_period_seconds)
     }
 
     // ── Prediction ────────────────────────────────────────────────────────────

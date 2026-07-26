@@ -218,6 +218,23 @@ pub struct Config {
     /// cut redirected to liquidity providers instead of the treasury.
     /// Defaults to `0` at initialization. See `treasury_split_bps`.
     pub lp_split_bps: u32,
+    /// Fraction (bps, 0-10000) of a dispute's total assigned arbiter weight
+    /// that must have voted before `dispute::finalize_arbiter_vote` will
+    /// settle the panel. Snapshotted onto each `Dispute` when its panel is
+    /// assigned via `dispute::assign_arbiters`. Admin-configurable via
+    /// `set_arbiter_config`. Defaults to `5000` (50%).
+    pub arbiter_quorum_bps: u32,
+    /// Share (bps, 0-10000) of an assigned arbiter's staked bond
+    /// (`dispute::get_arbiter_stake`) slashed when they fail to vote before
+    /// their dispute's `voting_deadline`. The slashed amount is
+    /// redistributed to arbiters who did vote, proportional to their
+    /// weight. Admin-configurable via `set_arbiter_config`. Defaults to
+    /// `1000` (10%).
+    pub arbiter_slash_bps: u32,
+    /// Duration (seconds) of the voting window granted to an arbiter panel
+    /// once assigned via `dispute::assign_arbiters`. Admin-configurable via
+    /// `set_arbiter_config`. Defaults to `172_800` (~2 days).
+    pub arbiter_voting_period_seconds: u64,
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -348,6 +365,9 @@ pub fn initialize(
         treasury_address: admin_for_treasury,
         treasury_split_bps: 10_000, // 100% to treasury, preserving prior behaviour
         lp_split_bps: 0,
+        arbiter_quorum_bps: 5000, // 50% of assigned weight must vote
+        arbiter_slash_bps: 1000,  // 10% of stake slashed for a missed vote
+        arbiter_voting_period_seconds: 172_800, // ~2 days
     };
 
     env.storage().persistent().set(&DataKey::Config, &config);
@@ -928,6 +948,57 @@ fn emit_treasury_split_updated(
             new_treasury_split_bps,
             new_lp_split_bps,
         ),
+    );
+}
+
+/// Update the arbiter quorum threshold, slash share, and voting period used
+/// by `dispute::assign_arbiters` / `dispute::finalize_arbiter_vote`. Caller
+/// must be the stored admin. Changes only affect panels assigned after this
+/// call - already-assigned panels keep their snapshotted values.
+pub fn set_arbiter_config(
+    env: &Env,
+    admin: Address,
+    quorum_bps: u32,
+    slash_bps: u32,
+    voting_period_seconds: u64,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    if quorum_bps > 10_000 || quorum_bps == 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+    if slash_bps > 10_000 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+    if voting_period_seconds == 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    config.arbiter_quorum_bps = quorum_bps;
+    config.arbiter_slash_bps = slash_bps;
+    config.arbiter_voting_period_seconds = voting_period_seconds;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_arbiter_config_updated(env, quorum_bps, slash_bps, voting_period_seconds);
+
+    Ok(())
+}
+
+fn emit_arbiter_config_updated(
+    env: &Env,
+    quorum_bps: u32,
+    slash_bps: u32,
+    voting_period_seconds: u64,
+) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("arb_upd")),
+        (quorum_bps, slash_bps, voting_period_seconds),
     );
 }
 

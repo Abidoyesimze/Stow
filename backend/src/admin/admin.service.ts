@@ -21,6 +21,8 @@ import { Market } from '../markets/entities/market.entity';
 import { NotificationType } from '../notifications/entities/notification.entity';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Prediction } from '../predictions/entities/prediction.entity';
+import { ListFraudFlagsQueryDto } from '../predictions/dto/list-fraud-flags-query.dto';
+import { PredictionsService } from '../predictions/predictions.service';
 import { SorobanService } from '../soroban/soroban.service';
 import { User } from '../users/entities/user.entity';
 import { CreatorEvent } from '../matches/entities/creator-event.entity';
@@ -88,6 +90,7 @@ export class AdminService {
     private readonly notificationsService: NotificationsService,
     private readonly sorobanService: SorobanService,
     private readonly flagsService: FlagsService,
+    private readonly predictionsService: PredictionsService,
   ) {}
 
   async getStats(): Promise<StatsResponseDto> {
@@ -492,6 +495,15 @@ export class AdminService {
 
   async listFlags(query: ListFlagsQueryDto) {
     return this.flagsService.listFlags(query);
+  }
+
+  /**
+   * Advisory prediction-fraud signal flags (timing clustering, counterparty
+   * concentration). Informational only - resolving/dismissing a flag here
+   * does not itself ban or restrict the flagged user.
+   */
+  async listFraudFlags(query: ListFraudFlagsQueryDto) {
+    return this.predictionsService.listFraudFlags(query);
   }
 
   async resolveFlag(
