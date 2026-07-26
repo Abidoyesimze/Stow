@@ -110,8 +110,13 @@ pub enum DataKey {
     VerifiedAddress(Address),
     /// Keyed by event_id. Vec of Winner records for the event.
     Winners(u64),
-    /// Singleton. Treasury balance separate from protocol fees.
-    TreasuryBalance,
+
+    // ── Commit-Reveal Predictions ─────────────────────────────────────────────
+    // NOTE: `#[contracttype]` union enums are hard-capped at 50 XDR cases
+    // (`ScSpecUdtUnionV0::cases<50>`). The previously-declared-but-unused
+    // `TreasuryBalance` singleton was removed here to make room for this key.
+    /// Keyed by (market_id, predictor). Stores a committed prediction (hash + amount, awaiting reveal).
+    CommitmentPrediction(u64, Address),
 }
 
 /// Lifecycle state of a governance proposal, derived from its stored flags and
@@ -141,6 +146,9 @@ pub struct Dispute {
     pub disputer: Address,
     pub bond: i128,
     pub filed_at: u64,
+    pub appeal_tier: u32,
+    pub appealer: Option<Address>,
+    pub appeal_bond: i128,
 }
 
 impl Dispute {
@@ -149,6 +157,9 @@ impl Dispute {
             disputer,
             bond,
             filed_at,
+            appeal_tier: 0,
+            appealer: None,
+            appeal_bond: 0,
         }
     }
 }
@@ -179,6 +190,7 @@ pub struct CreatorStats {
     pub average_participant_count: u32,
     pub dispute_count: u32,
     pub reputation_score: u32,
+    pub last_updated: u64, // ledger timestamp (unix seconds) at last mutating call
 }
 
 #[contracttype]
@@ -205,6 +217,8 @@ pub struct Prediction {
     pub payout_claimed: bool,
     /// The final portion of XLM the user won, populated after resolution. Defaults to 0.
     pub payout_amount: i128,
+    /// Payment method: true if via allowance (transfer_from), false if direct transfer. Defaults to false.
+    pub via_allowance: bool,
 }
 
 impl Prediction {
@@ -224,6 +238,27 @@ impl Prediction {
             submitted_at,
             payout_claimed: false,
             payout_amount: 0,
+            via_allowance: false,
+        }
+    }
+
+    /// Create a prediction via allowance-based payment.
+    pub fn new_via_allowance(
+        market_id: u64,
+        predictor: Address,
+        chosen_outcome: Symbol,
+        stake_amount: i128,
+        submitted_at: u64,
+    ) -> Self {
+        Self {
+            market_id,
+            predictor,
+            chosen_outcome,
+            stake_amount,
+            submitted_at,
+            payout_claimed: false,
+            payout_amount: 0,
+            via_allowance: true,
         }
     }
 }
@@ -274,9 +309,12 @@ pub struct Market {
     pub participant_count: u32,
     /// Dispute window duration in seconds after resolution.
     pub dispute_window: u64,
-    /// SHA-256 content hash of off-chain market metadata. Set once at creation
-    /// and never mutated by any subsequent market operation.
-    pub metadata_hash: BytesN<32>,
+    /// Per-market override (stroops) for the maximum liquidity a single
+    /// outcome's AMM reserve may hold. `0` means "inherit the global
+    /// `Config::max_liquidity_per_outcome` cap". Set via
+    /// `market::set_market_liquidity_cap`; takes precedence over the global
+    /// cap whenever non-zero. See `liquidity::add_liquidity`.
+    pub outcome_liquidity_cap: i128,
 }
 
 impl Market {
@@ -321,7 +359,7 @@ impl Market {
             max_stake,
             participant_count: 0,
             dispute_window,
-            metadata_hash,
+            outcome_liquidity_cap: 0,
         }
     }
 }
@@ -372,15 +410,37 @@ pub struct LPPosition {
     pub initial_deposit: i128,
     pub fees_earned: i128,
     pub created_at: u64,
+    /// Reserve of the pool's first IL-tracked outcome (`Market::outcome_options[0]`)
+    /// at the moment this position was opened. An immutable entry-price snapshot:
+    /// set once in `LPPosition::new` / `liquidity::add_liquidity` and never
+    /// mutated afterward, even when the same provider tops up their position with
+    /// additional deposits. Used as the impermanent-loss baseline — see
+    /// `liquidity::calculate_impermanent_loss_bps`.
+    pub entry_reserve_a: i128,
+    /// Reserve of the pool's second IL-tracked outcome (`Market::outcome_options[1]`)
+    /// at the moment this position was opened. Immutable; see `entry_reserve_a`.
+    /// For single-outcome markets this mirrors `entry_reserve_a`, which yields a
+    /// price ratio of 1 (i.e. impermanent loss is always zero in that case).
+    pub entry_reserve_b: i128,
+    /// Impermanent loss, in basis points (always `<= 0`), computed relative to
+    /// `entry_reserve_a` / `entry_reserve_b` the last time this position was
+    /// withdrawn from via `liquidity::remove_liquidity`. Zero until the first
+    /// withdrawal. For the always-current figure, use `liquidity::get_position_il`,
+    /// which recomputes live against the pool's current reserves instead of
+    /// relying on this cached, withdrawal-time value.
+    pub cumulative_il_bps: i128,
 }
 
 impl LPPosition {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider: Address,
         market_id: u64,
         lp_tokens: i128,
         initial_deposit: i128,
         created_at: u64,
+        entry_reserve_a: i128,
+        entry_reserve_b: i128,
     ) -> Self {
         Self {
             provider,
@@ -389,6 +449,9 @@ impl LPPosition {
             initial_deposit,
             fees_earned: 0,
             created_at,
+            entry_reserve_a,
+            entry_reserve_b,
+            cumulative_il_bps: 0,
         }
     }
 }
@@ -979,6 +1042,28 @@ impl EventPrediction {
     /// Returns true if the predicted_winner value is valid (must be 0, 1, or 2).
     pub fn is_valid_outcome(predicted_winner: u32) -> bool {
         predicted_winner <= 2
+    }
+}
+
+/// Represents a committed prediction awaiting reveal phase.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommitmentPrediction {
+    /// Hash of (chosen_outcome, amount, salt).
+    pub commitment_hash: soroban_sdk::BytesN<32>,
+    /// Ledger timestamp when the commit was recorded.
+    pub committed_at: u64,
+    /// Whether the commitment has been revealed yet.
+    pub revealed: bool,
+}
+
+impl CommitmentPrediction {
+    pub fn new(commitment_hash: soroban_sdk::BytesN<32>, committed_at: u64) -> Self {
+        Self {
+            commitment_hash,
+            committed_at,
+            revealed: false,
+        }
     }
 }
 

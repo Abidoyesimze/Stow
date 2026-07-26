@@ -9,6 +9,7 @@ import { CreatorEventsProvider } from "@/context/CreatorEventsContext";
 import { ToastProvider } from "@/context/ToastContext";
 import { ConfirmProvider } from "@/context/ConfirmContext";
 import { FavoritesProvider } from "@/context/FavoritesContext";
+import { ThemeProvider } from "@/context/ThemeContext";
 
 import "./globals.css";
 
@@ -87,29 +88,38 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var t=localStorage.getItem('insightarena.theme.v1');if(!t){t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light'}document.documentElement.classList.toggle('dark',t==='dark')}catch(e){}})()`,
+          }}
+        />
+      </head>
       <body className="font-sans antialiased bg-[#141824] text-white">
-        <WalletProvider>
-          <FavoritesProvider>
-            <CreatorEventsProvider>
-              <ToastProvider>
-                <ConfirmProvider>
-                  <Suspense fallback={null}>
-                    <RouteProgress />
-                  </Suspense>
-                  <PwaManager />
-                  <a href="#main-content" className="skip-link">
-                    Skip to main content
-                  </a>
-                  <div id="main-content" tabIndex={-1}>
-                    <Suspense fallback={<StandardPageLoadingSkeleton />}>
-                      {children}
+        <ThemeProvider>
+          <WalletProvider>
+            <FavoritesProvider>
+              <CreatorEventsProvider>
+                <ToastProvider>
+                  <ConfirmProvider>
+                    <Suspense fallback={null}>
+                      <RouteProgress />
                     </Suspense>
-                  </div>
-                </ConfirmProvider>
-              </ToastProvider>
-            </CreatorEventsProvider>
-          </FavoritesProvider>
-        </WalletProvider>
+                    <PwaManager />
+                    <a href="#main-content" className="skip-link">
+                      Skip to main content
+                    </a>
+                    <div id="main-content" tabIndex={-1}>
+                      <Suspense fallback={<StandardPageLoadingSkeleton />}>
+                        {children}
+                      </Suspense>
+                    </div>
+                  </ConfirmProvider>
+                </ToastProvider>
+              </CreatorEventsProvider>
+            </FavoritesProvider>
+          </WalletProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

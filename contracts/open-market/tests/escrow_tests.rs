@@ -976,3 +976,149 @@ fn test_concurrent_escrow_operations() {
     let final_contract_balance = env.as_contract(&client.address, || get_contract_balance(&env));
     assert_eq!(final_contract_balance, 0);
 }
+
+// ── Emergency pause (#1334): escrow primitives revert while paused ───────────
+//
+// Each fund-moving escrow primitive checks `config::ensure_not_paused`
+// directly (defense in depth), independent of whatever pause guard its
+// upstream caller (market.rs/prediction.rs/liquidity.rs) already applied.
+
+#[test]
+fn test_lock_stake_reverts_while_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let xlm_token = register_token(&env);
+    let client = deploy(&env, &xlm_token);
+    let predictor = Address::generate(&env);
+    fund(&env, &xlm_token, &predictor, 10_000_000);
+
+    client.set_paused(&true, &1u32);
+
+    let result = env.as_contract(&client.address, || {
+        lock_stake(&env, &predictor, 10_000_000_i128)
+    });
+    assert_eq!(result, Err(InsightArenaError::Paused));
+
+    // Balance must be untouched.
+    let token = TokenClient::new(&env, &xlm_token);
+    assert_eq!(token.balance(&predictor), 10_000_000);
+    assert_eq!(token.balance(&client.address), 0);
+}
+
+#[test]
+fn test_lock_stake_via_allowance_reverts_while_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let xlm_token = register_token(&env);
+    let client = deploy(&env, &xlm_token);
+    let predictor = Address::generate(&env);
+    fund(&env, &xlm_token, &predictor, 10_000_000);
+
+    client.set_paused(&true, &1u32);
+
+    let result = env.as_contract(&client.address, || {
+        lock_stake_via_allowance(&env, &predictor, 10_000_000_i128)
+    });
+    assert_eq!(result, Err(InsightArenaError::Paused));
+}
+
+#[test]
+fn test_refund_reverts_while_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let xlm_token = register_token(&env);
+    let client = deploy(&env, &xlm_token);
+    let recipient = Address::generate(&env);
+    let amount = 20_000_000_i128;
+
+    fund(&env, &xlm_token, &client.address, amount);
+
+    client.set_paused(&true, &1u32);
+
+    let result = env.as_contract(&client.address, || refund(&env, &recipient, amount));
+    assert_eq!(result, Err(InsightArenaError::Paused));
+
+    let token = TokenClient::new(&env, &xlm_token);
+    assert_eq!(token.balance(&client.address), amount);
+    assert_eq!(token.balance(&recipient), 0);
+}
+
+#[test]
+fn test_release_payout_reverts_while_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let xlm_token = register_token(&env);
+    let client = deploy(&env, &xlm_token);
+    let recipient = Address::generate(&env);
+    let payout = 20_000_000_i128;
+
+    fund(&env, &xlm_token, &client.address, payout);
+
+    client.set_paused(&true, &1u32);
+
+    let result = env.as_contract(&client.address, || release_payout(&env, &recipient, payout));
+    assert_eq!(result, Err(InsightArenaError::Paused));
+
+    let token = TokenClient::new(&env, &xlm_token);
+    assert_eq!(token.balance(&client.address), payout);
+    assert_eq!(token.balance(&recipient), 0);
+}
+
+#[test]
+fn test_withdraw_treasury_reverts_while_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let xlm_token = register_token(&env);
+    let client = deploy(&env, &xlm_token);
+
+    let cfg = env.as_contract(&client.address, || config::get_config(&env).unwrap());
+    let admin = cfg.admin.clone();
+    let fee_amount = 3_000_000_i128;
+
+    fund(&env, &xlm_token, &client.address, fee_amount);
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Treasury, &fee_amount);
+    });
+
+    client.set_paused(&true, &1u32);
+
+    let result = env.as_contract(&client.address, || {
+        withdraw_treasury(env.clone(), admin.clone(), fee_amount)
+    });
+    assert_eq!(result, Err(InsightArenaError::Paused));
+
+    // Treasury balance and token balance must be untouched.
+    let token = TokenClient::new(&env, &xlm_token);
+    assert_eq!(token.balance(&client.address), fee_amount);
+    let remaining = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get::<_, i128>(&DataKey::Treasury)
+            .unwrap_or(0)
+    });
+    assert_eq!(remaining, fee_amount);
+}
+
+#[test]
+fn test_escrow_operations_resume_after_unpause() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let xlm_token = register_token(&env);
+    let client = deploy(&env, &xlm_token);
+    let predictor = Address::generate(&env);
+    let amount = 10_000_000_i128;
+    fund(&env, &xlm_token, &predictor, amount);
+
+    client.set_paused(&true, &1u32);
+    let paused_result = env.as_contract(&client.address, || lock_stake(&env, &predictor, amount));
+    assert_eq!(paused_result, Err(InsightArenaError::Paused));
+
+    client.set_paused(&false, &0u32);
+    let resumed_result = env.as_contract(&client.address, || lock_stake(&env, &predictor, amount));
+    assert_eq!(resumed_result, Ok(()));
+
+    let token = TokenClient::new(&env, &xlm_token);
+    assert_eq!(token.balance(&client.address), amount);
+}

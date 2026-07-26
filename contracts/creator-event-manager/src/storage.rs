@@ -9,8 +9,8 @@
 use soroban_sdk::{Address, Env, Vec};
 
 use crate::storage_types::{
-    DataKey, Event, FinalizationBond, Match, OracleSubmission, ParticipantScore, Prediction,
-    PrizeAllocation, StandingEntry,
+    CreatorVestingSchedule, DataKey, Event, FinalizationBond, Match, OracleSubmission,
+    ParticipantScore, Prediction, PrizeAllocation, StandingEntry,
 };
 
 // ---------------------------------------------------------------------------
@@ -389,7 +389,11 @@ pub fn set_claim_deadline(env: &Env, event_id: u64, deadline: u64) {
 /// verification for an event, or an empty Vec if none have yet.
 pub fn get_event_verification_signers(env: &Env, event_id: u64) -> Vec<Address> {
     let key = DataKey::EventVerificationSigners(event_id);
-    match env.storage().persistent().get::<DataKey, Vec<Address>>(&key) {
+    match env
+        .storage()
+        .persistent()
+        .get::<DataKey, Vec<Address>>(&key)
+    {
         Some(list) => {
             env.storage()
                 .persistent()
@@ -419,7 +423,11 @@ pub fn add_event_verification_signer(env: &Env, event_id: u64, signer: &Address)
 /// if `oracle::configure_oracle_sources` has never been called.
 pub fn get_oracle_sources(env: &Env) -> Vec<Address> {
     let key = DataKey::OracleSources;
-    match env.storage().persistent().get::<DataKey, Vec<Address>>(&key) {
+    match env
+        .storage()
+        .persistent()
+        .get::<DataKey, Vec<Address>>(&key)
+    {
         Some(list) => {
             env.storage()
                 .persistent()
@@ -519,6 +527,43 @@ pub fn get_finalization_bond(env: &Env, event_id: u64) -> Option<FinalizationBon
 pub fn set_finalization_bond(env: &Env, bond: &FinalizationBond) {
     let key = DataKey::FinalizationBond(bond.event_id);
     env.storage().persistent().set(&key, bond);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+}
+
+// ---------------------------------------------------------------------------
+// Creator revenue share vesting helpers
+// ---------------------------------------------------------------------------
+
+/// Read a creator's staged vesting schedule for an event, or `None` if none
+/// was ever staged (e.g. the event had no leftover revenue, or vesting was
+/// not configured at finalization time).
+pub fn get_creator_vesting(
+    env: &Env,
+    creator: &Address,
+    event_id: u64,
+) -> Option<CreatorVestingSchedule> {
+    let key = DataKey::CreatorVesting(creator.clone(), event_id);
+    match env
+        .storage()
+        .persistent()
+        .get::<DataKey, CreatorVestingSchedule>(&key)
+    {
+        Some(schedule) => {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+            Some(schedule)
+        }
+        None => None,
+    }
+}
+
+/// Write a creator's vesting schedule and set its TTL.
+pub fn set_creator_vesting(env: &Env, schedule: &CreatorVestingSchedule) {
+    let key = DataKey::CreatorVesting(schedule.creator.clone(), schedule.event_id);
+    env.storage().persistent().set(&key, schedule);
     env.storage()
         .persistent()
         .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);

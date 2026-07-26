@@ -45,6 +45,56 @@ pub enum AdminError {
 }
 
 // ---------------------------------------------------------------------------
+// Prediction lock lead-time (#1355)
+// ---------------------------------------------------------------------------
+
+/// Configure the lock lead-time (seconds before `match_time`) before which
+/// predictions must be placed on newly created matches. Only the admin may
+/// call this. Existing matches keep the `prediction_lock_time` computed at
+/// their own creation time — this only affects matches created afterward.
+///
+/// # Errors
+/// * [`AdminError::Unauthorized`] — caller is not the admin.
+///
+/// # Events
+/// Emits `(Symbol("admin"), Symbol("lock_lead_updated"))` with data
+/// `lock_lead_seconds`.
+pub fn set_prediction_lock_lead_seconds(
+    env: &Env,
+    caller: Address,
+    lock_lead_seconds: u64,
+) -> Result<(), AdminError> {
+    require_is_admin(env, &caller)?;
+
+    let storage = env.storage().persistent();
+    storage.set(&DataKey::PredictionLockLeadSeconds, &lock_lead_seconds);
+    storage.extend_ttl(
+        &DataKey::PredictionLockLeadSeconds,
+        TTL_LEDGERS,
+        TTL_LEDGERS,
+    );
+
+    env.events().publish(
+        (
+            Symbol::new(env, "admin"),
+            Symbol::new(env, "lock_lead_updated"),
+        ),
+        lock_lead_seconds,
+    );
+
+    Ok(())
+}
+
+/// Return the configured prediction lock lead-time (seconds), or `0`
+/// (predictions lock exactly at `match_time`) if never configured.
+pub fn get_prediction_lock_lead_seconds(env: &Env) -> u64 {
+    env.storage()
+        .persistent()
+        .get::<DataKey, u64>(&DataKey::PredictionLockLeadSeconds)
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
 

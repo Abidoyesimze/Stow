@@ -4,11 +4,11 @@ import { useEffect, useState, useMemo, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { apiClient, ApiError } from "@/lib/api";
 import { useFavorites } from "@/context/FavoritesContext";
+import { useInfiniteScroll } from "@/hooks/useInfiniteScroll";
 import MarketCard from "@/component/MarketCard";
-import MarketDisputePanel from "@/component/markets/MarketDisputePanel";
+import { MarketsPageLoadingSkeleton } from "@/component/loading-route-skeletons";
 import { EmptyState } from "@/component/ui/empty-state";
-import { Skeleton } from "@/component/ui/skeleton";
-import { Heart, AlertCircle, Inbox } from "lucide-react";
+import { Heart, AlertCircle, Inbox, Loader2 } from "lucide-react";
 
 interface Market {
   id: string;
@@ -21,6 +21,8 @@ interface Market {
 }
 
 const CATEGORIES = ["All", "Sports", "Finance", "Crypto", "Politics", "Tech"];
+const PAGE_SIZE = 12;
+const SCROLL_POSITION_KEY = "markets_scroll_position";
 
 export default function MarketsPage() {
   const router = useRouter();
@@ -34,51 +36,92 @@ export default function MarketsPage() {
   const [markets, setMarkets] = useState<Market[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [page, setPage] = useState(0);
+  const [hasMore, setHasMoreState] = useState(true);
   const [selectedCategory, setSelectedCategory] = useState<string>(
     searchParams.get("category") || "All",
   );
   const [viewMode, setViewMode] = useState<"all" | "favorites">(
     searchParams.get("view") === "favorites" ? "favorites" : "all",
   );
-
-  // Fetch markets
+  // Save scroll position before navigating away
   useEffect(() => {
-    const abortController = new AbortController();
-
-    const fetchMarkets = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const data = await apiClient.get<Market[]>("/markets", {
-          signal: abortController.signal,
-        });
-        setMarkets(data || []);
-      } catch (err) {
-        if (err instanceof ApiError) {
-          if (
-            err.kind !== "network" ||
-            err.message !== "Network error: The user aborted a request."
-          ) {
-            setError(err.message);
-          }
-        } else if (err instanceof Error && err.name === "AbortError") {
-          // Ignore
-        } else {
-          setError("An unexpected error occurred");
-        }
-      } finally {
-        if (!abortController.signal.aborted) {
-          setLoading(false);
-        }
-      }
+    const saveScrollPosition = () => {
+      sessionStorage.setItem(SCROLL_POSITION_KEY, String(window.scrollY));
     };
-
-    fetchMarkets();
-
+    window.addEventListener("beforeunload", saveScrollPosition);
     return () => {
-      abortController.abort();
+      saveScrollPosition();
+      window.removeEventListener("beforeunload", saveScrollPosition);
     };
   }, []);
+
+  // Fetch markets (initial + paginated)
+  const fetchMarketsPage = useCallback(async (pageNum: number) => {
+    try {
+      const data = await apiClient.get<Market[]>(
+        `/markets?page=${pageNum}&limit=${PAGE_SIZE}`,
+      );
+      const newMarkets = data || [];
+
+      if (pageNum === 0) {
+        setMarkets(newMarkets);
+      } else {
+        setMarkets((prev) => {
+          const ids = new Set(prev.map((m) => m.id));
+          const filtered = newMarkets.filter((m) => !ids.has(m.id));
+          return [...prev, ...filtered];
+        });
+      }
+
+      setHasMoreState(newMarkets.length === PAGE_SIZE);
+      setError(null);
+    } catch (err) {
+      const errorMessage =
+        err instanceof ApiError ? err.message : "An unexpected error occurred";
+      setError(errorMessage);
+      setHasMoreState(false);
+    }
+  }, []);
+
+  // Initial fetch
+  useEffect(() => {
+    setLoading(true);
+    setPage(0);
+    setMarkets([]);
+    setHasMoreState(true);
+
+    const fetchInitial = async () => {
+      await fetchMarketsPage(0);
+      setLoading(false);
+    };
+
+    fetchInitial();
+  }, [fetchMarketsPage]);
+
+  // Restore scroll position after markets are loaded (e.g. returning via back navigation)
+  useEffect(() => {
+    if (loading || markets.length === 0) return;
+    const saved = sessionStorage.getItem(SCROLL_POSITION_KEY);
+    if (!saved) return;
+    sessionStorage.removeItem(SCROLL_POSITION_KEY);
+    requestAnimationFrame(() => {
+      window.scrollTo({ top: Number(saved), behavior: "instant" as ScrollBehavior });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, markets.length > 0]);
+
+  // Infinite scroll handler
+  const handleLoadMore = useCallback(async () => {
+    const nextPage = page + 1;
+    setPage(nextPage);
+    await fetchMarketsPage(nextPage);
+  }, [page, fetchMarketsPage]);
+
+  const { observerTarget, isLoading: isLoadingMore } = useInfiniteScroll({
+    onLoadMore: handleLoadMore,
+    enabled: viewMode === "all" && hasMore && !loading,
+  });
 
   // Update URL when category changes
   useEffect(() => {
@@ -148,30 +191,7 @@ export default function MarketsPage() {
     return counts;
   }, [markets]);
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-gray-900 via-black to-gray-900 p-6 md:p-10">
-        <div className="mx-auto max-w-7xl space-y-8">
-          <div>
-            <div className="mb-4 flex items-center justify-between">
-              <div>
-                <h1 className="text-3xl font-bold text-white">Markets</h1>
-                <p className="mt-2 text-gray-400">
-                  Browse and predict on various markets
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-            {Array.from({ length: 6 }).map((_, idx) => (
-              <Skeleton key={idx} className="h-64 rounded-lg bg-white/10" />
-            ))}
-          </div>
-        </div>
-      </div>
-    );
-  }
+  if (loading || favoritesLoading) return <MarketsPageLoadingSkeleton />;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-black to-gray-900 p-6 md:p-10">
@@ -247,30 +267,44 @@ export default function MarketsPage() {
 
         {/* Markets Grid */}
         {filteredMarkets.length > 0 ? (
-          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-            {filteredMarkets.map((market) => {
-              const isResolved =
-                market.status.toLowerCase() === "resolved" ||
-                market.status.toLowerCase() === "closed";
-              return (
-                <div key={market.id} className="space-y-0">
-                  <MarketCard
-                    market={market}
-                    isFavorite={favoriteIds.has(market.id)}
-                    onFavoriteToggle={() => handleFavoriteToggle(market.id)}
-                    onPredict={() => handlePredict(market.id)}
-                  />
-                  {isResolved && (
-                    <MarketDisputePanel
-                      marketId={market.id}
-                      marketTitle={market.title}
-                      isResolved={isResolved}
-                    />
-                  )}
-                </div>
-              );
-            })}
-          </div>
+          <>
+            <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
+              {filteredMarkets.map((market) => (
+                <MarketCard
+                  key={market.id}
+                  market={market}
+                  isFavorite={favoriteIds.has(market.id)}
+                  onFavoriteToggle={() => handleFavoriteToggle(market.id)}
+                  onPredict={() => handlePredict(market.id)}
+                />
+              ))}
+            </div>
+
+            {/* Infinite scroll trigger and loading state */}
+            {viewMode === "all" && (
+              <>
+                <div
+                  ref={observerTarget}
+                  className="mt-12 flex justify-center"
+                  aria-hidden="true"
+                />
+
+                {isLoadingMore && (
+                  <div className="flex justify-center py-8">
+                    <Loader2 className="h-6 w-6 animate-spin text-[#4FD1C5]" />
+                  </div>
+                )}
+
+                {!hasMore && markets.length > 0 && (
+                  <div className="mt-8 text-center">
+                    <p className="text-sm text-slate-400">
+                      You've reached the end of the list
+                    </p>
+                  </div>
+                )}
+              </>
+            )}
+          </>
         ) : (
           <EmptyState
             icon={

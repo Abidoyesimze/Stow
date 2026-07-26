@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import StatCard from "@/component/rewards/StatCard";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/component/ui/tabs";
+import { InteractiveChart } from "@/component/ui/interactive-chart";
 import { useWallet } from "@/context/WalletContext";
 
 // ── Placeholder data ──────────────────────────────────────────────────────────
@@ -129,6 +130,37 @@ const COMPLETED_PREDICTIONS = [
     stake: "30 XLM",
     result: "Lost",
     payout: "—",
+  },
+];
+
+const PERFORMANCE_SERIES = [
+  {
+    id: "winnings",
+    name: "Winnings (XLM)",
+    color: "#F97316",
+    data: [
+      { label: "Jan", value: 120 },
+      { label: "Feb", value: 210 },
+      { label: "Mar", value: 180 },
+      { label: "Apr", value: 340 },
+      { label: "May", value: 275 },
+      { label: "Jun", value: 460 },
+      { label: "Jul", value: 1125 },
+    ],
+  },
+  {
+    id: "predictions",
+    name: "Predictions Made",
+    color: "#4FD1C5",
+    data: [
+      { label: "Jan", value: 8 },
+      { label: "Feb", value: 14 },
+      { label: "Mar", value: 11 },
+      { label: "Apr", value: 22 },
+      { label: "May", value: 19 },
+      { label: "Jun", value: 27 },
+      { label: "Jul", value: 118 },
+    ],
   },
 ];
 
@@ -422,6 +454,12 @@ export default function ProfilePage() {
       </div>
 
       <AchievementShowcase />
+
+      <InteractiveChart
+        title="Performance Over Time"
+        description="Winnings and prediction volume by month"
+        series={PERFORMANCE_SERIES}
+      />
 
       <PredictionHistory />
 

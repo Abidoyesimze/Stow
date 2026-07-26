@@ -51,6 +51,7 @@ describe('LeaderboardController', () => {
             getHistory: jest.fn(),
             getHistoryForAddress: jest.fn(),
             getRankHistory: jest.fn(),
+            getSnapshots: jest.fn(),
           },
         },
       ],
@@ -229,6 +230,54 @@ describe('LeaderboardController', () => {
       await expect(
         controller.getRankHistory('INVALID_ADDRESS', {}),
       ).rejects.toThrow();
+    });
+  });
+
+  describe('getSnapshots', () => {
+    it('should return snapshot rankings for a given date', async () => {
+      const mockSnapshotResponse = {
+        data: [
+          {
+            rank: 1,
+            user_id: 'user-uuid-1',
+            username: 'testuser',
+            stellar_address: 'GBRPYHIL2CI3WHZDTOOQFC6EB4RRJC3XNRBF7XN',
+            score: 100,
+            captured_at: new Date('2026-07-01T12:00:00Z'),
+          },
+        ],
+        snapshot_date: new Date('2026-07-01T12:00:00Z'),
+        total: 1,
+        page: 1,
+        limit: 20,
+      };
+      const spy = jest
+        .spyOn(service, 'getSnapshots')
+        .mockResolvedValue(mockSnapshotResponse);
+
+      const result = await controller.getSnapshots({ date: '2026-07-15' });
+
+      expect(spy).toHaveBeenCalledWith({ date: '2026-07-15' });
+      expect(result).toEqual(mockSnapshotResponse);
+    });
+
+    it('should return a message when no snapshots exist', async () => {
+      const mockEmptyResponse = {
+        data: [],
+        snapshot_date: new Date('2026-01-01'),
+        total: 0,
+        page: 1,
+        limit: 20,
+        message: 'No snapshots found on or before 2026-01-01.',
+      };
+      jest
+        .spyOn(service, 'getSnapshots')
+        .mockResolvedValue(mockEmptyResponse);
+
+      const result = await controller.getSnapshots({ date: '2026-01-01' });
+
+      expect(result.data).toEqual([]);
+      expect(result.message).toContain('No snapshots found');
     });
   });
 });

@@ -81,7 +81,10 @@ impl InsightArenaContract {
         config::update_protocol_fee(&env, new_fee_bps)
     }
 
-    /// Pause or resume the contract. Caller must be the stored admin.
+    /// Pause or resume the contract. Only the stored **guardian** may pause
+    /// (`paused = true`); only the stored **admin** may unpause
+    /// (`paused = false`) — a deliberate separation of duties so no single
+    /// role can both trigger and clear an emergency halt.
     /// `reason_code` is recorded on the emitted event for auditing.
     pub fn set_paused(env: Env, paused: bool, reason_code: u32) -> Result<(), InsightArenaError> {
         config::set_paused(&env, paused, reason_code)
@@ -328,6 +331,26 @@ impl InsightArenaContract {
         dispute::resolve_dispute(env, admin, market_id, uphold)
     }
 
+    /// Appeal an active dispute with an escalated bond.
+    pub fn appeal_dispute(
+        env: Env,
+        appealer: Address,
+        market_id: u64,
+        appeal_bond: i128,
+    ) -> Result<(), InsightArenaError> {
+        dispute::appeal_dispute(env, appealer, market_id, appeal_bond)
+    }
+
+    /// Resolve an appeal (admin-only).
+    pub fn resolve_appeal(
+        env: Env,
+        admin: Address,
+        market_id: u64,
+        uphold: bool,
+    ) -> Result<(), InsightArenaError> {
+        dispute::resolve_appeal(env, admin, market_id, uphold)
+    }
+
     /// Enumerate all markets that currently have an active dispute.
     pub fn list_active_disputes(env: Env) -> Vec<u64> {
         dispute::list_active_disputes(&env)
@@ -349,6 +372,40 @@ impl InsightArenaContract {
         stake_amount: i128,
     ) -> Result<(), InsightArenaError> {
         prediction::submit_prediction(&env, predictor, market_id, chosen_outcome, stake_amount)
+    }
+
+    /// Submit a prediction using a pre-approved token allowance (transfer_from).
+    pub fn submit_prediction_via_allowance(
+        env: Env,
+        predictor: Address,
+        market_id: u64,
+        chosen_outcome: Symbol,
+        stake_amount: i128,
+    ) -> Result<(), InsightArenaError> {
+        prediction::submit_prediction_via_allowance(&env, predictor, market_id, chosen_outcome, stake_amount)
+    }
+
+    /// Commit to a prediction with a hash (outcome + amount + salt).
+    pub fn commit_prediction(
+        env: Env,
+        predictor: Address,
+        market_id: u64,
+        commitment_hash: soroban_sdk::BytesN<32>,
+        reveal_delay_seconds: u64,
+    ) -> Result<(), InsightArenaError> {
+        prediction::commit_prediction(&env, predictor, market_id, commitment_hash, reveal_delay_seconds)
+    }
+
+    /// Reveal a committed prediction and lock funds.
+    pub fn reveal_prediction(
+        env: Env,
+        predictor: Address,
+        market_id: u64,
+        chosen_outcome: Symbol,
+        stake_amount: i128,
+        salt: Vec<soroban_sdk::Val>,
+    ) -> Result<(), InsightArenaError> {
+        prediction::reveal_prediction(&env, predictor, market_id, chosen_outcome, stake_amount, salt)
     }
 
     /// Submit a batch of predictions atomically.
@@ -533,6 +590,95 @@ impl InsightArenaContract {
         amount: i128,
     ) -> Result<(), InsightArenaError> {
         escrow::transfer_fee(&env, &admin, &to, amount)
+    }
+
+    /// Update the protocol treasury address and the split (bps) of the
+    /// protocol's fee cut between the treasury and liquidity providers.
+    /// Caller must be the current admin. Reverts with `InvalidFee` if
+    /// `treasury_split_bps + lp_split_bps != 10_000`. See
+    /// `liquidity::swap_outcome` for where the split is applied and its
+    /// `(fee, split)` event emitted.
+    pub fn set_treasury_split(
+        env: Env,
+        admin: Address,
+        treasury_address: Address,
+        treasury_split_bps: u32,
+        lp_split_bps: u32,
+    ) -> Result<(), InsightArenaError> {
+        config::set_treasury_split(
+            &env,
+            admin,
+            treasury_address,
+            treasury_split_bps,
+            lp_split_bps,
+        )
+    }
+
+    // ── Slashed-funds insurance pool ─────────────────────────────────────────
+
+    /// Update the share (bps) of every slashed bond routed into the
+    /// insurance pool. Caller must be the current admin.
+    pub fn set_insurance_pool_share_bps(
+        env: Env,
+        admin: Address,
+        new_share_bps: u32,
+    ) -> Result<(), InsightArenaError> {
+        config::set_insurance_pool_share_bps(&env, admin, new_share_bps)
+    }
+
+    /// Draw `amount` from the insurance pool to `to`, to cover a documented
+    /// accounting/settlement shortfall. Caller must be the current admin.
+    pub fn draw_insurance_pool(
+        env: Env,
+        admin: Address,
+        to: Address,
+        amount: i128,
+    ) -> Result<(), InsightArenaError> {
+        escrow::draw_insurance_pool(env, admin, to, amount)
+    }
+
+    /// Return the current insurance pool balance (stroops).
+    pub fn get_insurance_pool_balance(env: Env) -> i128 {
+        escrow::get_insurance_pool_balance(&env)
+    }
+
+    /// Return the cumulative total ever paid out of the insurance pool.
+    pub fn get_insurance_pool_payouts_total(env: Env) -> i128 {
+        escrow::get_insurance_pool_payouts_total(&env)
+    }
+
+    // ── Per-outcome liquidity caps ────────────────────────────────────────────
+
+    /// Update the global maximum liquidity a single outcome's AMM reserve
+    /// may hold (`0` = unlimited). Caller must be the current admin.
+    pub fn set_max_liquidity_per_outcome(
+        env: Env,
+        admin: Address,
+        new_cap: i128,
+    ) -> Result<(), InsightArenaError> {
+        config::set_max_liquidity_per_outcome(&env, admin, new_cap)
+    }
+
+    /// Set a per-market override for the maximum liquidity a single
+    /// outcome's AMM reserve may hold (`0` clears the override). Caller
+    /// must be the current admin.
+    pub fn set_market_liquidity_cap(
+        env: Env,
+        admin: Address,
+        market_id: u64,
+        cap: i128,
+    ) -> Result<(), InsightArenaError> {
+        market::set_market_liquidity_cap(&env, admin, market_id, cap)
+    }
+
+    /// Return the remaining liquidity capacity for `outcome` in `market_id`,
+    /// or `None` if no cap applies (unlimited).
+    pub fn get_remaining_outcome_capacity(
+        env: Env,
+        market_id: u64,
+        outcome: Symbol,
+    ) -> Result<Option<i128>, InsightArenaError> {
+        liquidity::get_remaining_outcome_capacity(&env, market_id, outcome)
     }
 
     // ── Invite ────────────────────────────────────────────────────────────────
@@ -801,6 +947,21 @@ impl InsightArenaContract {
         market_id: u64,
     ) -> Result<crate::storage_types::LPPosition, InsightArenaError> {
         liquidity::get_lp_position_public(&env, provider, market_id)
+    }
+
+    /// Return the current impermanent loss (bps, always `<= 0`) for an open LP
+    /// position, computed live against the pool's current reserves relative to
+    /// the position's immutable entry-price snapshot. See
+    /// `liquidity::calculate_impermanent_loss_bps` for the formula and
+    /// `liquidity::get_position_il` for how it differs from the
+    /// `LPPosition::cumulative_il_bps` field (which only reflects the last
+    /// withdrawal).
+    pub fn get_position_il(
+        env: Env,
+        provider: Address,
+        market_id: u64,
+    ) -> Result<i128, InsightArenaError> {
+        liquidity::get_position_il(&env, provider, market_id)
     }
 
     /// Get all active LP positions for a market.

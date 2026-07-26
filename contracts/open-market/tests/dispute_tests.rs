@@ -145,10 +145,19 @@ fn resolve_dispute_reject_forfeits_bond_to_treasury_balance() {
     TokenClient::new(&env, &xlm_token).approve(&disputer, &client.address, &bond, &9999);
     client.raise_dispute(&disputer, &id, &bond);
 
+    // A rejected dispute's bond is slashed: the configured insurance-pool
+    // share (default 10%, see #1352) is reserved, and the remainder goes to
+    // treasury — it no longer forfeits 100% to treasury.
     let treasury_before = client.get_treasury_balance();
+    let insurance_before = client.get_insurance_pool_balance();
     client.resolve_dispute(&admin, &id, &false);
     let treasury_after = client.get_treasury_balance();
-    assert_eq!(treasury_after, treasury_before + bond);
+    let insurance_after = client.get_insurance_pool_balance();
+
+    let insurance_share = bond * 1000 / 10_000;
+    let treasury_share = bond - insurance_share;
+    assert_eq!(treasury_after, treasury_before + treasury_share);
+    assert_eq!(insurance_after, insurance_before + insurance_share);
 }
 
 #[test]

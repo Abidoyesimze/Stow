@@ -1,11 +1,12 @@
 "use client";
 
-import { CalendarClock, CheckCircle2, Trophy } from "lucide-react";
+import { CalendarClock, CheckCircle2, Trophy, Zap } from "lucide-react";
 
 import { Badge } from "@/component/ui/badge";
 import { Button } from "@/component/ui/button";
 import type { CreatorEventMatch, MatchOutcome } from "@/hooks/useCreatorEvents";
 import { cn } from "@/lib/utils";
+import { useCountdown, formatCountdown } from "@/hooks/useCountdown";
 
 interface MatchListProps {
   matches: CreatorEventMatch[];
@@ -45,6 +46,7 @@ export default function MatchList({ matches, userJoined, onPredict }: MatchListP
       {matches.map((match) => {
         const winner = getWinningTeam(match);
         const canPredict = userJoined && match.outcome === "Pending" && isBeforeStart(match.matchTime);
+        const countdown = useCountdown(match.matchTime);
 
         return (
           <article
@@ -73,6 +75,20 @@ export default function MatchList({ matches, userJoined, onPredict }: MatchListP
                       ⚡ {match.pointsMultiplier}x Points
                     </Badge>
                   )}
+                  {match.outcome === "Pending" && !countdown.isExpired ? (
+                    <Badge
+                      variant="outline"
+                      className={cn(
+                        "rounded-full px-3 py-1 flex items-center gap-1",
+                        countdown.totalSeconds < 300
+                          ? "border-red-400/30 bg-red-400/10 text-red-200"
+                          : "border-blue-400/30 bg-blue-400/10 text-blue-200"
+                      )}
+                    >
+                      <Zap className="h-3 w-3" />
+                      {formatCountdown(countdown, "Live")}
+                    </Badge>
+                  ) : null}
                   <span className="flex items-center gap-2 text-xs text-slate-400">
                     <CalendarClock className="h-4 w-4" />
                     {new Date(match.matchTime).toLocaleString()}

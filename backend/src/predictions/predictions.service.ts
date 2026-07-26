@@ -10,6 +10,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { Prediction } from './entities/prediction.entity';
 import { SubmitPredictionDto } from './dto/submit-prediction.dto';
+import { SubmitPredictionResponseDto } from './dto/submit-prediction-response.dto';
 import { UpdatePredictionNoteDto } from './dto/update-prediction-note.dto';
 import {
   ListMarketPredictionsDto,
@@ -25,6 +26,7 @@ import {
 import { User } from '../users/entities/user.entity';
 import { Market } from '../markets/entities/market.entity';
 import { SorobanService } from '../soroban/soroban.service';
+import { SlippageCheckerService } from './services/slippage-checker.service';
 import {
   ClaimAllRewardsResponseDto,
   RewardsSummaryDto,
@@ -48,15 +50,20 @@ export class PredictionsService {
     @InjectRepository(User)
     private readonly usersRepository: Repository<User>,
     private readonly sorobanService: SorobanService,
+    private readonly slippageCheckerService: SlippageCheckerService,
     private readonly dataSource: DataSource,
-  ) {}
+  ) { }
 
   /**
-   * Submit a prediction for a market.
+   * Submit a prediction for a market with optional slippage protection.
    * Validates market state and outcome, prevents duplicates,
-   * calls Soroban to lock stake on-chain, then persists and updates counters.
+   * calls Soroban to lock stake on-chain, checks slippage tolerance,
+   * then persists and updates counters.
    */
-  async submit(dto: SubmitPredictionDto, user: User): Promise<Prediction> {
+  async submit(
+    dto: SubmitPredictionDto,
+    user: User,
+  ): Promise<SubmitPredictionResponseDto> {
     const market = await this.marketsRepository.findOne({
       where: { id: dto.market_id },
     });
@@ -93,15 +100,30 @@ export class PredictionsService {
       );
     }
 
-    const { tx_hash } = await this.sorobanService.submitPrediction(
-      user.stellar_address,
-      market.on_chain_market_id,
-      dto.chosen_outcome,
-      dto.stake_amount_stroops,
-    );
+    const { tx_hash, realized_price, shares_received } =
+      await this.sorobanService.submitPrediction(
+        user.stellar_address,
+        market.on_chain_market_id,
+        dto.chosen_outcome,
+        dto.stake_amount_stroops,
+      );
 
-    return this.dataSource.transaction(async (manager) => {
-      const prediction = manager.create(Prediction, {
+    // Check slippage tolerance if bounds are specified and contract returned price/shares
+    if (
+      (dto.maxPrice || dto.minSharesOut) &&
+      realized_price &&
+      shares_received
+    ) {
+      this.slippageCheckerService.checkSlippage(
+        dto.maxPrice,
+        dto.minSharesOut,
+        realized_price,
+        shares_received,
+      );
+    }
+
+    const prediction = await this.dataSource.transaction(async (manager) => {
+      const pred = manager.create(Prediction, {
         user,
         market,
         chosen_outcome: dto.chosen_outcome,
@@ -111,7 +133,7 @@ export class PredictionsService {
         payout_amount_stroops: '0',
       });
 
-      const saved = await manager.save(prediction);
+      const saved = await manager.save(pred);
 
       await manager
         .createQueryBuilder()
@@ -120,9 +142,9 @@ export class PredictionsService {
           participant_count: () => 'participant_count + 1',
           ...(BigInt(dto.stake_amount_stroops) !== 0n
             ? {
-                total_pool_stroops: () =>
-                  'CAST(total_pool_stroops AS BIGINT) + :stakeAmount',
-              }
+              total_pool_stroops: () =>
+                'CAST(total_pool_stroops AS BIGINT) + :stakeAmount',
+            }
             : {}),
         })
         .where('id = :id', { id: market.id })
@@ -139,9 +161,9 @@ export class PredictionsService {
           total_predictions: () => 'total_predictions + 1',
           ...(BigInt(dto.stake_amount_stroops) !== 0n
             ? {
-                total_staked_stroops: () =>
-                  'CAST(total_staked_stroops AS BIGINT) + :stakeAmount',
-              }
+              total_staked_stroops: () =>
+                'CAST(total_staked_stroops AS BIGINT) + :stakeAmount',
+            }
             : {}),
         })
         .where('id = :id', { id: user.id })
@@ -156,6 +178,12 @@ export class PredictionsService {
       );
       return saved;
     });
+
+    return {
+      prediction,
+      realized_price: realized_price || '0',
+      shares_received: shares_received || '0',
+    };
   }
 
   /**

@@ -633,6 +633,44 @@ pub fn extend_market_end_time(
     Ok(())
 }
 
+fn emit_market_liquidity_cap_updated(env: &Env, market_id: u64, old_cap: i128, new_cap: i128) {
+    env.events().publish(
+        (symbol_short!("mkt"), symbol_short!("liq_cap")),
+        (market_id, old_cap, new_cap),
+    );
+}
+
+/// Set a per-market override for the maximum liquidity a single outcome's
+/// AMM reserve may hold. `0` clears the override, reverting the market to
+/// the global `Config::max_liquidity_per_outcome` cap. Caller must be the
+/// platform admin. See `liquidity::add_liquidity` and
+/// `liquidity::get_remaining_outcome_capacity`.
+pub fn set_market_liquidity_cap(
+    env: &Env,
+    admin: Address,
+    market_id: u64,
+    cap: i128,
+) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(env)?;
+    require_admin(env, &admin)?;
+
+    if cap < 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    let mut market = get_market(env, market_id)?;
+    let old_cap = market.outcome_liquidity_cap;
+    market.outcome_liquidity_cap = cap;
+    env.storage()
+        .persistent()
+        .set(&DataKey::Market(market_id), &market);
+    bump_market(env, market_id);
+
+    emit_market_liquidity_cap_updated(env, market_id, old_cap, cap);
+
+    Ok(())
+}
+
 fn emit_market_ttl_extended(env: &Env, market_id: u64, caller: &Address, extension: u32) {
     env.events().publish(
         (symbol_short!("mkt"), symbol_short!("ttl_ext")),

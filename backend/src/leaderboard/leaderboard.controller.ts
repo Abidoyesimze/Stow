@@ -23,6 +23,10 @@ import {
   RankHistoryQueryDto,
   RankHistoryResponse,
 } from './dto/rank-history.dto';
+import {
+  LeaderboardSnapshotQueryDto,
+  PaginatedSnapshotRankingResponse,
+} from './dto/leaderboard-snapshot-query.dto';
 import { Public } from '../common/decorators/public.decorator';
 
 @ApiTags('Leaderboard')
@@ -89,6 +93,35 @@ export class LeaderboardController {
       );
     }
     return this.leaderboardService.getHistory(query);
+  }
+
+  @Get('snapshots')
+  @Public()
+  @UseInterceptors(CacheInterceptor)
+  @CacheTTL(60)
+  @ApiOperation({
+    summary: 'Get leaderboard ranking as of a specific date',
+    description:
+      'Returns the ranking from the nearest snapshot on or before the requested date. A clear message is returned when the date is outside the retention window.',
+  })
+  @ApiQuery({
+    name: 'date',
+    required: true,
+    type: String,
+    description: 'YYYY-MM-DD date to look up',
+  })
+  @ApiQuery({ name: 'season_id', required: false, type: String })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiResponse({
+    status: 200,
+    description: 'Historical ranking snapshot',
+    type: PaginatedSnapshotRankingResponse,
+  })
+  async getSnapshots(
+    @Query() query: LeaderboardSnapshotQueryDto,
+  ): Promise<PaginatedSnapshotRankingResponse> {
+    return this.leaderboardService.getSnapshots(query);
   }
 
   @Get(':address/rank-history')

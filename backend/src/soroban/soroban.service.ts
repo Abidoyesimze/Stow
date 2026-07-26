@@ -13,6 +13,8 @@ import {
 export interface SorobanPredictionResult {
   tx_hash: string;
   payout_amount_stroops?: string;
+  realized_price?: string;
+  shares_received?: string;
 }
 
 export interface SorobanCreateMarketResult {
@@ -270,7 +272,7 @@ export class SorobanService {
         let attempts = 0;
         while (
           statusResponse.status ===
-            SorobanRpc.Api.GetTransactionStatus.NOT_FOUND &&
+          SorobanRpc.Api.GetTransactionStatus.NOT_FOUND &&
           attempts < 10
         ) {
           await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -331,8 +333,21 @@ export class SorobanService {
         .padEnd(64, '0')
         .slice(0, 64);
 
-      this.logger.log(`submitPrediction submitted: tx_hash=${tx_hash}`);
-      return Promise.resolve({ tx_hash });
+      // Calculate realized price and shares (stub implementation)
+      // In production, these values come from the contract execution result
+      const stakeAmount = BigInt(stakeAmountStroops);
+      const sharesReceived = (stakeAmount * 100n) / 50n; // 2x leverage simulation
+      const realizedPrice =
+        stakeAmount > 0n ? (stakeAmount * 1000000n) / sharesReceived : 0n;
+
+      this.logger.log(
+        `submitPrediction submitted: tx_hash=${tx_hash} realized_price=${realizedPrice.toString()} shares=${sharesReceived.toString()}`,
+      );
+      return Promise.resolve({
+        tx_hash,
+        realized_price: realizedPrice.toString(),
+        shares_received: sharesReceived.toString(),
+      });
     });
   }
 
@@ -526,7 +541,7 @@ export class SorobanService {
       let attempts = 0;
       while (
         statusResponse.status ===
-          SorobanRpc.Api.GetTransactionStatus.NOT_FOUND &&
+        SorobanRpc.Api.GetTransactionStatus.NOT_FOUND &&
         attempts < 10
       ) {
         await new Promise((resolve) => setTimeout(resolve, 2000));

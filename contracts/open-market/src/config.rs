@@ -1,5 +1,12 @@
 use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol, Vec};
 
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReputationDecayMode {
+    Exponential,
+    Linear,
+}
+
 use crate::errors::InsightArenaError;
 use crate::storage_types::DataKey;
 
@@ -135,9 +142,14 @@ pub struct Config {
     /// Address of the XLM Stellar Asset Contract used for escrow transfers.
     pub xlm_token: Address,
     /// When `true`, all non-admin entry points must revert with `Paused`.
+    /// Set via [`set_paused`]: only `guardian` may set this to `true`
+    /// (pause); only `admin` may set it back to `false` (unpause).
     pub is_paused: bool,
     /// Address authorized to veto a queued governance proposal during its
-    /// timelock window. Defaults to `admin` at initialization.
+    /// timelock window, and to engage the emergency pause (see
+    /// [`set_paused`]). Distinct from `admin` so a single compromised role
+    /// cannot both halt *and* resume the contract. Defaults to `admin` at
+    /// initialization.
     pub guardian: Address,
     /// Delay (seconds) a passed governance proposal must wait in the queue
     /// before `execute_proposal` will apply it. This value — and `guardian`
@@ -154,12 +166,58 @@ pub struct Config {
     /// `ProposalType::UpdateMinReputation` (timelocked governance). Defaults
     /// to `0` at initialization, which disables the gate entirely.
     pub min_creator_reputation: u32,
+    /// Half-life (seconds) used to decay a creator's live reputation score
+    /// toward zero as seconds pass since `CreatorStats::last_updated` with
+    /// no new activity. Read-time only — never mutates stored counters. See
+    /// `reputation::apply_reputation_decay`. Must be > 0.
+    pub reputation_half_life_seconds: u32,
+    /// Decay curve applied at read time. See `reputation::apply_reputation_decay`.
+    pub reputation_decay_mode: ReputationDecayMode,
     /// Number of ledgers a market's persistent-storage entry is extended by
     /// on each interaction (`market::bump_market`) and by the explicit
     /// `extend_market_ttl` maintenance entrypoint. Admin-configurable via
     /// `set_market_ttl_extension`. Defaults to `LEDGER_BUMP_MARKET` (~30
     /// days) at initialization.
     pub market_ttl_extension: u32,
+    /// Share (bps, 0-10000) of every slashed bond (failed dispute/appeal
+    /// forfeiture) routed into the insurance pool rather than the protocol
+    /// treasury. Governance-configurable via `set_insurance_pool_share_bps`.
+    /// Defaults to `1000` (10%) at initialization.
+    pub insurance_pool_share_bps: u32,
+    /// Running balance (stroops) held in the insurance pool, funded by
+    /// `insurance_pool_share_bps` of every slashed bond. Drawn down only via
+    /// `escrow::draw_insurance_pool` (admin/governance-only) to cover
+    /// documented accounting/settlement shortfalls.
+    pub insurance_pool_balance: i128,
+    /// Cumulative total (stroops) ever paid out of the insurance pool via
+    /// `escrow::draw_insurance_pool`. Monotonic; never decreases.
+    pub insurance_pool_payouts_total: i128,
+    /// Global cap (stroops) on the liquidity any single outcome's AMM
+    /// reserve may hold. `0` means unlimited. Markets may override this with
+    /// a non-zero `Market::outcome_liquidity_cap`; see
+    /// `liquidity::add_liquidity`. Admin-configurable via
+    /// `set_max_liquidity_per_outcome`. Defaults to `0` at initialization.
+    pub max_liquidity_per_outcome: i128,
+    /// Address that receives the protocol's share of every collected swap
+    /// fee (see `treasury_split_bps`), tracked via the internal treasury
+    /// balance (`escrow::get_treasury_balance` / `escrow::withdraw_treasury`).
+    /// Admin-configurable via `set_treasury_split`. Defaults to `admin` at
+    /// initialization.
+    pub treasury_address: Address,
+    /// Share (bps, 0-10000) of the protocol's fee cut — i.e. the portion of
+    /// every collected swap fee already earmarked for the protocol via
+    /// `FeeTierConfig::protocol_share_bps` (see `liquidity::swap_outcome`) —
+    /// that is routed to `treasury_address` rather than redistributed to
+    /// liquidity providers. Paired with `lp_split_bps`; the two must always
+    /// sum to exactly `10_000`, enforced by `set_treasury_split`. Defaults to
+    /// `10_000` (100%) at initialization, which preserves the pre-existing
+    /// behaviour where the entire protocol fee share accrues to the
+    /// treasury.
+    pub treasury_split_bps: u32,
+    /// Complement of `treasury_split_bps`: share (bps) of the protocol's fee
+    /// cut redirected to liquidity providers instead of the treasury.
+    /// Defaults to `0` at initialization. See `treasury_split_bps`.
+    pub lp_split_bps: u32,
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -181,6 +239,18 @@ fn load_config(env: &Env) -> Result<Config, InsightArenaError> {
 
 fn validate_protocol_fee(fee_bps: u32) -> Result<(), InsightArenaError> {
     if fee_bps > 10_000 {
+        return Err(InsightArenaError::InvalidFee);
+    }
+
+    Ok(())
+}
+
+/// Validate that a protocol-treasury-vs-LP fee split sums to exactly
+/// `10_000` bps. Reusing `InvalidFee` here matches the convention already
+/// used by `validate_protocol_fee` and `set_insurance_pool_share_bps` for
+/// bps-range validation.
+fn validate_treasury_split(treasury_split_bps: u32, lp_split_bps: u32) -> Result<(), InsightArenaError> {
+    if treasury_split_bps.checked_add(lp_split_bps) != Some(10_000) {
         return Err(InsightArenaError::InvalidFee);
     }
 
@@ -255,6 +325,7 @@ pub fn initialize(
 
     validate_protocol_fee(fee_bps)?;
 
+    let admin_for_treasury = admin.clone();
     let config = Config {
         guardian: admin.clone(),
         admin,
@@ -267,7 +338,16 @@ pub fn initialize(
         is_paused: false,
         timelock_delay: DEFAULT_TIMELOCK_DELAY,
         min_creator_reputation: 0, // gate disabled by default; admin/governance opt in
+        reputation_half_life_seconds: 2_592_000, // ~30 days
+        reputation_decay_mode: ReputationDecayMode::Exponential,
         market_ttl_extension: LEDGER_BUMP_MARKET,
+        insurance_pool_share_bps: 1000, // 10% of every slashed bond reserved by default
+        insurance_pool_balance: 0,
+        insurance_pool_payouts_total: 0,
+        max_liquidity_per_outcome: 0, // unlimited until admin configures a cap
+        treasury_address: admin_for_treasury,
+        treasury_split_bps: 10_000, // 100% to treasury, preserving prior behaviour
+        lp_split_bps: 0,
     };
 
     env.storage().persistent().set(&DataKey::Config, &config);
@@ -336,24 +416,49 @@ pub fn update_protocol_fee_from_governance(
     Ok(())
 }
 
-/// Pause or resume the contract. Caller must be the stored admin.
+/// Engage or lift the emergency pause, enforcing strict separation of duties:
 ///
-/// When `paused` is `true`, all non-admin entry points should call
-/// [`ensure_not_paused`] and revert with [`InsightArenaError::Paused`].
+/// - Pausing (`paused == true`) may only be authorized by the stored
+///   **guardian**. The guardian is a distinct, lower-trust role intended to
+///   react quickly to a discovered exploit without needing full admin
+///   authority.
+/// - Unpausing (`paused == false`) may only be authorized by the stored
+///   **admin**. This ensures a single compromised or malicious guardian can
+///   halt the contract but can never be the one to resume it — resuming
+///   operation after an incident requires the higher-trust admin role.
+///
+/// While `paused` is `true`, all fund-moving and other sensitive entry points
+/// call [`ensure_not_paused`] (or, for the escrow primitives, check it
+/// directly) and revert with [`InsightArenaError::Paused`].
 ///
 /// `reason_code` is an opaque, caller-defined code (e.g. 1 = incident,
 /// 2 = scheduled maintenance, 0 = resume/no reason) recorded on the emitted
 /// event for off-chain auditing. It is not validated or persisted.
+///
+/// # Errors
+/// - `Unauthorized` is not returned directly here; instead `require_auth`
+///   panics (reverting the transaction) when the wrong role signs the call,
+///   consistent with every other role-gated setter in this module.
 pub fn set_paused(env: &Env, paused: bool, reason_code: u32) -> Result<(), InsightArenaError> {
     let mut config = load_config(env)?;
 
-    config.admin.require_auth();
+    // Separation of duties: the guardian engages the pause, only the admin
+    // may lift it. Branching on `paused` (rather than exposing two entry
+    // points) keeps the public ABI unchanged while still requiring the
+    // correct, distinct role for each direction.
+    let actor = if paused {
+        config.guardian.require_auth();
+        config.guardian.clone()
+    } else {
+        config.admin.require_auth();
+        config.admin.clone()
+    };
 
     config.is_paused = paused;
     env.storage().persistent().set(&DataKey::Config, &config);
     bump_config(env);
 
-    emit_paused_toggled(env, &config.admin, paused, reason_code);
+    emit_paused_toggled(env, &actor, paused, reason_code);
 
     Ok(())
 }
@@ -535,6 +640,51 @@ fn emit_min_reputation_updated(env: &Env, old_threshold: u32, new_threshold: u32
     );
 }
 
+fn validate_half_life(half_life_seconds: u32) -> Result<(), InsightArenaError> {
+    if half_life_seconds == 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+    Ok(())
+}
+
+/// Update the reputation decay half-life and curve. Caller must be the
+/// stored admin.
+pub fn set_reputation_decay_config(
+    env: &Env,
+    admin: Address,
+    half_life_seconds: u32,
+    mode: ReputationDecayMode,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    validate_half_life(half_life_seconds)?;
+
+    config.reputation_half_life_seconds = half_life_seconds;
+    config.reputation_decay_mode = mode;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_reputation_decay_config_updated(env, half_life_seconds, mode);
+
+    Ok(())
+}
+
+fn emit_reputation_decay_config_updated(env: &Env, half_life_seconds: u32, mode: ReputationDecayMode) {
+    let mode_sym = match mode {
+        ReputationDecayMode::Exponential => symbol_short!("exp"),
+        ReputationDecayMode::Linear => symbol_short!("linear"),
+    };
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("rdk_upd")),
+        (half_life_seconds, mode_sym),
+    );
+}
+
 /// Update the number of ledgers a market's TTL is extended by, both on each
 /// interaction and via the explicit `extend_market_ttl` maintenance
 /// entrypoint. Caller must be the stored admin.
@@ -632,6 +782,152 @@ fn emit_stake_bounds_updated(
     env.events().publish(
         (symbol_short!("cfg"), symbol_short!("stk_bnd")),
         (old_min, old_max, new_min, new_max),
+    );
+}
+
+/// Update the share (bps) of every slashed bond routed into the insurance
+/// pool. Caller must be the stored admin.
+pub fn set_insurance_pool_share_bps(
+    env: &Env,
+    admin: Address,
+    new_share_bps: u32,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    if new_share_bps > 10_000 {
+        return Err(InsightArenaError::InvalidFee);
+    }
+
+    let old_share_bps = config.insurance_pool_share_bps;
+    config.insurance_pool_share_bps = new_share_bps;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_insurance_pool_share_updated(env, old_share_bps, new_share_bps);
+
+    Ok(())
+}
+
+fn emit_insurance_pool_share_updated(env: &Env, old_share_bps: u32, new_share_bps: u32) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("ins_upd")),
+        (old_share_bps, new_share_bps),
+    );
+}
+
+/// Update the global maximum liquidity a single outcome's AMM reserve may
+/// hold. `0` means unlimited. Caller must be the stored admin. See
+/// `market::set_market_liquidity_cap` for the per-market override.
+pub fn set_max_liquidity_per_outcome(
+    env: &Env,
+    admin: Address,
+    new_cap: i128,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    if new_cap < 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    let old_cap = config.max_liquidity_per_outcome;
+    config.max_liquidity_per_outcome = new_cap;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_max_liquidity_per_outcome_updated(env, old_cap, new_cap);
+
+    Ok(())
+}
+
+fn emit_max_liquidity_per_outcome_updated(env: &Env, old_cap: i128, new_cap: i128) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("liq_cap")),
+        (old_cap, new_cap),
+    );
+}
+
+/// Update the protocol treasury address and the split (bps) of the
+/// protocol's fee cut between the treasury and liquidity providers. Caller
+/// must be the stored admin.
+///
+/// The actual per-swap split is applied in `liquidity::swap_outcome`, which
+/// further divides the fee share already earmarked for the protocol (via
+/// `FeeTierConfig::protocol_share_bps`) between `treasury_address`
+/// (`treasury_split_bps`) and liquidity providers (`lp_split_bps`), emitting
+/// a `(fee, split)` event on every swap that collects a non-zero fee.
+///
+/// # Errors
+/// - `Unauthorized` if `admin` is not the stored admin.
+/// - `InvalidFee` if `treasury_split_bps + lp_split_bps != 10_000`.
+pub fn set_treasury_split(
+    env: &Env,
+    admin: Address,
+    new_treasury_address: Address,
+    treasury_split_bps: u32,
+    lp_split_bps: u32,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    validate_treasury_split(treasury_split_bps, lp_split_bps)?;
+
+    let old_treasury_address = config.treasury_address.clone();
+    let old_treasury_split_bps = config.treasury_split_bps;
+    let old_lp_split_bps = config.lp_split_bps;
+
+    config.treasury_address = new_treasury_address.clone();
+    config.treasury_split_bps = treasury_split_bps;
+    config.lp_split_bps = lp_split_bps;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_treasury_split_updated(
+        env,
+        &old_treasury_address,
+        &new_treasury_address,
+        old_treasury_split_bps,
+        old_lp_split_bps,
+        treasury_split_bps,
+        lp_split_bps,
+    );
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_treasury_split_updated(
+    env: &Env,
+    old_treasury_address: &Address,
+    new_treasury_address: &Address,
+    old_treasury_split_bps: u32,
+    old_lp_split_bps: u32,
+    new_treasury_split_bps: u32,
+    new_lp_split_bps: u32,
+) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("trs_upd")),
+        (
+            old_treasury_address.clone(),
+            new_treasury_address.clone(),
+            old_treasury_split_bps,
+            old_lp_split_bps,
+            new_treasury_split_bps,
+            new_lp_split_bps,
+        ),
     );
 }
 

@@ -14,7 +14,17 @@ pub enum InsightArenaError {
     // ── Authorization ─────────────────────────────────────────────────────────
     /// The caller does not have the required role for this operation
     /// (e.g. a non-creator attempting to resolve a market, or a non-admin
-    /// calling an admin-only function).
+    /// calling an admin-only function). Also covers the guardian/admin
+    /// separation of duties enforced by `config::set_paused` — pausing
+    /// requires the guardian and unpausing requires the admin, and each
+    /// role attempting the other's half reverts via `require_auth`
+    /// (surfacing as an authorization failure rather than this error code,
+    /// consistent with every other role-gated setter in `config.rs`).
+    ///
+    /// NOTE: `#[contracterror]` enums are hard-capped at 50 XDR cases
+    /// (`ScSpecUdtErrorEnumV0::cases<50>`) and this enum is already at that
+    /// limit (see `ZeroShareTransfer = 112` below) — reuse this variant
+    /// rather than adding a new one for role-check failures.
     Unauthorized = 3,
     /// A cryptographic signature supplied with the call could not be verified
     /// against the expected public key or message payload.

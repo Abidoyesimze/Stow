@@ -154,6 +154,8 @@ export default function MyPredictionsPage() {
   const [predictions, setPredictions] = useState<Prediction[]>(MOCK_PREDICTIONS);
   const [activeFilter, setActiveFilter] = useState<FilterTab>("All");
   const [currentPage, setCurrentPage] = useState(1);
+  const [claimingPredictionId, setClaimingPredictionId] = useState<string | null>(null);
+  const [claimError, setClaimError] = useState<string | null>(null);
   const confirm = useConfirm();
   const toast = useToast();
 
@@ -200,9 +202,36 @@ export default function MyPredictionsPage() {
     setCurrentPage(1);
   };
 
-  const handleClaimPayout = (predictionId: string) => {
-    console.log("Claiming payout for prediction:", predictionId);
-    // TODO: Implement actual claim logic
+  const handleClaimPayout = async (predictionId: string) => {
+    const targetPrediction = predictions.find((prediction) => prediction.id === predictionId);
+    if (!targetPrediction || targetPrediction.isClaimed || claimingPredictionId) {
+      return;
+    }
+
+    setClaimingPredictionId(predictionId);
+    setClaimError(null);
+
+    try {
+      await new Promise((resolve) => window.setTimeout(resolve, 700));
+
+      setPredictions((prev) =>
+        prev.map((prediction) =>
+          prediction.id === predictionId
+            ? { ...prediction, isClaimed: true }
+            : prediction,
+        ),
+      );
+
+      toast.success(
+        `Claimed ${targetPrediction.payout ?? "your payout"} from "${targetPrediction.marketTitle}"`,
+      );
+    } catch {
+      const message = "Unable to claim the payout right now. Please try again.";
+      setClaimError(message);
+      toast.error(message);
+    } finally {
+      setClaimingPredictionId(null);
+    }
   };
 
   const handleCancelPrediction = async (prediction: Prediction) => {
@@ -303,6 +332,12 @@ export default function MyPredictionsPage() {
           Your Predictions
         </h2>
 
+        {claimError && (
+          <div className="mb-4 rounded-xl border border-rose-500/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+            {claimError}
+          </div>
+        )}
+
         {paginatedPredictions.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 text-center">
             <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-white/5">
@@ -388,9 +423,12 @@ export default function MyPredictionsPage() {
                     {prediction.status === "Won" && !prediction.isClaimed && (
                       <button
                         onClick={() => handleClaimPayout(prediction.id)}
+                        disabled={claimingPredictionId === prediction.id}
                         className="inline-flex rounded-xl bg-orange-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-orange-600"
                       >
-                        Claim Payout
+                        {claimingPredictionId === prediction.id
+                          ? "Claiming..."
+                          : "Claim Payout"}
                       </button>
                     )}
 

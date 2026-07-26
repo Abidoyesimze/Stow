@@ -1,12 +1,12 @@
-use soroban_sdk::{Address, Env, Map, Symbol, Vec};
+use soroban_sdk::{symbol_short, Address, Env, Map, Symbol, Vec};
 
 use crate::config::{self, PERSISTENT_BUMP, PERSISTENT_THRESHOLD};
 use crate::errors::InsightArenaError;
 use crate::escrow;
 use crate::market;
 use crate::storage_types::{
-    DataKey, FeeTier, FeeTierConfig, LPPosition, LiquidityPool, MarketFeeInfo, PriceAccumulator,
-    PriceObservation, SwapRecord, VolatilityState,
+    DataKey, FeeTier, FeeTierConfig, LPPosition, LiquidityPool, Market, MarketFeeInfo,
+    PriceAccumulator, PriceObservation, SwapRecord, VolatilityState,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -37,6 +37,12 @@ pub const VOLATILITY_ALPHA_BPS: u32 = 2000;
 /// the oldest retained sample returns `TwapInsufficientHistory` rather than a
 /// silently truncated (and therefore misleading) average.
 pub const TWAP_RING_BUFFER_CAPACITY: u32 = 64;
+
+/// Fixed-point scale used when computing the entry-vs-current reserve ratio for
+/// impermanent-loss accounting. `1e8` is chosen because it is a perfect square
+/// (`(1e4)^2`), which keeps the integer-sqrt step in
+/// [`calculate_impermanent_loss_bps`] exact for clean reference ratios.
+const IL_RATIO_SCALE: u128 = 100_000_000;
 
 // ── AMM Math Functions ────────────────────────────────────────────────────────
 
@@ -420,6 +426,140 @@ pub fn get_twap(
     Ok(twap)
 }
 
+// ── Impermanent Loss Accounting ───────────────────────────────────────────────
+//
+// Scope: this contract's AMM pool is generalized to N outcomes
+// (`LiquidityPool::outcome_reserves`), but the standard impermanent-loss
+// formula is derived for a 2-asset constant-product pool. Rather than
+// inventing a non-standard N-asset generalization, IL here is tracked against
+// a single *designated pair*: the market's first two `outcome_options`, in
+// declaration order (see `il_pair_reserves`). This covers the common 2-outcome
+// prediction market exactly; for markets with more than 2 outcomes, the
+// reported IL reflects only the price movement between those two designated
+// outcomes, not the full multi-asset position. Markets with a single outcome
+// degrade to a trivial (a, a) pair, for which the ratio is always 1 and IL is
+// always zero.
+
+/// Integer square root (floor) of a `u128`, via Newton's method. Soroban
+/// contracts cannot use floating point, so this backs the fixed-point
+/// impermanent-loss formula below.
+fn isqrt_u128(n: u128) -> u128 {
+    if n == 0 {
+        return 0;
+    }
+    let mut x = n;
+    let mut y = x.div_ceil(2);
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
+}
+
+/// Resolve the reserve pair this pool tracks for impermanent-loss purposes:
+/// the reserves of `mkt.outcome_options[0]` and `mkt.outcome_options[1]`. If
+/// the market has fewer than 2 outcomes, both entries mirror
+/// `outcome_options[0]`'s reserve (ratio 1, i.e. IL is always zero).
+fn il_pair_reserves(pool: &LiquidityPool, mkt: &Market) -> (i128, i128) {
+    let outcome_a = match mkt.outcome_options.get(0) {
+        Some(o) => o,
+        None => return (0, 0),
+    };
+    let reserve_a = pool.outcome_reserves.get(outcome_a).unwrap_or(0);
+
+    let reserve_b = match mkt.outcome_options.get(1) {
+        Some(outcome_b) => pool.outcome_reserves.get(outcome_b).unwrap_or(reserve_a),
+        None => reserve_a,
+    };
+
+    (reserve_a, reserve_b)
+}
+
+/// Compute the impermanent loss, in basis points (always `<= 0`), of an LP
+/// position that entered a pool at reserve ratio `entry_a : entry_b` and is
+/// now observed at `current_a : current_b`.
+///
+/// Uses the standard constant-product-AMM impermanent-loss formula, expressed
+/// in terms of the *ratio of ratios* `k = (current_a/current_b) / (entry_a/entry_b)`:
+///
+/// ```text
+/// IL = 2*sqrt(k) / (1 + k) - 1        (always <= 0; 0 exactly when k == 1)
+/// ```
+///
+/// e.g. `k == 1` (no price change) gives `IL == 0`; `k == 4` (the tracked
+/// pair's relative price quadruples) gives `IL == 2*sqrt(4)/(1+4) - 1 == -0.2`,
+/// i.e. -2000 bps.
+///
+/// Substituting `N = current_a*entry_b`, `D = entry_a*current_b` (so `k = N/D`)
+/// lets the whole computation stay in fixed-point integer arithmetic — Soroban
+/// contracts have no floating point:
+///
+/// ```text
+/// IL = 2*sqrt(N*D) / (N + D) - 1
+/// ```
+///
+/// This is evaluated here by scaling the entry/current ratios by
+/// [`IL_RATIO_SCALE`] (a perfect square) before taking an integer square root,
+/// which keeps the result exact for clean reference ratios such as the ones
+/// above.
+pub fn calculate_impermanent_loss_bps(
+    entry_a: i128,
+    entry_b: i128,
+    current_a: i128,
+    current_b: i128,
+) -> Result<i128, InsightArenaError> {
+    if entry_a <= 0 || entry_b <= 0 || current_a <= 0 || current_b <= 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    let scale = IL_RATIO_SCALE as i128;
+
+    // r0 = (entry_a / entry_b) * SCALE, r1 = (current_a / current_b) * SCALE
+    let r0 = entry_a
+        .checked_mul(scale)
+        .ok_or(InsightArenaError::Overflow)?
+        .checked_div(entry_b)
+        .ok_or(InsightArenaError::Overflow)?;
+    let r1 = current_a
+        .checked_mul(scale)
+        .ok_or(InsightArenaError::Overflow)?
+        .checked_div(current_b)
+        .ok_or(InsightArenaError::Overflow)?;
+
+    if r0 <= 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    // k_scaled represents k * SCALE, where k = r1/r0 (current ratio over entry ratio).
+    let k_scaled = r1
+        .checked_mul(scale)
+        .ok_or(InsightArenaError::Overflow)?
+        .checked_div(r0)
+        .ok_or(InsightArenaError::Overflow)? as u128;
+
+    // s ~= sqrt(k) * sqrt(SCALE)
+    let s = isqrt_u128(k_scaled);
+
+    let numerator = 2u128
+        .checked_mul(s)
+        .and_then(|v| v.checked_mul(IL_RATIO_SCALE))
+        .ok_or(InsightArenaError::Overflow)?;
+    let denominator = IL_RATIO_SCALE
+        .checked_add(k_scaled)
+        .ok_or(InsightArenaError::Overflow)?;
+
+    // term_bps == (2*sqrt(k)/(1+k)) * 10_000, already in basis points.
+    let term_bps = numerator
+        .checked_div(denominator)
+        .ok_or(InsightArenaError::Overflow)?;
+
+    let il_bps = (term_bps as i128) - 10_000;
+
+    // By AM-GM, 2*sqrt(k)/(1+k) <= 1 always (equality only at k == 1), so
+    // `il_bps` is mathematically <= 0. `.min(0)` is just a rounding-noise belt.
+    Ok(il_bps.min(0))
+}
+
 // ── Helper Functions ──────────────────────────────────────────────────────────
 
 fn bump_pool(env: &Env, market_id: u64) {
@@ -541,6 +681,53 @@ pub fn calculate_lp_tokens(
     Ok(lp_tokens)
 }
 
+/// Resolve the effective per-outcome liquidity cap for a market: a non-zero
+/// `Market::outcome_liquidity_cap` override takes precedence over the global
+/// `Config::max_liquidity_per_outcome`. Returns `None` when neither is set
+/// (unlimited).
+fn effective_outcome_cap(
+    env: &Env,
+    market: &Market,
+) -> Result<Option<i128>, InsightArenaError> {
+    if market.outcome_liquidity_cap > 0 {
+        return Ok(Some(market.outcome_liquidity_cap));
+    }
+
+    let cfg = config::get_config_readonly(env)?;
+    if cfg.max_liquidity_per_outcome > 0 {
+        Ok(Some(cfg.max_liquidity_per_outcome))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Return the remaining liquidity capacity (stroops) for `outcome` in
+/// `market_id`, or `None` if no cap applies (unlimited).
+pub fn get_remaining_outcome_capacity(
+    env: &Env,
+    market_id: u64,
+    outcome: Symbol,
+) -> Result<Option<i128>, InsightArenaError> {
+    let mkt = market::get_market(env, market_id)?;
+    if !mkt.outcome_options.contains(outcome.clone()) {
+        return Err(InsightArenaError::InvalidOutcome);
+    }
+
+    let cap = match effective_outcome_cap(env, &mkt)? {
+        Some(cap) => cap,
+        None => return Ok(None),
+    };
+
+    let current_reserve = env
+        .storage()
+        .persistent()
+        .get::<_, LiquidityPool>(&DataKey::LiquidityPool(market_id))
+        .and_then(|p| p.outcome_reserves.get(outcome))
+        .unwrap_or(0);
+
+    Ok(Some((cap - current_reserve).max(0)))
+}
+
 /// Add liquidity to a market pool and mint LP tokens
 pub fn add_liquidity(
     env: &Env,
@@ -559,12 +746,34 @@ pub fn add_liquidity(
         return Err(InsightArenaError::MarketExpired);
     }
 
-    escrow::lock_stake(env, &provider, amount)?;
+    let outcome_count = mkt.outcome_options.len() as i128;
+    if outcome_count == 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+    let per_outcome_amount = amount / outcome_count;
 
     let pool = env
         .storage()
         .persistent()
         .get::<_, LiquidityPool>(&DataKey::LiquidityPool(market_id));
+
+    // ── Per-outcome liquidity cap check (before any funds move) ──────────────
+    if let Some(cap) = effective_outcome_cap(env, &mkt)? {
+        for outcome in mkt.outcome_options.iter() {
+            let current_reserve = pool
+                .as_ref()
+                .and_then(|p| p.outcome_reserves.get(outcome))
+                .unwrap_or(0);
+            let projected = current_reserve
+                .checked_add(per_outcome_amount)
+                .ok_or(InsightArenaError::Overflow)?;
+            if projected > cap {
+                return Err(InsightArenaError::StakeTooHigh);
+            }
+        }
+    }
+
+    escrow::lock_stake(env, &provider, amount)?;
 
     let is_new_pool = pool.is_none();
 
@@ -578,11 +787,20 @@ pub fn add_liquidity(
             .lp_token_supply
             .checked_add(lp_tokens)
             .ok_or(InsightArenaError::Overflow)?;
+        for outcome in mkt.outcome_options.iter() {
+            let current_reserve = pool.outcome_reserves.get(outcome.clone()).unwrap_or(0);
+            pool.outcome_reserves.set(
+                outcome,
+                current_reserve
+                    .checked_add(per_outcome_amount)
+                    .ok_or(InsightArenaError::Overflow)?,
+            );
+        }
         (lp_tokens, pool)
     } else {
         let mut reserves = Map::new(env);
         for outcome in mkt.outcome_options.iter() {
-            reserves.set(outcome, amount / mkt.outcome_options.len() as i128);
+            reserves.set(outcome, per_outcome_amount);
         }
         let pool = LiquidityPool::new(
             env,
@@ -608,13 +826,38 @@ pub fn add_liquidity(
     save_pool(env, &new_pool);
     add_provider_to_list(env, market_id, &provider);
 
-    let position = LPPosition::new(
+    // The IL entry snapshot must never change once a position exists, even if
+    // the same provider deposits again later (a "top-up"). Carry the original
+    // snapshot (and the last-recorded cumulative IL) forward in that case;
+    // only a brand-new position gets a fresh snapshot of the pool's current
+    // designated-pair reserves.
+    let existing_position: Option<LPPosition> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::LPPosition(market_id, provider.clone()));
+
+    let (entry_reserve_a, entry_reserve_b, cumulative_il_bps) = match &existing_position {
+        Some(existing) => (
+            existing.entry_reserve_a,
+            existing.entry_reserve_b,
+            existing.cumulative_il_bps,
+        ),
+        None => {
+            let (a, b) = il_pair_reserves(&new_pool, &mkt);
+            (a, b, 0)
+        }
+    };
+
+    let mut position = LPPosition::new(
         provider.clone(),
         market_id,
         lp_tokens,
         amount,
         env.ledger().timestamp(),
+        entry_reserve_a,
+        entry_reserve_b,
     );
+    position.cumulative_il_bps = cumulative_il_bps;
     save_lp_position(env, &position);
 
     Ok(lp_tokens)
@@ -634,6 +877,7 @@ pub fn remove_liquidity(
         return Err(InsightArenaError::InvalidInput);
     }
 
+    let mkt = market::get_market(env, market_id)?;
     let mut pool = get_pool(env, market_id)?;
     let mut position = get_lp_position(env, &provider, market_id)?;
 
@@ -643,6 +887,18 @@ pub fn remove_liquidity(
 
     let withdrawal_amount =
         calculate_liquidity_value(lp_tokens, pool.lp_token_supply, pool.total_liquidity)?;
+
+    // Compute impermanent loss relative to the position's immutable entry
+    // snapshot, using the pool's reserves as they stand *before* this
+    // withdrawal mutates them (i.e. the price the provider is exiting at), and
+    // persist it as the position's cumulative IL for reporting.
+    let (current_a, current_b) = il_pair_reserves(&pool, &mkt);
+    position.cumulative_il_bps = calculate_impermanent_loss_bps(
+        position.entry_reserve_a,
+        position.entry_reserve_b,
+        current_a,
+        current_b,
+    )?;
 
     pool.lp_token_supply = pool
         .lp_token_supply
@@ -764,10 +1020,39 @@ pub fn swap_outcome(
         new_to_reserve,
     )?;
 
-    distribute_fees_to_lps(env, market_id, lp_fee_share)?;
-    if protocol_fee_share > 0 {
-        escrow::add_to_treasury_balance(env, protocol_fee_share);
+    // Further split the protocol's fee cut between the configured treasury
+    // address and liquidity providers, per `Config::treasury_split_bps` /
+    // `Config::lp_split_bps` (validated at configuration time — see
+    // `config::set_treasury_split` — to sum to exactly 10_000 bps). By
+    // default `treasury_split_bps == 10_000`, so the entire protocol fee
+    // share keeps flowing to the treasury exactly as it did before this
+    // split was introduced.
+    let cfg = config::get_config(env)?;
+    let treasury_amount = protocol_fee_share
+        .checked_mul(cfg.treasury_split_bps as i128)
+        .ok_or(InsightArenaError::Overflow)?
+        .checked_div(10_000)
+        .ok_or(InsightArenaError::Overflow)?;
+    let lp_amount_from_protocol = protocol_fee_share
+        .checked_sub(treasury_amount)
+        .ok_or(InsightArenaError::Overflow)?;
+    let total_lp_share = lp_fee_share
+        .checked_add(lp_amount_from_protocol)
+        .ok_or(InsightArenaError::Overflow)?;
+
+    distribute_fees_to_lps(env, market_id, total_lp_share)?;
+    if treasury_amount > 0 {
+        escrow::add_to_treasury_balance(env, treasury_amount);
     }
+
+    emit_treasury_fee_split(
+        env,
+        market_id,
+        &cfg.treasury_address,
+        fee_amount,
+        treasury_amount,
+        total_lp_share,
+    );
 
     let record = SwapRecord::new(
         trader,
@@ -793,6 +1078,31 @@ pub fn swap_outcome(
     update_pool_volume(env, market_id, amount_in);
 
     Ok(amount_out)
+}
+
+/// Emit an event recording exactly how a swap's collected fee was split
+/// between the protocol treasury and liquidity providers. Published on every
+/// swap that reaches the fee-collection step, including zero-fee swaps (in
+/// which case both shares are `0`), so off-chain consumers can reconstruct a
+/// complete, gap-free accounting trail per market.
+fn emit_treasury_fee_split(
+    env: &Env,
+    market_id: u64,
+    treasury_address: &Address,
+    fee_amount: i128,
+    treasury_amount: i128,
+    lp_amount: i128,
+) {
+    env.events().publish(
+        (symbol_short!("fee"), symbol_short!("split")),
+        (
+            market_id,
+            treasury_address.clone(),
+            fee_amount,
+            treasury_amount,
+            lp_amount,
+        ),
+    );
 }
 
 fn distribute_fees_to_lps(
@@ -848,6 +1158,33 @@ pub fn get_lp_position_public(
     market_id: u64,
 ) -> Result<LPPosition, InsightArenaError> {
     get_lp_position(env, &provider, market_id)
+}
+
+/// Return the current impermanent loss (basis points, always `<= 0`) for an
+/// open LP position, computed live against the pool's *current* reserves.
+///
+/// Unlike `LPPosition::cumulative_il_bps` (only refreshed as of the position's
+/// last withdrawal), this always reflects "now" — it recomputes
+/// `calculate_impermanent_loss_bps` from the position's immutable entry
+/// snapshot and the pool's live reserves on every call, without mutating any
+/// stored state.
+pub fn get_position_il(
+    env: &Env,
+    provider: Address,
+    market_id: u64,
+) -> Result<i128, InsightArenaError> {
+    let mkt = market::get_market(env, market_id)?;
+    let pool = get_pool(env, market_id)?;
+    let position = get_lp_position(env, &provider, market_id)?;
+
+    let (current_a, current_b) = il_pair_reserves(&pool, &mkt);
+
+    calculate_impermanent_loss_bps(
+        position.entry_reserve_a,
+        position.entry_reserve_b,
+        current_a,
+        current_b,
+    )
 }
 
 pub fn get_all_lp_providers(env: &Env, market_id: u64) -> Vec<LPPosition> {

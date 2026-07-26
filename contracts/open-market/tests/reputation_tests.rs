@@ -53,6 +53,7 @@ fn reputation_zero_for_new_creator() {
         average_participant_count: 0,
         dispute_count: 0,
         reputation_score: 0,
+        last_updated: 0,
     };
     assert_eq!(calculate_creator_reputation(&stats), 0);
 }
@@ -65,6 +66,7 @@ fn test_reputation_zero_markets_returns_zero() {
         average_participant_count: 0,
         dispute_count: 0,
         reputation_score: 0,
+        last_updated: 0,
     };
     assert_eq!(calculate_creator_reputation(&stats), 0);
 }
@@ -78,6 +80,7 @@ fn test_reputation_perfect_resolution_rate_scores_600() {
         average_participant_count: 0,
         dispute_count: 0,
         reputation_score: 0,
+        last_updated: 0,
     };
     assert_eq!(calculate_creator_reputation(&stats), 600);
 }
@@ -90,6 +93,7 @@ fn test_reputation_dispute_penalty_reduces_score() {
         average_participant_count: 20,
         dispute_count: 0,
         reputation_score: 0,
+        last_updated: 0,
     };
 
     let with_dispute = CreatorStats {
@@ -111,6 +115,7 @@ fn test_reputation_capped_at_1000() {
         average_participant_count: 200,
         dispute_count: 0,
         reputation_score: 0,
+        last_updated: 0,
     };
     assert_eq!(calculate_creator_reputation(&stats), 1000);
 }
@@ -123,6 +128,7 @@ fn test_reputation_participation_bonus_adds_up_to_200() {
         average_participant_count: 50,
         dispute_count: 0,
         reputation_score: 0,
+        last_updated: 0,
     };
     let high_participation = CreatorStats {
         average_participant_count: 300,
@@ -144,6 +150,7 @@ fn reputation_perfect_score_no_disputes() {
         average_participant_count: 100,
         dispute_count: 0,
         reputation_score: 0,
+        last_updated: 0,
     };
     assert_eq!(calculate_creator_reputation(&stats), 800);
 }
@@ -156,6 +163,7 @@ fn reputation_clamped_to_1000() {
         average_participant_count: 300, // bonus capped at 200
         dispute_count: 0,
         reputation_score: 0,
+        last_updated: 0,
     };
     // 600 + 200 = 800
     assert_eq!(calculate_creator_reputation(&stats), 800);
@@ -170,6 +178,7 @@ fn reputation_dispute_penalty_capped_at_200() {
         average_participant_count: 0,
         dispute_count: 10,
         reputation_score: 0,
+        last_updated: 0,
     };
     assert_eq!(calculate_creator_reputation(&stats), 400);
 }
@@ -183,6 +192,7 @@ fn reputation_never_underflows() {
         average_participant_count: 0,
         dispute_count: 100,
         reputation_score: 0,
+        last_updated: 0,
     };
     assert_eq!(calculate_creator_reputation(&stats), 0);
 }
@@ -196,6 +206,7 @@ fn reputation_partial_resolution() {
         average_participant_count: 10,
         dispute_count: 1,
         reputation_score: 0,
+        last_updated: 0,
     };
     assert_eq!(calculate_creator_reputation(&stats), 270);
 }
@@ -208,6 +219,7 @@ fn reputation_participation_bonus_capped_at_200() {
         average_participant_count: 200, // 200 * 2 = 400, capped at 200
         dispute_count: 0,
         reputation_score: 0,
+        last_updated: 0,
     };
     assert_eq!(calculate_creator_reputation(&stats), 800);
 }
@@ -313,30 +325,32 @@ fn reputation_score_always_in_range() {
 
 #[test]
 fn test_reputation_decay_over_time() {
-    // Test that reputation scores decay appropriately over time
-    // Ensures inactive users don't maintain high scores indefinitely
+    // Test that reputation scores decay appropriately over time.
+    // Ensures inactive users don't maintain high scores indefinitely.
     let env = Env::default();
     env.mock_all_auths();
-
     let (client, _, oracle, _) = deploy(&env);
     let creator = Address::generate(&env);
 
-    // Create and resolve market to get positive reputation
+    // Create and resolve market to get positive reputation.
     let id = client.create_market(&creator, &default_params(&env));
     env.ledger().set_timestamp(env.ledger().timestamp() + 2000);
     client.resolve_market(&oracle, &id, &symbol_short!("yes"));
-
     let stats = client.get_creator_stats(&creator);
     assert_eq!(stats.reputation_score, 600);
 
-    // Fast forward in time
+    // Fast forward one half-life (30 days, matching the default
+    // reputation_half_life_seconds) — exponential decay should exactly halve.
     env.ledger()
-        .set_timestamp(env.ledger().timestamp() + 86400 * 30); // 30 days
-    let stats_after_time = client.get_creator_stats(&creator);
+        .set_timestamp(env.ledger().timestamp() + 86400 * 30);
+    let stats_after_one_half_life = client.get_creator_stats(&creator);
+    assert_eq!(stats_after_one_half_life.reputation_score, 300);
 
-    // Update this when decay logic is implemented in the reputation formula
-    // For now we assert the current behavior where stats aren't decayed
-    assert_eq!(stats_after_time.reputation_score, 600);
+    // Fast forward a second half-life on top (60 days total) — should halve again.
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 86400 * 30);
+    let stats_after_two_half_lives = client.get_creator_stats(&creator);
+    assert_eq!(stats_after_two_half_lives.reputation_score, 150);
 }
 
 #[test]
@@ -371,6 +385,7 @@ fn test_reputation_with_high_dispute_count() {
         average_participant_count: 50,
         dispute_count: 20, // Very high dispute count
         reputation_score: 0,
+        last_updated: 0,
     };
 
     let reputation = calculate_creator_reputation(&high_dispute_stats);
@@ -634,6 +649,7 @@ fn test_reputation_capped_at_zero_with_many_disputes() {
         average_participant_count: 0,
         dispute_count: 100, // Extreme dispute count
         reputation_score: 0,
+        last_updated: 0,
     };
 
     let extreme_reputation = calculate_creator_reputation(&extreme_stats);
