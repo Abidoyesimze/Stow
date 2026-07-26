@@ -38,6 +38,10 @@ import {
   CursorPaginationDto,
   PaginatedCursorResponse,
 } from './dto/cursor-pagination.dto';
+import {
+  LeaderboardSnapshotQueryDto,
+  PaginatedSnapshotRankingResponse,
+} from './dto/leaderboard-snapshot-query.dto';
 import { CACHE_WARMING_KEYS } from '../cache/cache-warming.keys';
 import { SeasonsService } from '../seasons/seasons.service';
 
@@ -688,6 +692,88 @@ export class LeaderboardService {
         `Pruned ${affected} leaderboard snapshot(s) older than ${retentionDays}d`,
       );
     }
+  }
+
+  /**
+   * Return the leaderboard ranking as of the nearest snapshot on or before the
+   * requested date. If the date falls before all stored snapshots the endpoint
+   * returns a clear message instead of an empty list so callers know the
+   * data is outside the retention window.
+   */
+  async getSnapshots(
+    query: LeaderboardSnapshotQueryDto,
+  ): Promise<PaginatedSnapshotRankingResponse> {
+    const page = query.page ?? 1;
+    const limit = Math.min(query.limit ?? 20, 100);
+    const skip = (page - 1) * limit;
+    const requestedDate = new Date(query.date);
+    requestedDate.setHours(23, 59, 59, 999);
+
+    // Find the most recent snapshot at or before the requested date
+    const qb = this.snapshotRepository
+      .createQueryBuilder('snap')
+      .leftJoinAndSelect('snap.user', 'user')
+      .where('snap.captured_at <= :requestedDate', { requestedDate })
+      .orderBy('snap.captured_at', 'DESC')
+      .take(1);
+
+    if (query.season_id) {
+      qb.andWhere('snap.season_id = :season_id', {
+        season_id: query.season_id,
+      });
+    } else {
+      qb.andWhere('snap.season_id IS NULL');
+    }
+
+    const latestSnapshot = await qb.getOne();
+
+    if (!latestSnapshot) {
+      const retentionDays = this.configService.get<number>(
+        'LEADERBOARD_SNAPSHOT_RETENTION_DAYS',
+        30,
+      );
+      return {
+        data: [],
+        snapshot_date: requestedDate,
+        total: 0,
+        page,
+        limit,
+        message: `No snapshots found on or before ${query.date}. Snapshots are retained for ${retentionDays} days.`,
+      };
+    }
+
+    const snapshotDate = latestSnapshot.captured_at;
+
+    // Fetch all rankings from that snapshot
+    const rankQb = this.snapshotRepository
+      .createQueryBuilder('snap')
+      .leftJoinAndSelect('snap.user', 'user')
+      .where('snap.captured_at = :snapshotDate', { snapshotDate })
+      .orderBy('snap.rank', 'ASC');
+
+    if (query.season_id) {
+      rankQb.andWhere('snap.season_id = :season_id', {
+        season_id: query.season_id,
+      });
+    } else {
+      rankQb.andWhere('snap.season_id IS NULL');
+    }
+
+    const [entries, total] = await rankQb
+      .skip(skip)
+      .take(limit)
+      .getManyAndCount();
+
+    const data = entries.map((entry) => ({
+      rank: entry.rank,
+      user_id: entry.user_id,
+      username: entry.user?.username ?? null,
+      stellar_address: entry.user?.stellar_address ?? '',
+      score: entry.score,
+      captured_at: entry.captured_at,
+    }));
+
+    return { data, snapshot_date: snapshotDate, total, page, limit };
   }
 
   /**
