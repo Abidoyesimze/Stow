@@ -14,9 +14,9 @@ use insightarena_contract::{
     CreateMarketParams, FeeTier, FeeTierConfig, InsightArenaContract, InsightArenaContractClient,
     InsightArenaError,
 };
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Events, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol};
+use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, TryIntoVal};
 
 // ── Test Helpers ─────────────────────────────────────────────────────────────
 
@@ -2125,6 +2125,256 @@ fn test_dynamic_fee_split_between_lp_and_protocol_treasury_is_conserved() {
     let expected_protocol_share = expected_total_fee * cfg.protocol_share_bps as i128 / 10_000;
     assert_eq!(protocol_share, expected_protocol_share);
     assert_eq!(lp_share, expected_total_fee - expected_protocol_share);
+}
+
+// ── Protocol Treasury Fee Split (#1336) ───────────────────────────────────────
+
+/// Fetches the `(fee, split)` event payload most recently published by the
+/// contract, decoded as `(market_id, treasury_address, fee_amount,
+/// treasury_amount, lp_amount)`. Panics if no such event was found.
+///
+/// Must be called immediately after the swap whose event is under test —
+/// before any further contract calls — because the test host's `Events::all`
+/// only retains events from the most recent top-level invocation.
+fn last_treasury_split_event(
+    env: &Env,
+    contract_id: &Address,
+) -> (u64, Address, i128, i128, i128) {
+    let events = env.events().all();
+    for event in events.iter().rev() {
+        if &event.0 != contract_id || event.1.len() != 2 {
+            continue;
+        }
+        let topic0: Result<Symbol, _> = event.1.get(0).unwrap().try_into_val(env);
+        let topic1: Result<Symbol, _> = event.1.get(1).unwrap().try_into_val(env);
+        if let (Ok(t0), Ok(t1)) = (topic0, topic1) {
+            if t0 == Symbol::new(env, "fee") && t1 == Symbol::new(env, "split") {
+                let data: (u64, Address, i128, i128, i128) =
+                    event.2.try_into_val(env).expect("decode fee/split event");
+                return data;
+            }
+        }
+    }
+    panic!("expected a fee/split event");
+}
+
+#[test]
+fn test_treasury_split_default_preserves_prior_swap_behavior() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+    let market_id = client.create_market(&_admin, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let liquidity = 1_000_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    // Default config: 100% of the protocol's fee cut still goes to the
+    // treasury and 0% is redirected to LPs, exactly matching behaviour
+    // before this feature existed.
+    let cfg = client.get_config();
+    assert_eq!(cfg.treasury_split_bps, 10_000);
+    assert_eq!(cfg.lp_split_bps, 0);
+
+    let fee_bps = client.get_market_fee_info(&market_id).effective_fee_bps;
+    let swap_amount = 1_000_000_i128;
+    sa.mint(&trader, &swap_amount);
+    token.approve(&trader, &client.address, &swap_amount, &9999);
+
+    let treasury_before = client.get_treasury_balance();
+    let lp_fees_before = client.get_lp_position(&provider, &market_id).fees_earned;
+
+    client.swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &swap_amount,
+        &0_i128,
+    );
+
+    // Must read the event right after the swap, before any further calls.
+    let (event_market_id, event_treasury, event_fee, event_treasury_amt, event_lp_amt) =
+        last_treasury_split_event(&env, &client.address);
+
+    let treasury_after = client.get_treasury_balance();
+    let lp_fees_after = client.get_lp_position(&provider, &market_id).fees_earned;
+
+    let tier_cfg = FeeTierConfig::default_config();
+    let expected_total_fee = swap_amount * fee_bps as i128 / 10_000;
+    let expected_protocol_share = expected_total_fee * tier_cfg.protocol_share_bps as i128 / 10_000;
+    let expected_lp_share = expected_total_fee - expected_protocol_share;
+
+    assert_eq!(treasury_after - treasury_before, expected_protocol_share);
+    assert_eq!(lp_fees_after - lp_fees_before, expected_lp_share);
+
+    assert_eq!(event_market_id, market_id);
+    assert_eq!(event_treasury, cfg.treasury_address);
+    assert_eq!(event_fee, expected_total_fee);
+    assert_eq!(event_treasury_amt, expected_protocol_share);
+    assert_eq!(event_lp_amt, expected_lp_share);
+    assert_eq!(event_treasury_amt + event_lp_amt, event_fee);
+}
+
+/// Runs a single swap under a custom `(treasury_split_bps, lp_split_bps)`
+/// configuration and returns `(protocol_fee_share, treasury_delta, lp_delta,
+/// event)` so callers can assert exact split amounts — including rounding
+/// remainders — and the accompanying event, across several ratios.
+#[allow(clippy::too_many_arguments)]
+fn swap_with_treasury_split(
+    env: &Env,
+    client: &InsightArenaContractClient<'_>,
+    admin: &Address,
+    treasury_split_bps: u32,
+    lp_split_bps: u32,
+    market_id: u64,
+    provider: &Address,
+    trader: &Address,
+    swap_amount: i128,
+) -> (i128, i128, i128, (u64, Address, i128, i128, i128)) {
+    let new_treasury = Address::generate(env);
+    client.set_treasury_split(admin, &new_treasury, &treasury_split_bps, &lp_split_bps);
+
+    let fee_bps = client.get_market_fee_info(&market_id).effective_fee_bps;
+    let tier_cfg = FeeTierConfig::default_config();
+    let expected_total_fee = swap_amount * fee_bps as i128 / 10_000;
+    let protocol_fee_share = expected_total_fee * tier_cfg.protocol_share_bps as i128 / 10_000;
+
+    let treasury_before = client.get_treasury_balance();
+    let lp_fees_before = client.get_lp_position(provider, &market_id).fees_earned;
+
+    client.swap_outcome(
+        trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &swap_amount,
+        &0_i128,
+    );
+
+    // Must read the event right after the swap, before any further calls.
+    let event = last_treasury_split_event(env, &client.address);
+
+    let treasury_after = client.get_treasury_balance();
+    let lp_fees_after = client.get_lp_position(provider, &market_id).fees_earned;
+
+    (
+        protocol_fee_share,
+        treasury_after - treasury_before,
+        lp_fees_after - lp_fees_before,
+        event,
+    )
+}
+
+#[test]
+fn test_treasury_split_custom_ratio_conserves_protocol_share_with_rounding() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+    let market_id = client.create_market(&admin, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let liquidity = 1_000_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let swap_amount = 1_000_000_i128;
+    sa.mint(&trader, &swap_amount);
+    token.approve(&trader, &client.address, &swap_amount, &9999);
+
+    let tier_cfg_before = FeeTierConfig::default_config();
+    let fee_bps = client.get_market_fee_info(&market_id).effective_fee_bps;
+    let expected_total_fee = swap_amount * fee_bps as i128 / 10_000;
+    let protocol_fee_share =
+        expected_total_fee * tier_cfg_before.protocol_share_bps as i128 / 10_000;
+    let original_lp_share = expected_total_fee - protocol_fee_share;
+
+    // 3333 / 6667 does not divide `protocol_fee_share` evenly, so this also
+    // exercises the rounding behaviour: the treasury amount is rounded down
+    // and the LP amount absorbs the remainder, with no stroop lost.
+    let (returned_protocol_share, treasury_delta, lp_delta, event) = swap_with_treasury_split(
+        &env,
+        &client,
+        &admin,
+        3_333,
+        6_667,
+        market_id,
+        &provider,
+        &trader,
+        swap_amount,
+    );
+
+    assert_eq!(returned_protocol_share, protocol_fee_share);
+    let expected_treasury_amount = protocol_fee_share * 3_333 / 10_000;
+    let expected_lp_amount_from_protocol = protocol_fee_share - expected_treasury_amount;
+
+    assert_eq!(treasury_delta, expected_treasury_amount);
+    assert_eq!(lp_delta, original_lp_share + expected_lp_amount_from_protocol);
+    // Conservation: every stroop of the protocol's fee cut is accounted for.
+    assert_eq!(
+        treasury_delta + (lp_delta - original_lp_share),
+        protocol_fee_share
+    );
+
+    let cfg = client.get_config();
+    let (_, event_treasury, event_fee, event_treasury_amt, event_lp_amt) = event;
+    assert_eq!(event_treasury, cfg.treasury_address);
+    assert_eq!(event_fee, expected_total_fee);
+    assert_eq!(event_treasury_amt, expected_treasury_amount);
+    assert_eq!(event_lp_amt, original_lp_share + expected_lp_amount_from_protocol);
+}
+
+#[test]
+fn test_treasury_split_all_to_lp_sends_nothing_to_treasury() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+    let market_id = client.create_market(&admin, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let liquidity = 1_000_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let swap_amount = 1_000_000_i128;
+    sa.mint(&trader, &swap_amount);
+    token.approve(&trader, &client.address, &swap_amount, &9999);
+
+    let (protocol_fee_share, treasury_delta, _lp_delta, event) = swap_with_treasury_split(
+        &env,
+        &client,
+        &admin,
+        0,
+        10_000,
+        market_id,
+        &provider,
+        &trader,
+        swap_amount,
+    );
+
+    assert!(protocol_fee_share > 0);
+    assert_eq!(treasury_delta, 0);
+    let (_, _, event_fee, event_treasury_amt, event_lp_amt) = event;
+    assert_eq!(event_treasury_amt, 0);
+    // With treasury_split_bps == 0, the entire collected fee (both the LPs'
+    // original share and the redirected protocol share) ends up with LPs.
+    assert_eq!(event_lp_amt, event_fee);
 }
 
 #[test]

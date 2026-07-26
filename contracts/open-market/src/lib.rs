@@ -584,6 +584,28 @@ impl InsightArenaContract {
         escrow::transfer_fee(&env, &admin, &to, amount)
     }
 
+    /// Update the protocol treasury address and the split (bps) of the
+    /// protocol's fee cut between the treasury and liquidity providers.
+    /// Caller must be the current admin. Reverts with `InvalidFee` if
+    /// `treasury_split_bps + lp_split_bps != 10_000`. See
+    /// `liquidity::swap_outcome` for where the split is applied and its
+    /// `(fee, split)` event emitted.
+    pub fn set_treasury_split(
+        env: Env,
+        admin: Address,
+        treasury_address: Address,
+        treasury_split_bps: u32,
+        lp_split_bps: u32,
+    ) -> Result<(), InsightArenaError> {
+        config::set_treasury_split(
+            &env,
+            admin,
+            treasury_address,
+            treasury_split_bps,
+            lp_split_bps,
+        )
+    }
+
     // ── Slashed-funds insurance pool ─────────────────────────────────────────
 
     /// Update the share (bps) of every slashed bond routed into the
