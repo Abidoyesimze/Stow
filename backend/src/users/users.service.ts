@@ -414,6 +414,15 @@ export class UsersService {
     if (dto.marketing_emails !== undefined) {
       prefs.marketing_emails = dto.marketing_emails;
     }
+    if (dto.digest_frequency !== undefined) {
+      prefs.digest_frequency = dto.digest_frequency;
+    }
+    if (dto.digest_hour !== undefined) {
+      prefs.digest_hour = dto.digest_hour;
+    }
+    if (dto.digest_timezone !== undefined) {
+      prefs.digest_timezone = dto.digest_timezone;
+    }
 
     const updated = await this.preferencesRepository.save(prefs);
 
@@ -424,6 +433,9 @@ export class UsersService {
       competition_notifications: updated.competition_notifications,
       leaderboard_notifications: updated.leaderboard_notifications,
       marketing_emails: updated.marketing_emails,
+      digest_frequency: updated.digest_frequency,
+      digest_hour: updated.digest_hour,
+      digest_timezone: updated.digest_timezone,
       created_at: updated.created_at,
       updated_at: updated.updated_at,
     };
