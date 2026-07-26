@@ -444,6 +444,14 @@ describe('MarketsService.findFeaturedMarkets', () => {
         { provide: getRepositoryToken(UserBookmark), useValue: {} },
         { provide: getRepositoryToken(Prediction), useValue: {} },
         { provide: getRepositoryToken(User), useValue: {} },
+        {
+          provide: getRepositoryToken(MarketPriceSnapshot),
+          useValue: {
+            create: jest.fn(),
+            save: jest.fn(),
+            createQueryBuilder: jest.fn(),
+          },
+        },
         { provide: UsersService, useValue: {} },
         { provide: SorobanService, useValue: {} },
         { provide: DataSource, useValue: {} },
