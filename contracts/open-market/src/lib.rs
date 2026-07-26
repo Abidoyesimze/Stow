@@ -186,6 +186,14 @@ impl InsightArenaContract {
         market::get_market(&env, market_id)
     }
 
+    /// Return the immutable off-chain metadata content hash stored at market creation.
+    pub fn get_metadata_hash(
+        env: Env,
+        market_id: u64,
+    ) -> Result<soroban_sdk::BytesN<32>, InsightArenaError> {
+        market::get_metadata_hash(&env, market_id)
+    }
+
     /// Return the total number of markets ever created (0 if none yet).
     pub fn get_market_count(env: Env) -> u64 {
         market::get_market_count(&env)

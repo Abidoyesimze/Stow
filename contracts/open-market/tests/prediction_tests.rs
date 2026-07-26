@@ -1,6 +1,6 @@
 use soroban_sdk::testutils::{storage::Persistent as _, Address as _, Ledger};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, Vec, BytesN};
 
 use insightarena_contract::config::LEDGER_BUMP_MARKET;
 use insightarena_contract::market::CreateMarketParams;
@@ -41,6 +41,7 @@ fn default_params(env: &Env) -> CreateMarketParams {
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: true,
+        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
     }
 }
 

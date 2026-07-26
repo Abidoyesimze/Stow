@@ -16,7 +16,7 @@ use insightarena_contract::{
 };
 use soroban_sdk::testutils::{Address as _, Events, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, TryIntoVal};
+use soroban_sdk::{symbol_short, vec, Address, BytesN, Env, String, Symbol, TryIntoVal};
 
 // ── Test Helpers ─────────────────────────────────────────────────────────────
 
@@ -702,6 +702,7 @@ fn lp_market_params(env: &Env) -> CreateMarketParams {
         min_stake: 10_000_000,
         max_stake: 1_000_000_000,
         is_public: true,
+        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
     }
 }
 

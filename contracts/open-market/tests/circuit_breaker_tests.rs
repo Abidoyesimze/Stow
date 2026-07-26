@@ -15,7 +15,7 @@ use insightarena_contract::{
     InsightArenaContract, InsightArenaContractClient, InsightArenaError,
 };
 use soroban_sdk::testutils::{Address as _, Events, MockAuth, MockAuthInvoke};
-use soroban_sdk::{symbol_short, vec, Address, Env, IntoVal, String, Symbol, TryIntoVal};
+use soroban_sdk::{symbol_short, vec, Address, Env, IntoVal, String, Symbol, TryIntoVal, BytesN};
 
 /// Assert the contract is currently paused without calling `get_config`
 /// directly — `get_config` itself reverts with `Paused` while paused (see
@@ -56,6 +56,7 @@ fn default_params(env: &Env) -> CreateMarketParams {
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: true,
+        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
     }
 }
 
