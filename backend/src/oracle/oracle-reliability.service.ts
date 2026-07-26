@@ -59,7 +59,7 @@ export class OracleReliabilityService {
     const records = await this.reliabilityRepository.find({
       order: { reliability_score: 'DESC' },
     });
-    return records.map(this.toResponse);
+    return records.map((r) => this.toResponse(r));
   }
 
   async getScoreBySource(
