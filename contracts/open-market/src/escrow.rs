@@ -43,12 +43,16 @@ fn bump_treasury(env: &Env) {
 /// until the market is resolved (payout) or cancelled (refund).
 ///
 /// # Errors
+/// - `Paused` when the contract's emergency pause is engaged (checked here
+///   directly so this fund-moving primitive is self-defending regardless of
+///   whether the caller already checked, defense in depth).
 /// - `InvalidInput` when `amount <= 0`.
 /// - Propagates any error returned by [`config::get_config`].
 ///
 /// Token transfer panics are handled by the Soroban runtime and surface as
 /// contract failures.
 pub fn lock_stake(env: &Env, from: &Address, amount: i128) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(env)?;
     acquire_escrow_lock(env)?;
 
     if amount <= 0 {
@@ -75,6 +79,8 @@ pub fn lock_stake(env: &Env, from: &Address, amount: i128) -> Result<(), Insight
 /// where the token holder pre-approves the contract separately.
 ///
 /// # Errors
+/// - `Paused` when the contract's emergency pause is engaged (checked here
+///   directly, defense in depth).
 /// - `InvalidInput` when `amount <= 0`.
 /// - `InsufficientFunds` when the allowance is insufficient.
 /// - Propagates any error returned by [`config::get_config`].
@@ -83,6 +89,7 @@ pub fn lock_stake_via_allowance(
     from: &Address,
     amount: i128,
 ) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(env)?;
     acquire_escrow_lock(env)?;
 
     if amount <= 0 {
@@ -116,10 +123,13 @@ pub fn lock_stake_via_allowance(
 /// payout distribution.
 ///
 /// # Errors
+/// - `Paused` when the contract's emergency pause is engaged (checked here
+///   directly, defense in depth).
 /// - `InvalidInput` when `amount <= 0`.
 /// - `EscrowEmpty` when the contract balance cannot cover the refund.
 /// - Propagates any error returned by [`config::get_config`].
 pub fn refund(env: &Env, to: &Address, amount: i128) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(env)?;
     acquire_escrow_lock(env)?;
 
     if amount <= 0 {
@@ -146,7 +156,12 @@ pub fn refund(env: &Env, to: &Address, amount: i128) -> Result<(), InsightArenaE
 ///
 /// This is semantically distinct from `refund` (used for market cancellation),
 /// but uses the same escrow transfer path from contract balance to recipient.
+///
+/// # Errors
+/// - `Paused` when the contract's emergency pause is engaged (checked here
+///   directly, defense in depth).
 pub fn release_payout(env: &Env, to: &Address, amount: i128) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(env)?;
     acquire_escrow_lock(env)?;
 
     if amount <= 0 {
@@ -321,11 +336,15 @@ pub fn transfer_fee(
 /// tracked treasury balance.
 ///
 /// # Errors
+/// - `Paused` when the contract's emergency pause is engaged (checked here
+///   directly, defense in depth).
 /// - `InvalidInput` when `amount <= 0`.
 /// - `Unauthorized` when caller is not the admin.
 /// - `InsufficientFunds` when `amount` exceeds the tracked treasury balance.
 /// - `EscrowEmpty` if the contract token balance cannot cover the withdrawal.
 pub fn withdraw_treasury(env: Env, caller: Address, amount: i128) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(&env)?;
+
     if amount <= 0 {
         return Err(InsightArenaError::InvalidInput);
     }

@@ -135,9 +135,14 @@ pub struct Config {
     /// Address of the XLM Stellar Asset Contract used for escrow transfers.
     pub xlm_token: Address,
     /// When `true`, all non-admin entry points must revert with `Paused`.
+    /// Set via [`set_paused`]: only `guardian` may set this to `true`
+    /// (pause); only `admin` may set it back to `false` (unpause).
     pub is_paused: bool,
     /// Address authorized to veto a queued governance proposal during its
-    /// timelock window. Defaults to `admin` at initialization.
+    /// timelock window, and to engage the emergency pause (see
+    /// [`set_paused`]). Distinct from `admin` so a single compromised role
+    /// cannot both halt *and* resume the contract. Defaults to `admin` at
+    /// initialization.
     pub guardian: Address,
     /// Delay (seconds) a passed governance proposal must wait in the queue
     /// before `execute_proposal` will apply it. This value — and `guardian`
@@ -359,24 +364,49 @@ pub fn update_protocol_fee_from_governance(
     Ok(())
 }
 
-/// Pause or resume the contract. Caller must be the stored admin.
+/// Engage or lift the emergency pause, enforcing strict separation of duties:
 ///
-/// When `paused` is `true`, all non-admin entry points should call
-/// [`ensure_not_paused`] and revert with [`InsightArenaError::Paused`].
+/// - Pausing (`paused == true`) may only be authorized by the stored
+///   **guardian**. The guardian is a distinct, lower-trust role intended to
+///   react quickly to a discovered exploit without needing full admin
+///   authority.
+/// - Unpausing (`paused == false`) may only be authorized by the stored
+///   **admin**. This ensures a single compromised or malicious guardian can
+///   halt the contract but can never be the one to resume it — resuming
+///   operation after an incident requires the higher-trust admin role.
+///
+/// While `paused` is `true`, all fund-moving and other sensitive entry points
+/// call [`ensure_not_paused`] (or, for the escrow primitives, check it
+/// directly) and revert with [`InsightArenaError::Paused`].
 ///
 /// `reason_code` is an opaque, caller-defined code (e.g. 1 = incident,
 /// 2 = scheduled maintenance, 0 = resume/no reason) recorded on the emitted
 /// event for off-chain auditing. It is not validated or persisted.
+///
+/// # Errors
+/// - `Unauthorized` is not returned directly here; instead `require_auth`
+///   panics (reverting the transaction) when the wrong role signs the call,
+///   consistent with every other role-gated setter in this module.
 pub fn set_paused(env: &Env, paused: bool, reason_code: u32) -> Result<(), InsightArenaError> {
     let mut config = load_config(env)?;
 
-    config.admin.require_auth();
+    // Separation of duties: the guardian engages the pause, only the admin
+    // may lift it. Branching on `paused` (rather than exposing two entry
+    // points) keeps the public ABI unchanged while still requiring the
+    // correct, distinct role for each direction.
+    let actor = if paused {
+        config.guardian.require_auth();
+        config.guardian.clone()
+    } else {
+        config.admin.require_auth();
+        config.admin.clone()
+    };
 
     config.is_paused = paused;
     env.storage().persistent().set(&DataKey::Config, &config);
     bump_config(env);
 
-    emit_paused_toggled(env, &config.admin, paused, reason_code);
+    emit_paused_toggled(env, &actor, paused, reason_code);
 
     Ok(())
 }

@@ -81,7 +81,10 @@ impl InsightArenaContract {
         config::update_protocol_fee(&env, new_fee_bps)
     }
 
-    /// Pause or resume the contract. Caller must be the stored admin.
+    /// Pause or resume the contract. Only the stored **guardian** may pause
+    /// (`paused = true`); only the stored **admin** may unpause
+    /// (`paused = false`) — a deliberate separation of duties so no single
+    /// role can both trigger and clear an emergency halt.
     /// `reason_code` is recorded on the emitted event for auditing.
     pub fn set_paused(env: Env, paused: bool, reason_code: u32) -> Result<(), InsightArenaError> {
         config::set_paused(&env, paused, reason_code)
