@@ -9,6 +9,8 @@ import { CreatorEventsProvider } from "@/context/CreatorEventsContext";
 import { ToastProvider } from "@/context/ToastContext";
 import { ConfirmProvider } from "@/context/ConfirmContext";
 import { FavoritesProvider } from "@/context/FavoritesContext";
+import { PredictionSlipProvider } from "@/context/PredictionSlipContext";
+import { PredictionSlipPanel, PredictionSlipFloatingButton } from "@/component/PredictionSlip";
 import { ThemeProvider } from "@/context/ThemeContext";
 
 import "./globals.css";
@@ -101,6 +103,7 @@ export default function RootLayout({
             <FavoritesProvider>
               <CreatorEventsProvider>
                 <ToastProvider>
+                  <PredictionSlipProvider>
                   <ConfirmProvider>
                     <Suspense fallback={null}>
                       <RouteProgress />
@@ -114,7 +117,10 @@ export default function RootLayout({
                         {children}
                       </Suspense>
                     </div>
+                    <PredictionSlipFloatingButton />
+                    <PredictionSlipPanel />
                   </ConfirmProvider>
+                  </PredictionSlipProvider>
                 </ToastProvider>
               </CreatorEventsProvider>
             </FavoritesProvider>
