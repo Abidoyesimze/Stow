@@ -149,10 +149,28 @@ pub struct Dispute {
     pub appeal_tier: u32,
     pub appealer: Option<Address>,
     pub appeal_bond: i128,
+    /// Arbiters assigned to weigh in on this dispute via
+    /// `dispute::assign_arbiters`, with per-arbiter weight snapshotted at
+    /// assignment time. Empty until a panel is assigned; the dispute can
+    /// still be settled directly by admin via `resolve_dispute` if no panel
+    /// is ever assigned.
+    pub arbiters: Vec<ArbiterAssignment>,
+    /// Fraction (bps, of total assigned weight) of weight that must have
+    /// voted before `dispute::finalize_arbiter_vote` will settle the panel.
+    /// Snapshotted from `Config::arbiter_quorum_bps` when the panel is
+    /// assigned, so a later config change never retroactively affects an
+    /// in-flight vote.
+    pub quorum_bps: u32,
+    /// Ledger timestamp after which `dispute::finalize_arbiter_vote`
+    /// becomes callable. Set when the panel is assigned.
+    pub voting_deadline: u64,
+    /// True once `dispute::finalize_arbiter_vote` has settled this
+    /// dispute's arbiter panel.
+    pub arbiters_finalized: bool,
 }
 
 impl Dispute {
-    pub fn new(disputer: Address, bond: i128, filed_at: u64) -> Self {
+    pub fn new(env: &Env, disputer: Address, bond: i128, filed_at: u64) -> Self {
         Self {
             disputer,
             bond,
@@ -160,8 +178,47 @@ impl Dispute {
             appeal_tier: 0,
             appealer: None,
             appeal_bond: 0,
+            arbiters: Vec::new(env),
+            quorum_bps: 0,
+            voting_deadline: 0,
+            arbiters_finalized: false,
         }
     }
+}
+
+/// A single arbiter's assignment to a dispute's panel. `weight` is a
+/// snapshot (stake at assignment time scaled by a reputation multiplier)
+/// and never changes afterward, even if the arbiter's live stake or
+/// reputation later changes. See `dispute::assign_arbiters`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArbiterAssignment {
+    pub arbiter: Address,
+    pub weight: i128,
+    pub voted: bool,
+    /// Meaningful only when `voted` is true. `true` = uphold the dispute
+    /// (the disputer was right, market gets reopened); `false` = reject it
+    /// (the original resolution stands).
+    pub vote_uphold: bool,
+}
+
+/// Read-only tally for a dispute's arbiter panel, returned by
+/// `dispute::get_arbiter_tally`. Recomputed on every call from the stored
+/// `Dispute.arbiters` list rather than cached, so it always reflects the
+/// latest votes.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArbiterTally {
+    pub market_id: u64,
+    pub total_weight: i128,
+    pub voted_weight: i128,
+    pub uphold_weight: i128,
+    pub reject_weight: i128,
+    pub quorum_bps: u32,
+    pub quorum_met: bool,
+    pub voting_deadline: u64,
+    pub finalized: bool,
+    pub arbiters: Vec<ArbiterAssignment>,
 }
 
 #[contracttype]

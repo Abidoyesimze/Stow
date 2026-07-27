@@ -16,6 +16,14 @@ import {
 import { User } from './entities/user.entity';
 import { UserPreferences } from './entities/user-preferences.entity';
 import { UserFollow } from './entities/user-follow.entity';
+import {
+  ReferralStatus,
+  UserReferral,
+} from './entities/user-referral.entity';
+import {
+  ClaimReferralResponseDto,
+  MyReferralsResponseDto,
+} from './dto/referral.dto';
 import { Market } from '../markets/entities/market.entity';
 import { Notification } from '../notifications/entities/notification.entity';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -72,6 +80,8 @@ export class UsersService {
     private readonly participantsRepository: Repository<CompetitionParticipant>,
     @InjectRepository(UserBookmark)
     private readonly userBookmarksRepository: Repository<UserBookmark>,
+    @InjectRepository(UserReferral)
+    private readonly referralsRepository: Repository<UserReferral>,
   ) {}
 
   async findAll(): Promise<User[]> {
@@ -551,5 +561,108 @@ export class UsersService {
       avatar_url: user.avatar_url,
       reputation_score: user.reputation_score,
     };
+  }
+
+  /**
+   * Record that `userId` was referred by `referrerId`. A user's own ID
+   * doubles as their shareable referral code, so this just links two
+   * existing accounts - no separate code table is needed. Each user can be
+   * the "referred" side of at most one relationship (enforced by the
+   * unique constraint on referred_id as well as this check), and
+   * self-referral is rejected outright.
+   */
+  async claimReferral(
+    userId: string,
+    referrerId: string,
+  ): Promise<ClaimReferralResponseDto> {
+    if (referrerId === userId) {
+      throw new BadRequestException('You cannot refer yourself');
+    }
+
+    const referrer = await this.usersRepository.findOneBy({ id: referrerId });
+    if (!referrer) {
+      throw new NotFoundException('Referrer not found');
+    }
+
+    const existing = await this.referralsRepository.findOne({
+      where: { referred_id: userId },
+    });
+    if (existing) {
+      throw new ConflictException(
+        'A referral has already been recorded for this account',
+      );
+    }
+
+    await this.referralsRepository.save(
+      this.referralsRepository.create({
+        referrer_id: referrerId,
+        referred_id: userId,
+      }),
+    );
+
+    return {
+      success: true,
+      message: 'Referral recorded successfully',
+    };
+  }
+
+  /**
+   * Referrals made by `userId`, with aggregate counts by status. The
+   * `referral_code` returned is simply the user's own ID - share it as a
+   * link/param for others to submit via claimReferral.
+   */
+  async getMyReferrals(userId: string): Promise<MyReferralsResponseDto> {
+    const referrals = await this.referralsRepository.find({
+      where: { referrer_id: userId },
+      relations: ['referred'],
+      order: { created_at: 'DESC' },
+    });
+
+    let pending = 0;
+    let qualified = 0;
+    for (const referral of referrals) {
+      if (referral.status === ReferralStatus.QUALIFIED) {
+        qualified++;
+      } else {
+        pending++;
+      }
+    }
+
+    return {
+      referral_code: userId,
+      total: referrals.length,
+      pending,
+      qualified,
+      referrals: referrals.map((referral) => ({
+        id: referral.id,
+        referred_id: referral.referred_id,
+        referred_username: referral.referred?.username ?? null,
+        referred_stellar_address: referral.referred?.stellar_address ?? '',
+        status: referral.status,
+        created_at: referral.created_at,
+        qualified_at: referral.qualified_at,
+      })),
+    };
+  }
+
+  /**
+   * Advances a referred user's PENDING referral (if any) to QUALIFIED.
+   * Idempotent: a no-op if the user isn't a pending referral (already
+   * qualified, or was never referred). Intended to be called by other
+   * modules when a referred user completes a meaningful first action
+   * (e.g. their first prediction).
+   */
+  async recordQualifyingAction(userId: string): Promise<void> {
+    const referral = await this.referralsRepository.findOne({
+      where: { referred_id: userId, status: ReferralStatus.PENDING },
+    });
+
+    if (!referral) {
+      return;
+    }
+
+    referral.status = ReferralStatus.QUALIFIED;
+    referral.qualified_at = new Date();
+    await this.referralsRepository.save(referral);
   }
 }

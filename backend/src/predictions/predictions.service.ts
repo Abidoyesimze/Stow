@@ -7,8 +7,15 @@ import {
   Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { ConfigService } from '@nestjs/config';
 import { Repository, DataSource } from 'typeorm';
 import { Prediction } from './entities/prediction.entity';
+import {
+  FraudFlagStatus,
+  FraudSignalType,
+  PredictionFraudFlag,
+} from './entities/prediction-fraud-flag.entity';
+import { ListFraudFlagsQueryDto } from './dto/list-fraud-flags-query.dto';
 import { SubmitPredictionDto } from './dto/submit-prediction.dto';
 import { SubmitPredictionResponseDto } from './dto/submit-prediction-response.dto';
 import { UpdatePredictionNoteDto } from './dto/update-prediction-note.dto';
@@ -24,6 +31,7 @@ import {
   PaginatedMyPredictionsResponse,
 } from './dto/list-my-predictions.dto';
 import { User } from '../users/entities/user.entity';
+import { UsersService } from '../users/users.service';
 import { Market } from '../markets/entities/market.entity';
 import { SorobanService } from '../soroban/soroban.service';
 import { SlippageCheckerService } from './services/slippage-checker.service';
@@ -49,9 +57,13 @@ export class PredictionsService {
     private readonly marketsRepository: Repository<Market>,
     @InjectRepository(User)
     private readonly usersRepository: Repository<User>,
+    @InjectRepository(PredictionFraudFlag)
+    private readonly fraudFlagsRepository: Repository<PredictionFraudFlag>,
     private readonly sorobanService: SorobanService,
     private readonly slippageCheckerService: SlippageCheckerService,
     private readonly dataSource: DataSource,
+    private readonly configService: ConfigService,
+    private readonly usersService: UsersService,
   ) { }
 
   /**
@@ -177,6 +189,25 @@ export class PredictionsService {
         `Prediction ${saved.id} saved for user ${user.id} on market ${market.id}`,
       );
       return saved;
+    });
+
+    // Fraud signals are advisory-only and must never block or roll back a
+    // legitimate prediction submission, so evaluation failures are swallowed.
+    this.evaluateFraudSignalsForUser(user.id).catch((err) => {
+      this.logger.error(
+        `Fraud signal evaluation failed for user ${user.id}`,
+        err,
+      );
+    });
+
+    // A submitted prediction is this user's qualifying action for referral
+    // purposes; no-ops if they weren't referred. Non-blocking for the same
+    // reason as fraud signal evaluation above.
+    this.usersService.recordQualifyingAction(user.id).catch((err) => {
+      this.logger.error(
+        `Referral qualifying-action tracking failed for user ${user.id}`,
+        err,
+      );
     });
 
     return {
@@ -494,4 +525,286 @@ export class PredictionsService {
 
     return { data, total, page, limit };
   }
+
+  /**
+   * Compute fraud signals for a user and persist advisory flags for any
+   * signal that exceeds its configured threshold. This never bans, mutes,
+   * or otherwise restricts the user - it only records data for admin review.
+   */
+  async evaluateFraudSignalsForUser(
+    userId: string,
+  ): Promise<PredictionFraudFlag[]> {
+    const created: PredictionFraudFlag[] = [];
+
+    const timingResult = await this.computeTimingClusteringSignal(userId);
+    if (timingResult) {
+      created.push(
+        await this.upsertFraudFlag(
+          userId,
+          FraudSignalType.TIMING_CLUSTERING,
+          timingResult,
+        ),
+      );
+    }
+
+    const concentrationResult =
+      await this.computeCounterpartyConcentrationSignal(userId);
+    if (concentrationResult) {
+      created.push(
+        await this.upsertFraudFlag(
+          userId,
+          FraudSignalType.COUNTERPARTY_CONCENTRATION,
+          concentrationResult,
+        ),
+      );
+    }
+
+    return created;
+  }
+
+  /**
+   * Timing clustering signal: measures how tightly a user's prediction
+   * submissions bunch together in time. A high ratio of very short gaps
+   * between consecutive predictions is characteristic of scripted/bot-driven
+   * wash-trading rather than organic, independently-timed decisions.
+   */
+  private async computeTimingClusteringSignal(
+    userId: string,
+  ): Promise<FraudSignalResult | null> {
+    const minSample = this.getIntConfig('FRAUD_TIMING_MIN_SAMPLE', 5);
+    const windowSeconds = this.getIntConfig(
+      'FRAUD_TIMING_CLUSTER_WINDOW_SECONDS',
+      30,
+    );
+    const minRatio = this.getFloatConfig(
+      'FRAUD_TIMING_CLUSTER_MIN_RATIO',
+      0.6,
+    );
+
+    const predictions = await this.predictionsRepository.find({
+      where: { user: { id: userId } },
+      order: { submitted_at: 'ASC' },
+    });
+
+    if (predictions.length < minSample) {
+      return null;
+    }
+
+    const totalGaps = predictions.length - 1;
+    let clusteredGaps = 0;
+    for (let i = 1; i < predictions.length; i++) {
+      const gapSeconds =
+        (predictions[i].submitted_at.getTime() -
+          predictions[i - 1].submitted_at.getTime()) /
+        1000;
+      if (gapSeconds <= windowSeconds) {
+        clusteredGaps++;
+      }
+    }
+
+    const ratio = totalGaps > 0 ? clusteredGaps / totalGaps : 0;
+    if (ratio < minRatio) {
+      return null;
+    }
+
+    return {
+      score: ratio,
+      threshold: minRatio,
+      details: {
+        sample_size: predictions.length,
+        clustered_gaps: clusteredGaps,
+        total_gaps: totalGaps,
+        window_seconds: windowSeconds,
+      },
+    };
+  }
+
+  /**
+   * Counterparty concentration signal: measures how concentrated a user's
+   * market co-participation is across other users, using a
+   * Herfindahl-Hirschman Index (HHI) over the share of the user's markets
+   * each counterparty also participated in. A high HHI means the user
+   * repeatedly shows up alongside the same small clique of accounts, which
+   * is a hallmark of collusion rings or self-dealing across linked wallets.
+   */
+  private async computeCounterpartyConcentrationSignal(
+    userId: string,
+  ): Promise<FraudSignalResult | null> {
+    const minMarkets = this.getIntConfig(
+      'FRAUD_COUNTERPARTY_MIN_MARKETS',
+      5,
+    );
+    const hhiThreshold = this.getFloatConfig(
+      'FRAUD_COUNTERPARTY_HHI_THRESHOLD',
+      0.5,
+    );
+
+    const userMarketRows: Array<{ marketId: string }> =
+      await this.predictionsRepository
+        .createQueryBuilder('prediction')
+        .select('DISTINCT prediction.marketId', 'marketId')
+        .where('prediction.userId = :userId', { userId })
+        .getRawMany();
+
+    const marketIds = userMarketRows.map((row) => row.marketId);
+    if (marketIds.length < minMarkets) {
+      return null;
+    }
+
+    const counterpartyRows: Array<{
+      counterpartyId: string;
+      marketId: string;
+    }> = await this.predictionsRepository
+      .createQueryBuilder('prediction')
+      .select('prediction.userId', 'counterpartyId')
+      .addSelect('prediction.marketId', 'marketId')
+      .where('prediction.marketId IN (:...marketIds)', { marketIds })
+      .andWhere('prediction.userId != :userId', { userId })
+      .getRawMany();
+
+    const marketsByCounterparty = new Map<string, Set<string>>();
+    for (const row of counterpartyRows) {
+      const set = marketsByCounterparty.get(row.counterpartyId) ?? new Set();
+      set.add(row.marketId);
+      marketsByCounterparty.set(row.counterpartyId, set);
+    }
+
+    if (marketsByCounterparty.size === 0) {
+      return null;
+    }
+
+    const totalMarkets = marketIds.length;
+    let hhi = 0;
+    let topCounterpartyId: string | null = null;
+    let topShare = 0;
+    for (const [counterpartyId, sharedMarkets] of marketsByCounterparty) {
+      const share = sharedMarkets.size / totalMarkets;
+      hhi += share * share;
+      if (share > topShare) {
+        topShare = share;
+        topCounterpartyId = counterpartyId;
+      }
+    }
+
+    if (hhi < hhiThreshold) {
+      return null;
+    }
+
+    return {
+      score: hhi,
+      threshold: hhiThreshold,
+      details: {
+        total_markets: totalMarkets,
+        distinct_counterparties: marketsByCounterparty.size,
+        top_counterparty_id: topCounterpartyId,
+        top_counterparty_share: topShare,
+      },
+    };
+  }
+
+  /**
+   * Creates a new advisory flag, or refreshes the existing open flag for the
+   * same user/signal so repeated evaluations don't spam duplicate rows.
+   */
+  private async upsertFraudFlag(
+    userId: string,
+    signalType: FraudSignalType,
+    result: FraudSignalResult,
+  ): Promise<PredictionFraudFlag> {
+    const existing = await this.fraudFlagsRepository.findOne({
+      where: {
+        user_id: userId,
+        signal_type: signalType,
+        status: FraudFlagStatus.OPEN,
+      },
+    });
+
+    if (existing) {
+      existing.score = result.score;
+      existing.threshold = result.threshold;
+      existing.details = result.details;
+      return this.fraudFlagsRepository.save(existing);
+    }
+
+    const flag = this.fraudFlagsRepository.create({
+      user_id: userId,
+      signal_type: signalType,
+      score: result.score,
+      threshold: result.threshold,
+      details: result.details,
+      status: FraudFlagStatus.OPEN,
+    });
+
+    const saved = await this.fraudFlagsRepository.save(flag);
+
+    this.logger.warn(
+      `Fraud signal "${signalType}" flagged for user ${userId} (score=${result.score.toFixed(3)}, threshold=${result.threshold})`,
+    );
+
+    return saved;
+  }
+
+  private getIntConfig(key: string, fallback: number): number {
+    const raw = this.configService.get<string>(key);
+    const parsed = raw !== undefined ? parseInt(raw, 10) : NaN;
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  private getFloatConfig(key: string, fallback: number): number {
+    const raw = this.configService.get<string>(key);
+    const parsed = raw !== undefined ? parseFloat(raw) : NaN;
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  /**
+   * Paginated, admin-facing listing of advisory fraud flags. Flags are
+   * informational only; no enforcement action is taken based on this data
+   * alone.
+   */
+  async listFraudFlags(query: ListFraudFlagsQueryDto): Promise<{
+    data: PredictionFraudFlag[];
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  }> {
+    const page = query.page ?? 1;
+    const limit = Math.min(query.limit ?? 20, 100);
+    const skip = (page - 1) * limit;
+
+    const qb = this.fraudFlagsRepository
+      .createQueryBuilder('flag')
+      .leftJoinAndSelect('flag.user', 'user')
+      .orderBy('flag.created_at', 'DESC');
+
+    if (query.status) {
+      qb.andWhere('flag.status = :status', { status: query.status });
+    }
+    if (query.signal_type) {
+      qb.andWhere('flag.signal_type = :signalType', {
+        signalType: query.signal_type,
+      });
+    }
+    if (query.user_id) {
+      qb.andWhere('flag.user_id = :userId', { userId: query.user_id });
+    }
+
+    qb.skip(skip).take(limit);
+
+    const [data, total] = await qb.getManyAndCount();
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+}
+
+interface FraudSignalResult {
+  score: number;
+  threshold: number;
+  details: Record<string, unknown>;
 }

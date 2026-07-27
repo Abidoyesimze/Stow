@@ -21,6 +21,7 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { ListFlagsQueryDto } from '../flags/dto/list-flags-query.dto';
 import { ResolveFlagDto } from '../flags/dto/resolve-flag.dto';
+import { ListFraudFlagsQueryDto } from '../predictions/dto/list-fraud-flags-query.dto';
 import { AdminService } from './admin.service';
 import { ActivityLogQueryDto } from './dto/activity-log-query.dto';
 import { BanUserDto } from './dto/ban-user.dto';
@@ -192,6 +193,20 @@ export class AdminController {
   @Roles(Role.Admin, Role.Moderator)
   async listFlags(@Query() query: ListFlagsQueryDto) {
     return this.adminService.listFlags(query);
+  }
+
+  @Get('predictions/fraud-flags')
+  @Roles(Role.Admin, Role.Moderator)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary:
+      'List advisory prediction fraud signal flags (timing clustering, ' +
+      'counterparty concentration). Advisory only - no automatic ' +
+      'enforcement is taken from these flags.',
+  })
+  @ApiResponse({ status: 200, description: 'Paginated list of fraud flags' })
+  async listFraudFlags(@Query() query: ListFraudFlagsQueryDto) {
+    return this.adminService.listFraudFlags(query);
   }
 
   @Patch('flags/:id/resolve')

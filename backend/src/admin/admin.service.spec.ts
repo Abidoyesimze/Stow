@@ -152,6 +152,11 @@ describe('AdminService (Verified Addresses)', () => {
           provide: require('../markets/markets.service').MarketsService,
           useValue: { createMarketRowTransactional: jest.fn() },
         },
+        {
+          provide: require('../predictions/predictions.service')
+            .PredictionsService,
+          useValue: { listFraudFlags: jest.fn() },
+        },
       ],
     }).compile();
 

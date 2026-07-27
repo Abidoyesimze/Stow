@@ -8,11 +8,13 @@ import { AdminDisputesController } from './admin-disputes.controller';
 import { Market } from '../markets/entities/market.entity';
 import { User } from '../users/entities/user.entity';
 import { SorobanModule } from '../soroban/soroban.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Dispute, DisputeEvidence, Market, User]),
     SorobanModule,
+    NotificationsModule,
   ],
   controllers: [DisputesController, AdminDisputesController],
   providers: [DisputesService],
