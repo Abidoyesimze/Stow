@@ -41,6 +41,7 @@ import {
   ListMarketsDto,
   PaginatedMarketsResponse,
 } from './dto/list-markets.dto';
+import { PriceHistoryQueryDto } from './dto/price-history-query.dto';
 import { PredictionStatsDto } from './dto/prediction-stats.dto';
 import {
   PaginatedTrendingMarketsResponse,
@@ -103,6 +104,20 @@ export class MarketsController {
     @Param('id') id: string,
   ): Promise<PredictionStatsDto[]> {
     return this.marketsService.getPredictionStats(id);
+  }
+
+  @Get(':id/price-history')
+  @Public()
+  @ApiOperation({ summary: 'Get price history time-series for a market' })
+  @ApiResponse({
+    status: 200,
+    description: 'Bucketed price history points over time',
+  })
+  async getPriceHistory(
+    @Param('id') id: string,
+    @Query() query: PriceHistoryQueryDto,
+  ): Promise<any[]> {
+    return this.marketsService.getPriceHistory(id, query);
   }
 
   @Get(':id/analytics')

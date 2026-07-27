@@ -22,6 +22,7 @@ import { MarketTemplate } from './entities/market-template.entity';
 import { Market, MarketSettlementState } from './entities/market.entity';
 import { UserBookmark } from './entities/user-bookmark.entity';
 import { Prediction } from '../predictions/entities/prediction.entity';
+import { MarketPriceSnapshot } from './entities/market-price-snapshot.entity';
 import { MarketsService } from './markets.service';
 import { MarketSettlementScheduler } from './market-settlement.scheduler';
 import { WebhookDispatcherService } from '../webhooks/services/webhook-dispatcher.service';
@@ -111,6 +112,14 @@ describe('MarketsService', () => {
           provide: getRepositoryToken(Prediction),
           useValue: {
             find: jest.fn(),
+          },
+        },
+        {
+          provide: getRepositoryToken(MarketPriceSnapshot),
+          useValue: {
+            create: jest.fn(),
+            save: jest.fn(),
+            createQueryBuilder: jest.fn(),
           },
         },
         {
@@ -435,6 +444,14 @@ describe('MarketsService.findFeaturedMarkets', () => {
         { provide: getRepositoryToken(UserBookmark), useValue: {} },
         { provide: getRepositoryToken(Prediction), useValue: {} },
         { provide: getRepositoryToken(User), useValue: {} },
+        {
+          provide: getRepositoryToken(MarketPriceSnapshot),
+          useValue: {
+            create: jest.fn(),
+            save: jest.fn(),
+            createQueryBuilder: jest.fn(),
+          },
+        },
         { provide: UsersService, useValue: {} },
         { provide: SorobanService, useValue: {} },
         { provide: DataSource, useValue: {} },
@@ -592,6 +609,14 @@ describe('MarketsService.update', () => {
           provide: getRepositoryToken(Prediction),
           useValue: {
             find: jest.fn(),
+          },
+        },
+        {
+          provide: getRepositoryToken(MarketPriceSnapshot),
+          useValue: {
+            create: jest.fn(),
+            save: jest.fn(),
+            createQueryBuilder: jest.fn(),
           },
         },
         {
@@ -814,6 +839,14 @@ describe('MarketsService.getPredictionStats', () => {
           useValue: predictionsRepository,
         },
         {
+          provide: getRepositoryToken(MarketPriceSnapshot),
+          useValue: {
+            create: jest.fn(),
+            save: jest.fn(),
+            createQueryBuilder: jest.fn(),
+          },
+        },
+        {
           provide: UsersService,
           useValue: {},
         },
@@ -963,6 +996,14 @@ describe('MarketsService.cancelMarket', () => {
         { provide: getRepositoryToken(MarketTemplate), useValue: {} },
         { provide: getRepositoryToken(UserBookmark), useValue: {} },
         { provide: getRepositoryToken(Prediction), useValue: {} },
+        {
+          provide: getRepositoryToken(MarketPriceSnapshot),
+          useValue: {
+            create: jest.fn(),
+            save: jest.fn(),
+            createQueryBuilder: jest.fn(),
+          },
+        },
         { provide: UsersService, useValue: {} },
         { provide: SorobanService, useValue: sorobanService },
         { provide: DataSource, useValue: {} },
@@ -1113,6 +1154,14 @@ describe('MarketsService pause/resume cache invalidation', () => {
         { provide: getRepositoryToken(MarketTemplate), useValue: {} },
         { provide: getRepositoryToken(UserBookmark), useValue: {} },
         { provide: getRepositoryToken(Prediction), useValue: {} },
+        {
+          provide: getRepositoryToken(MarketPriceSnapshot),
+          useValue: {
+            create: jest.fn(),
+            save: jest.fn(),
+            createQueryBuilder: jest.fn(),
+          },
+        },
         { provide: UsersService, useValue: {} },
         { provide: SorobanService, useValue: sorobanService },
         { provide: DataSource, useValue: {} },
@@ -1238,9 +1287,6 @@ describe('MarketsService settlement grace period workflow', () => {
     }) as Market;
 
   beforeEach(async () => {
-    jest.useFakeTimers();
-    jest.setSystemTime(currentNow);
-
     marketsRepository = {
       create: jest.fn(),
       save: jest.fn(),
@@ -1258,6 +1304,14 @@ describe('MarketsService settlement grace period workflow', () => {
         { provide: getRepositoryToken(MarketTemplate), useValue: {} },
         { provide: getRepositoryToken(UserBookmark), useValue: {} },
         { provide: getRepositoryToken(Prediction), useValue: {} },
+        {
+          provide: getRepositoryToken(MarketPriceSnapshot),
+          useValue: {
+            create: jest.fn(),
+            save: jest.fn(),
+            createQueryBuilder: jest.fn(),
+          },
+        },
         { provide: UsersService, useValue: {} },
         { provide: SorobanService, useValue: sorobanService },
         { provide: DataSource, useValue: {} },
@@ -1275,6 +1329,9 @@ describe('MarketsService settlement grace period workflow', () => {
         },
       ],
     }).compile();
+
+    jest.useFakeTimers();
+    jest.setSystemTime(currentNow);
 
     service = module.get<MarketsService>(MarketsService);
     webhookDispatcher = module.get(WebhookDispatcherService);
