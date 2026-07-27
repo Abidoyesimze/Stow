@@ -235,6 +235,15 @@ pub struct Config {
     /// once assigned via `dispute::assign_arbiters`. Admin-configurable via
     /// `set_arbiter_config`. Defaults to `172_800` (~2 days).
     pub arbiter_voting_period_seconds: u64,
+    /// Minimum participation threshold (bps of total registered users, 0-10000)
+    /// required for a governance proposal to pass. Proposals where total votes
+    /// (for + against) fall below this fraction of registered users are rejected
+    /// with `Unauthorized`, regardless of the yes/no ratio.
+    ///
+    /// Admin-configurable via [`set_governance_quorum_bps`] (immediate) or
+    /// via `ProposalType::UpdateQuorum` (timelocked governance path). Defaults
+    /// to `1000` (10%) at initialization.
+    pub governance_quorum_bps: u32,
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -368,6 +377,7 @@ pub fn initialize(
         arbiter_quorum_bps: 5000, // 50% of assigned weight must vote
         arbiter_slash_bps: 1000,  // 10% of stake slashed for a missed vote
         arbiter_voting_period_seconds: 172_800, // ~2 days
+        governance_quorum_bps: 1000, // 10% of registered users must participate
     };
 
     env.storage().persistent().set(&DataKey::Config, &config);
@@ -999,6 +1009,73 @@ fn emit_arbiter_config_updated(
     env.events().publish(
         (symbol_short!("cfg"), symbol_short!("arb_upd")),
         (quorum_bps, slash_bps, voting_period_seconds),
+    );
+}
+
+/// Update the governance proposal quorum threshold (bps of total registered
+/// users that must participate for a proposal to pass). Caller must be the
+/// stored admin. For the timelocked governance path see
+/// [`update_governance_quorum_from_governance`], invoked via
+/// `ProposalType::UpdateQuorum`.
+///
+/// # Errors
+/// - `Unauthorized` if `admin` is not the stored admin.
+/// - `InvalidInput` if `new_quorum_bps > 10_000`.
+pub fn set_governance_quorum_bps(
+    env: &Env,
+    admin: Address,
+    new_quorum_bps: u32,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    validate_quorum_bps(new_quorum_bps)?;
+
+    let old_quorum_bps = config.governance_quorum_bps;
+    config.governance_quorum_bps = new_quorum_bps;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_governance_quorum_updated(env, old_quorum_bps, new_quorum_bps);
+
+    Ok(())
+}
+
+/// Governance path for updating the proposal quorum threshold. Called only
+/// from `governance::execute_proposal` after a `ProposalType::UpdateQuorum`
+/// proposal has cleared quorum, majority, and the timelock window.
+pub fn update_governance_quorum_from_governance(
+    env: &Env,
+    new_quorum_bps: u32,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+    validate_quorum_bps(new_quorum_bps)?;
+
+    let old_quorum_bps = config.governance_quorum_bps;
+    config.governance_quorum_bps = new_quorum_bps;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_governance_quorum_updated(env, old_quorum_bps, new_quorum_bps);
+
+    Ok(())
+}
+
+fn validate_quorum_bps(quorum_bps: u32) -> Result<(), InsightArenaError> {
+    if quorum_bps > 10_000 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+    Ok(())
+}
+
+fn emit_governance_quorum_updated(env: &Env, old_quorum_bps: u32, new_quorum_bps: u32) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("qrm_upd")),
+        (old_quorum_bps, new_quorum_bps),
     );
 }
 

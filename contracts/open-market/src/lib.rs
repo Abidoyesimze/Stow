@@ -644,6 +644,22 @@ impl InsightArenaContract {
         config::set_guardian(&env, admin, new_guardian)
     }
 
+    /// Update the governance proposal quorum threshold (bps of total registered
+    /// users that must participate for a proposal to pass). Caller must be the
+    /// current admin. For the timelocked governance path, use
+    /// `ProposalType::UpdateQuorum` via `create_proposal`.
+    ///
+    /// # Errors
+    /// - `Unauthorized` if `admin` is not the stored admin.
+    /// - `InvalidInput` if `new_quorum_bps > 10_000`.
+    pub fn set_governance_quorum_bps(
+        env: Env,
+        admin: Address,
+        new_quorum_bps: u32,
+    ) -> Result<(), InsightArenaError> {
+        config::set_governance_quorum_bps(&env, admin, new_quorum_bps)
+    }
+
     /// Return the total protocol fees accumulated in the treasury.
     pub fn get_treasury_balance(env: Env) -> i128 {
         escrow::get_treasury_balance(&env)

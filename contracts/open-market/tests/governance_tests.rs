@@ -35,16 +35,40 @@ fn seed_users(env: &Env, _client: &InsightArenaContractClient, count: u32) -> Ve
     users
 }
 
+/// Registers `count` synthetic users by generating addresses and recording
+/// them in the UserList persistent key so the quorum check can read them.
+fn register_users(env: &Env, client: &InsightArenaContractClient, count: u32) -> Vec<Address> {
+    use soroban_sdk::Vec as SorobanVec;
+    let mut users: SorobanVec<Address> = SorobanVec::new(env);
+    for _ in 0..count {
+        users.push_back(Address::generate(env));
+    }
+    // Store the list directly so governance quorum math can read it.
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(
+            &insightarena_contract::storage_types::DataKey::UserList,
+            &users,
+        );
+    });
+    users
+}
+
 /// Runs a proposal through voting, queues it (first `execute_proposal` call
 /// after voting ends), then fast-forwards past the default timelock so the
 /// returned id is immediately executable by a single follow-up call — keeping
 /// pre-existing callers of this helper unchanged.
+///
+/// Registers exactly as many synthetic users in UserList as there are voters,
+/// ensuring the default 10% quorum is always met (100% participation).
 fn pass_proposal(
     env: &Env,
     client: &InsightArenaContractClient,
     action: &ProposalType,
     voters: &Vec<Address>,
 ) -> u32 {
+    // Seed UserList with exactly the voters so quorum (any % of voter-sized list) is met.
+    register_users(env, client, voters.len());
+
     let proposer = Address::generate(env);
     let duration = 3600;
     let id = client.create_proposal(&proposer, action, &duration);
@@ -241,12 +265,18 @@ fn test_cancel_proposal_by_non_proposer_fails() {
 
 /// Advances voting to completion and quorum without touching the timelock clock,
 /// returning the proposal id right after voting has ended (not yet queued).
+///
+/// Registers exactly as many synthetic users in UserList as there are voters,
+/// ensuring the default 10% quorum is always met (100% participation).
 fn pass_vote_only(
     env: &Env,
     client: &InsightArenaContractClient,
     action: &ProposalType,
     voters: &Vec<Address>,
 ) -> u32 {
+    // Seed UserList with exactly the voters so quorum is always met.
+    register_users(env, client, voters.len());
+
     let proposer = Address::generate(env);
     let duration = 3_600_u64;
     let id = client.create_proposal(&proposer, action, &duration);
@@ -459,4 +489,412 @@ fn test_set_guardian_requires_admin() {
     let new_guardian = Address::generate(&env);
     let result = client.try_set_guardian(&not_admin, &new_guardian);
     assert!(matches!(result, Err(Ok(InsightArenaError::Unauthorized))));
+}
+
+// ── Issue #1331: Quorum & Timelock tests ──────────────────────────────────────
+
+// ── AC1: Proposals below quorum cannot pass ───────────────────────────────────
+
+#[test]
+fn test_quorum_failure_returns_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = deploy(&env);
+
+    // Register 20 users — default quorum is 10% = 2 needed votes.
+    register_users(&env, &client, 20);
+
+    let duration = 3_600_u64;
+    let proposer = Address::generate(&env);
+    let id = client.create_proposal(&proposer, &ProposalType::UpdateProtocolFee(400), &duration);
+
+    // Cast only 1 vote (below 10% of 20 = 2).
+    let lone_voter = Address::generate(&env);
+    client.vote(&lone_voter, &id, &true);
+
+    env.ledger().with_mut(|l| l.timestamp += duration + 1);
+
+    let executor = Address::generate(&env);
+    let result = client.try_execute_proposal(&executor, &id);
+    assert!(
+        matches!(result, Err(Ok(InsightArenaError::Unauthorized))),
+        "expected Unauthorized when votes < quorum, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_zero_votes_with_registered_users_fails_quorum() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = deploy(&env);
+
+    // Register 10 users but cast zero votes.
+    register_users(&env, &client, 10);
+
+    let duration = 3_600_u64;
+    let proposer = Address::generate(&env);
+    let id = client.create_proposal(&proposer, &ProposalType::UpdateProtocolFee(400), &duration);
+
+    env.ledger().with_mut(|l| l.timestamp += duration + 1);
+
+    let executor = Address::generate(&env);
+    let result = client.try_execute_proposal(&executor, &id);
+    assert!(
+        matches!(result, Err(Ok(InsightArenaError::Unauthorized))),
+        "expected Unauthorized when no votes cast, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_majority_without_quorum_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = deploy(&env);
+
+    // Register 100 users. Quorum requires 10% = 10 votes.
+    register_users(&env, &client, 100);
+
+    let duration = 3_600_u64;
+    let proposer = Address::generate(&env);
+    let id = client.create_proposal(&proposer, &ProposalType::UpdateProtocolFee(400), &duration);
+
+    // Cast only 5 "yes" votes (majority but below quorum).
+    for _ in 0..5 {
+        let voter = Address::generate(&env);
+        client.vote(&voter, &id, &true);
+    }
+
+    env.ledger().with_mut(|l| l.timestamp += duration + 1);
+
+    let executor = Address::generate(&env);
+    let result = client.try_execute_proposal(&executor, &id);
+    assert!(
+        matches!(result, Err(Ok(InsightArenaError::Unauthorized))),
+        "majority alone (without quorum) must not pass"
+    );
+}
+
+// ── AC2: Execution reverts before timelock elapses ────────────────────────────
+
+#[test]
+fn test_timelock_blocks_execution_until_ready_at() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = deploy(&env);
+
+    // Set quorum to 0 so any vote count passes quorum, independent of UserList.
+    client.set_governance_quorum_bps(&admin, &0_u32);
+
+    let voters = seed_users(&env, &client, 5);
+    let id = pass_vote_only(&env, &client, &ProposalType::UpdateProtocolFee(500), &voters);
+
+    let executor = Address::generate(&env);
+    // Queue the proposal (first call after voting ends).
+    client.execute_proposal(&executor, &id);
+
+    let proposal = client.get_proposal(&id);
+    let ready_at = proposal.ready_at.expect("ready_at must be set after queuing");
+    assert_eq!(
+        client.get_proposal_state(&id),
+        ProposalState::Queued,
+        "state must be Queued after first execute call"
+    );
+
+    // One second before ready — must still block.
+    env.ledger().with_mut(|l| l.timestamp = ready_at - 1);
+    let result = client.try_execute_proposal(&executor, &id);
+    assert!(
+        matches!(result, Err(Ok(InsightArenaError::TimelockNotElapsed))),
+        "expected TimelockNotElapsed one second before ready_at"
+    );
+
+    // Exactly at ready_at — must succeed.
+    env.ledger().with_mut(|l| l.timestamp = ready_at);
+    client.execute_proposal(&executor, &id);
+    assert!(client.get_proposal(&id).executed, "must be executed at ready_at");
+}
+
+// ── AC3: Quorum and timelock are governance-configurable and validated ─────────
+
+#[test]
+fn test_admin_set_quorum_bps_persists() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = deploy(&env);
+
+    // Default should be 1000 (10%).
+    assert_eq!(client.get_config().governance_quorum_bps, 1000);
+
+    client.set_governance_quorum_bps(&admin, &2000_u32);
+    assert_eq!(client.get_config().governance_quorum_bps, 2000);
+}
+
+#[test]
+fn test_set_quorum_bps_requires_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = deploy(&env);
+
+    let not_admin = Address::generate(&env);
+    let result = client.try_set_governance_quorum_bps(&not_admin, &500_u32);
+    assert!(
+        matches!(result, Err(Ok(InsightArenaError::Unauthorized))),
+        "non-admin must not set governance quorum"
+    );
+}
+
+#[test]
+fn test_set_quorum_bps_rejects_over_10000() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = deploy(&env);
+
+    let result = client.try_set_governance_quorum_bps(&admin, &10_001_u32);
+    assert!(
+        matches!(result, Err(Ok(InsightArenaError::InvalidInput))),
+        "quorum > 10000 bps must be rejected"
+    );
+}
+
+#[test]
+fn test_set_quorum_bps_zero_allows_always_pass() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = deploy(&env);
+
+    // Set quorum to 0 — even zero votes satisfies quorum.
+    client.set_governance_quorum_bps(&admin, &0_u32);
+    assert_eq!(client.get_config().governance_quorum_bps, 0);
+
+    // Use a single voter; since quorum=0, any positive vote count passes.
+    let voters = seed_users(&env, &client, 1);
+    let id = pass_vote_only(&env, &client, &ProposalType::UpdateProtocolFee(300), &voters);
+
+    let executor = Address::generate(&env);
+    // Queue — should succeed since quorum=0 is always met.
+    client.execute_proposal(&executor, &id);
+    assert!(
+        client.get_proposal(&id).ready_at.is_some(),
+        "proposal must be queued when quorum_bps=0"
+    );
+}
+
+#[test]
+fn test_higher_quorum_bps_rejects_borderline_participation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = deploy(&env);
+
+    // Raise quorum to 50%.
+    client.set_governance_quorum_bps(&admin, &5000_u32);
+
+    // Register 10 users, cast only 4 votes (40% < 50%).
+    register_users(&env, &client, 10);
+
+    let duration = 3_600_u64;
+    let proposer = Address::generate(&env);
+    let id = client.create_proposal(&proposer, &ProposalType::UpdateProtocolFee(400), &duration);
+
+    for _ in 0..4 {
+        let voter = Address::generate(&env);
+        client.vote(&voter, &id, &true);
+    }
+
+    env.ledger().with_mut(|l| l.timestamp += duration + 1);
+
+    let executor = Address::generate(&env);
+    let result = client.try_execute_proposal(&executor, &id);
+    assert!(
+        matches!(result, Err(Ok(InsightArenaError::Unauthorized))),
+        "40% participation should fail a 50% quorum requirement"
+    );
+}
+
+#[test]
+fn test_higher_quorum_bps_accepts_sufficient_participation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = deploy(&env);
+
+    // Raise quorum to 50%.
+    client.set_governance_quorum_bps(&admin, &5000_u32);
+
+    // Register 10 users, cast 5 yes votes (exactly 50% = meets quorum).
+    register_users(&env, &client, 10);
+
+    let duration = 3_600_u64;
+    let proposer = Address::generate(&env);
+    let id = client.create_proposal(&proposer, &ProposalType::UpdateProtocolFee(400), &duration);
+
+    for _ in 0..5 {
+        let voter = Address::generate(&env);
+        client.vote(&voter, &id, &true);
+    }
+
+    env.ledger().with_mut(|l| l.timestamp += duration + 1);
+
+    let executor = Address::generate(&env);
+    // Queue (first call) — must succeed since 50% participation meets 50% quorum.
+    client.execute_proposal(&executor, &id);
+    assert!(
+        client.get_proposal(&id).ready_at.is_some(),
+        "exactly 50% participation must pass a 50% quorum threshold"
+    );
+}
+
+// ── AC3: UpdateQuorum governance proposal ─────────────────────────────────────
+
+#[test]
+fn test_update_quorum_proposal_changes_config() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = deploy(&env);
+
+    // Start with quorum=0 so the proposal itself can pass with any vote count.
+    client.set_governance_quorum_bps(&admin, &0_u32);
+
+    let voters = seed_users(&env, &client, 3);
+    let new_quorum: u32 = 2500; // raise to 25%
+    let id = pass_proposal(
+        &env,
+        &client,
+        &ProposalType::UpdateQuorum(new_quorum),
+        &voters,
+    );
+
+    let executor = Address::generate(&env);
+    client.execute_proposal(&executor, &id);
+
+    assert_eq!(
+        client.get_config().governance_quorum_bps,
+        new_quorum,
+        "UpdateQuorum proposal must update Config::governance_quorum_bps"
+    );
+}
+
+#[test]
+fn test_update_quorum_proposal_rejects_invalid_bps() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = deploy(&env);
+
+    // Set quorum=0 so the proposal can pass with minimal votes.
+    client.set_governance_quorum_bps(&admin, &0_u32);
+
+    let voters = seed_users(&env, &client, 3);
+    // 10_001 bps > 10_000 is invalid.
+    let id = pass_proposal(
+        &env,
+        &client,
+        &ProposalType::UpdateQuorum(10_001),
+        &voters,
+    );
+
+    let executor = Address::generate(&env);
+    let result = client.try_execute_proposal(&executor, &id);
+    assert!(
+        result.is_err(),
+        "UpdateQuorum(10_001) must fail with InvalidInput at execution time"
+    );
+    // Quorum must remain unchanged.
+    assert_eq!(client.get_config().governance_quorum_bps, 0);
+}
+
+// ── AC4: Executable state and executed events ─────────────────────────────────
+
+#[test]
+fn test_proposal_state_transitions_voting_queued_executable_executed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = deploy(&env);
+    client.set_governance_quorum_bps(&admin, &0_u32);
+
+    let voters = seed_users(&env, &client, 3);
+    let id = pass_vote_only(&env, &client, &ProposalType::UpdateProtocolFee(400), &voters);
+
+    // Voting state.
+    // Note: pass_vote_only already advances past voting_end, so state is no longer "Voting"
+    // immediately after — but we can verify intermediate by checking before the timestamp advance.
+    // Instead verify post-advance but pre-queue:
+    let state = client.get_proposal_state(&id);
+    // After voting_end, before queuing, it's still "Voting" enum value but time is past.
+    // The contract uses ready_at to determine Queued; at this point ready_at = None.
+    // Per get_proposal_state: None ready_at → Voting.
+    assert_eq!(state, ProposalState::Voting, "before first execute call, state is Voting");
+
+    let executor = Address::generate(&env);
+    // First execute call: queue.
+    client.execute_proposal(&executor, &id);
+    assert_eq!(client.get_proposal_state(&id), ProposalState::Queued);
+
+    let ready_at = client.get_proposal(&id).ready_at.unwrap();
+
+    // One second before: still Queued.
+    env.ledger().with_mut(|l| l.timestamp = ready_at - 1);
+    assert_eq!(client.get_proposal_state(&id), ProposalState::Queued);
+
+    // Exactly at ready_at: Executable.
+    env.ledger().with_mut(|l| l.timestamp = ready_at);
+    assert_eq!(client.get_proposal_state(&id), ProposalState::Executable);
+
+    // Execute: Executed.
+    client.execute_proposal(&executor, &id);
+    assert_eq!(client.get_proposal_state(&id), ProposalState::Executed);
+    assert!(client.get_proposal(&id).executed);
+}
+
+// ── AC5: Full end-to-end successful execution ─────────────────────────────────
+
+#[test]
+fn test_full_governance_lifecycle_quorum_timelock_execute() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = deploy(&env);
+
+    // Set quorum to 20% — we will register 10 users and cast 3 votes (30% > 20%).
+    client.set_governance_quorum_bps(&admin, &2000_u32);
+    register_users(&env, &client, 10);
+
+    let duration = 3_600_u64;
+    let proposer = Address::generate(&env);
+    let id = client.create_proposal(&proposer, &ProposalType::UpdateProtocolFee(350), &duration);
+
+    // Cast 3 yes votes (30% of 10 registered users ≥ 20% quorum).
+    for _ in 0..3 {
+        let voter = Address::generate(&env);
+        client.vote(&voter, &id, &true);
+    }
+
+    // Advance past voting window.
+    env.ledger().with_mut(|l| l.timestamp += duration + 1);
+
+    let executor = Address::generate(&env);
+
+    // Step 1: Queue.
+    client.execute_proposal(&executor, &id);
+    assert_eq!(client.get_proposal_state(&id), ProposalState::Queued);
+    assert_eq!(client.get_config().protocol_fee_bps, 200, "must not apply yet");
+
+    // Step 2: Try before timelock (must fail).
+    let result = client.try_execute_proposal(&executor, &id);
+    assert!(
+        matches!(result, Err(Ok(InsightArenaError::TimelockNotElapsed))),
+        "must block before timelock"
+    );
+
+    // Step 3: Fast-forward past timelock.
+    let ready_at = client.get_proposal(&id).ready_at.unwrap();
+    env.ledger().with_mut(|l| l.timestamp = ready_at);
+    assert_eq!(client.get_proposal_state(&id), ProposalState::Executable);
+
+    // Step 4: Execute.
+    client.execute_proposal(&executor, &id);
+    assert_eq!(client.get_proposal_state(&id), ProposalState::Executed);
+    assert_eq!(
+        client.get_config().protocol_fee_bps,
+        350,
+        "fee must be updated after execution"
+    );
 }
