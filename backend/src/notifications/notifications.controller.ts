@@ -29,6 +29,8 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../users/entities/user.entity';
 import { Notification } from './entities/notification.entity';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { UpdateCategoryPreferenceDto } from './dto/update-category-preference.dto';
+import { CategoryPreferenceResponseDto } from './dto/category-preference-response.dto';
 
 // ---------------------------------------------------------------------------
 // Inline DTOs (kept small — project uses inline classes elsewhere too)
@@ -164,6 +166,50 @@ export class NotificationsController {
       dto.frequency,
       dto.quietHours,
     );
+  }
+
+  // -------------------------------------------------------------------------
+  // Category preferences
+  // -------------------------------------------------------------------------
+
+  @Get('category-preferences')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({
+    summary:
+      'Get per-category, per-channel notification preferences for the authenticated user',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Array of category preferences with channel toggles',
+    type: [CategoryPreferenceResponseDto],
+  })
+  async getCategoryPreferences(
+    @CurrentUser() user: User,
+  ): Promise<CategoryPreferenceResponseDto[]> {
+    return this.notificationsService.getCategoryPreferences(user.id);
+  }
+
+  @Put('category-preferences')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Create or update a per-category notification preference',
+    description:
+      'Set in_app, email, and/or push toggles for a specific notification category. ' +
+      'Defaults: in_app=true, email=true, push=false.',
+  })
+  @ApiBody({ type: UpdateCategoryPreferenceDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Updated category preference',
+    type: CategoryPreferenceResponseDto,
+  })
+  async upsertCategoryPreference(
+    @CurrentUser() user: User,
+    @Body() dto: UpdateCategoryPreferenceDto,
+  ): Promise<CategoryPreferenceResponseDto> {
+    return this.notificationsService.upsertCategoryPreference(user.id, dto);
   }
 
   // -------------------------------------------------------------------------

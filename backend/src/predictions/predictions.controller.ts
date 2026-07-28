@@ -10,7 +10,9 @@ import {
   HttpStatus,
   UseGuards,
   ParseUUIDPipe,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { BanGuard } from '../common/guards/ban.guard';
 import {
   ApiTags,
@@ -18,6 +20,7 @@ import {
   ApiResponse,
   ApiBearerAuth,
 } from '@nestjs/swagger';
+import { ThrottleTier } from '../common/decorators/throttle-tier.decorator';
 import { PredictionsService } from './predictions.service';
 import { SubmitPredictionDto } from './dto/submit-prediction.dto';
 import { SubmitPredictionResponseDto } from './dto/submit-prediction-response.dto';
@@ -32,6 +35,7 @@ import {
   PaginatedMarketPredictionsResponse,
   PaginatedMarketPredictionsResponseDto,
 } from './dto/list-market-predictions.dto';
+import { ExportPredictionsDto } from './dto/export-predictions.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { Idempotent } from '../common/idempotency/idempotent.decorator';
@@ -51,6 +55,7 @@ export class PredictionsController {
   @Post()
   @UseGuards(BanGuard)
   @Idempotent()
+  @ThrottleTier('write')
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Submit a prediction on a market with optional slippage protection' })
   @ApiResponse({
@@ -80,6 +85,7 @@ export class PredictionsController {
   }
 
   @Get('me')
+  @ThrottleTier('read')
   @ApiOperation({ summary: "Get the authenticated user's predictions" })
   @ApiResponse({
     status: 200,
@@ -93,6 +99,7 @@ export class PredictionsController {
   }
 
   @Get('rewards/summary')
+  @ThrottleTier('read')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: "Get the authenticated user's claimable and vesting rewards",
@@ -124,6 +131,33 @@ export class PredictionsController {
     @CurrentUser() user: User,
   ): Promise<ClaimAllRewardsResponseDto> {
     return this.predictionsService.claimAllRewards(user);
+  }
+
+  @Get('export')
+  @ThrottleTier('read')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Export the authenticated user\'s prediction history as CSV',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'CSV file stream',
+    content: { 'text/csv': {} },
+  })
+  async exportPredictions(
+    @Query() query: ExportPredictionsDto,
+    @CurrentUser() user: User,
+    @Res() res: Response,
+  ): Promise<void> {
+    const dateStr = new Date().toISOString().split('T')[0];
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="predictions-${dateStr}.csv"`,
+    );
+
+    const stream = this.predictionsService.exportCsv(user, query);
+    stream.pipe(res);
   }
 
   @Get(':id')

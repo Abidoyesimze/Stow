@@ -95,6 +95,39 @@ class EnvironmentVariables {
   @IsString()
   ORACLE_ANOMALY_HOLD?: string;
 
+  // Rate-limit tier configuration (#1367)
+  @IsOptional()
+  @IsNumber()
+  RATE_LIMIT_DEFAULT_TTL_MS?: number;
+
+  @IsOptional()
+  @IsNumber()
+  RATE_LIMIT_DEFAULT_LIMIT?: number;
+
+  @IsOptional()
+  @IsNumber()
+  RATE_LIMIT_AUTH_TTL_MS?: number;
+
+  @IsOptional()
+  @IsNumber()
+  RATE_LIMIT_AUTH_LIMIT?: number;
+
+  @IsOptional()
+  @IsNumber()
+  RATE_LIMIT_READ_TTL_MS?: number;
+
+  @IsOptional()
+  @IsNumber()
+  RATE_LIMIT_READ_LIMIT?: number;
+
+  @IsOptional()
+  @IsNumber()
+  RATE_LIMIT_WRITE_TTL_MS?: number;
+
+  @IsOptional()
+  @IsNumber()
+  RATE_LIMIT_WRITE_LIMIT?: number;
+
   // Dispute evidence attachments (#1363)
   @IsOptional()
   @IsNumber()

@@ -10,6 +10,7 @@ import {
 } from './email.service';
 import { User } from '../users/entities/user.entity';
 import { UserPreferences } from '../users/entities/user-preferences.entity';
+import { NotificationCategoryPreference } from './entities/notification-category-preference.entity';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -166,6 +167,10 @@ describe('EmailService — deliverEmailWithRetry', () => {
           provide: getRepositoryToken(UserPreferences),
           useValue: preferencesRepository,
         },
+        {
+          provide: getRepositoryToken(NotificationCategoryPreference),
+          useValue: { findOne: jest.fn() },
+        },
       ],
     }).compile();
 
@@ -320,6 +325,10 @@ describe('EmailService — queueing and preferences', () => {
         {
           provide: getRepositoryToken(UserPreferences),
           useValue: preferencesRepository,
+        },
+        {
+          provide: getRepositoryToken(NotificationCategoryPreference),
+          useValue: { findOne: jest.fn() },
         },
       ],
     }).compile();

@@ -8,6 +8,10 @@ import {
   NotificationChannel,
   NotificationFrequency,
 } from './entities/notification-preference.entity';
+import {
+  NotificationCategoryPreference,
+  NotificationCategory,
+} from './entities/notification-category-preference.entity';
 import { NotificationBroadcasterService } from '../websocket/notification-broadcaster.service';
 
 // ---------------------------------------------------------------------------
@@ -65,6 +69,13 @@ const mockPreferencesRepo = {
   save: jest.fn(),
 };
 
+const mockCategoryPreferencesRepo = {
+  find: jest.fn(),
+  findOne: jest.fn(),
+  create: jest.fn(),
+  save: jest.fn(),
+};
+
 const mockNotificationBroadcaster = {
   broadcastNewNotification: jest.fn(),
   broadcastNotificationRead: jest.fn(),
@@ -88,6 +99,10 @@ describe('NotificationsService', () => {
         {
           provide: getRepositoryToken(NotificationPreference),
           useValue: mockPreferencesRepo,
+        },
+        {
+          provide: getRepositoryToken(NotificationCategoryPreference),
+          useValue: mockCategoryPreferencesRepo,
         },
         {
           provide: NotificationBroadcasterService,
@@ -643,6 +658,144 @@ describe('NotificationsService', () => {
       await expect(service.remove(1, 'GBRPYHIL')).rejects.toThrow(
         NotFoundException,
       );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Category preferences
+  // -------------------------------------------------------------------------
+
+  describe('getCategoryPreferences', () => {
+    it('returns existing preferences and creates missing defaults', async () => {
+      const existingPrefs = [
+        {
+          id: '1',
+          userId: 'user-1',
+          category: NotificationCategory.EventCreated,
+          in_app: true,
+          email: true,
+          push: false,
+        },
+      ];
+      mockCategoryPreferencesRepo.find.mockResolvedValue(existingPrefs);
+      mockCategoryPreferencesRepo.create.mockImplementation((opts) => opts);
+      mockCategoryPreferencesRepo.save.mockImplementation((opts) =>
+        Promise.resolve(
+          opts.map((p: any, i: number) => ({
+            ...p,
+            id: `new-${i}`,
+          })),
+        ),
+      );
+
+      const result = await service.getCategoryPreferences('user-1');
+
+      expect(result.length).toBe(Object.values(NotificationCategory).length);
+      expect(mockCategoryPreferencesRepo.find).toHaveBeenCalledWith({
+        where: { userId: 'user-1' },
+      });
+    });
+
+    it('returns all defaults when no preferences exist', async () => {
+      mockCategoryPreferencesRepo.find.mockResolvedValue([]);
+      mockCategoryPreferencesRepo.create.mockImplementation((opts) => opts);
+      mockCategoryPreferencesRepo.save.mockImplementation((opts) =>
+        Promise.resolve(
+          opts.map((p: any, i: number) => ({
+            ...p,
+            id: `new-${i}`,
+          })),
+        ),
+      );
+
+      const result = await service.getCategoryPreferences('user-1');
+
+      expect(result.length).toBe(Object.values(NotificationCategory).length);
+      expect(result.every((p) => p.in_app === true)).toBe(true);
+      expect(result.every((p) => p.push === false)).toBe(true);
+    });
+  });
+
+  describe('upsertCategoryPreference', () => {
+    it('creates a new preference when none exists', async () => {
+      mockCategoryPreferencesRepo.findOne.mockResolvedValue(null);
+      mockCategoryPreferencesRepo.create.mockImplementation((opts) => opts);
+      mockCategoryPreferencesRepo.save.mockImplementation((opts) =>
+        Promise.resolve({ ...opts, id: 'new-id' }),
+      );
+
+      const result = await service.upsertCategoryPreference('user-1', {
+        category: NotificationCategory.MatchResolved,
+        in_app: false,
+        email: true,
+      });
+
+      expect(result.in_app).toBe(false);
+      expect(result.email).toBe(true);
+      expect(result.push).toBe(false);
+    });
+
+    it('updates an existing preference', async () => {
+      const existing = {
+        id: 'existing-id',
+        userId: 'user-1',
+        category: NotificationCategory.EventCreated,
+        in_app: true,
+        email: true,
+        push: false,
+      };
+      mockCategoryPreferencesRepo.findOne.mockResolvedValue(existing);
+      mockCategoryPreferencesRepo.save.mockImplementation((opts) =>
+        Promise.resolve(opts),
+      );
+
+      const result = await service.upsertCategoryPreference('user-1', {
+        category: NotificationCategory.EventCreated,
+        in_app: false,
+      });
+
+      expect(result.in_app).toBe(false);
+      expect(result.email).toBe(true);
+    });
+  });
+
+  describe('isCategoryEnabled', () => {
+    it('returns true when no preference exists (default)', async () => {
+      mockCategoryPreferencesRepo.findOne.mockResolvedValue(null);
+      const result = await service.isCategoryEnabled(
+        'user-1',
+        NotificationCategory.EventCreated,
+        'in_app',
+      );
+      expect(result).toBe(true);
+    });
+
+    it('returns the in_app value from preference', async () => {
+      mockCategoryPreferencesRepo.findOne.mockResolvedValue({
+        in_app: false,
+        email: true,
+        push: false,
+      });
+      const result = await service.isCategoryEnabled(
+        'user-1',
+        NotificationCategory.EventCreated,
+        'in_app',
+      );
+      expect(result).toBe(false);
+    });
+
+    it('returns the email value from preference', async () => {
+      mockCategoryPreferencesRepo.findOne.mockResolvedValue({
+        in_app: true,
+        email: false,
+        push: false,
+      });
+      const result = await service.isCategoryEnabled(
+        'user-1',
+        NotificationCategory.MatchAdded,
+        'email',
+      );
+      expect(result).toBe(false);
     });
   });
 });
