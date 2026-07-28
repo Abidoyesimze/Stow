@@ -29,9 +29,10 @@ pub use crate::storage_types::{
     ArbiterAssignment, ArbiterTally, BatchPredictionRequest,
     ConditionalChain, ConditionalMarket, CreatorLeaderboardEntry, CreatorStats, DataKey,
     DependencyStatus, Dispute, Event, EventMatch, EventPrediction, FeeTier, FeeTierConfig,
-    InviteCode, LPPosition, LeaderboardEntry, LeaderboardSnapshot, LiquidityPool, Market,
-    MarketFeeInfo, MarketStats, PlatformStats, Prediction, PriceAccumulator, PriceObservation,
-    Season, SwapRecord, UserProfile, VolatilityState, Winner,
+    InviteCode, InviteCodeInfo, LPPosition, LeaderboardEntry, LeaderboardSnapshot, LiquidityPool,
+    Market, MarketFeeInfo, MarketStats, OracleSubmission, PlatformStats, Prediction,
+    PriceAccumulator, PriceObservation, Season, SwapRecord, UserProfile, VestingSchedule,
+    VolatilityState, Winner,
 };
 
 use soroban_sdk::{contract, contractimpl, Address, Env, Symbol, Vec};
@@ -428,6 +429,49 @@ impl InsightArenaContract {
         config::set_arbiter_config(&env, admin, quorum_bps, slash_bps, voting_period_seconds)
     }
 
+    // ── Oracle Submission Staking ────────────────────────────────────────────
+
+    /// Submit a market resolution backed by a mandatory locked oracle stake
+    /// (`Config::oracle_stake_amount`). Reverts if the oracle cannot cover
+    /// the stake. The stake is held through the market's dispute window and
+    /// settled via `resolve_dispute` / `finalize_arbiter_vote` (if disputed)
+    /// or `claim_oracle_stake` (if never disputed).
+    pub fn submit_resolution_with_stake(
+        env: Env,
+        oracle: Address,
+        market_id: u64,
+        resolved_outcome: Symbol,
+    ) -> Result<(), InsightArenaError> {
+        dispute::submit_resolution_with_stake(env, oracle, market_id, resolved_outcome)
+    }
+
+    /// Claim a staked oracle submission's stake plus reward once the
+    /// market's dispute window has elapsed with no dispute ever filed.
+    /// Permissionless: the payout always goes to the recorded oracle, not
+    /// the caller.
+    pub fn claim_oracle_stake(env: Env, market_id: u64) -> Result<(), InsightArenaError> {
+        dispute::claim_oracle_stake(env, market_id)
+    }
+
+    /// Read-only lookup of a market's staked oracle submission, if any.
+    pub fn get_oracle_submission(
+        env: Env,
+        market_id: u64,
+    ) -> Option<crate::storage_types::OracleSubmission> {
+        dispute::get_oracle_submission_info(env, market_id)
+    }
+
+    /// Update the required oracle submission stake and the reward (bps of
+    /// stake) paid when a submission stands. Caller must be the current admin.
+    pub fn set_oracle_stake_config(
+        env: Env,
+        admin: Address,
+        stake_amount: i128,
+        reward_bps: u32,
+    ) -> Result<(), InsightArenaError> {
+        config::set_oracle_stake_config(&env, admin, stake_amount, reward_bps)
+    }
+
     // ── Prediction ────────────────────────────────────────────────────────────
 
     /// Submit a prediction for an open market by staking XLM on a chosen outcome.
@@ -805,6 +849,15 @@ impl InsightArenaContract {
         invite::revoke_invite_code(env, creator, code)
     }
 
+    /// Return an invite code's remaining redemption budget (uses left before
+    /// `max_uses`) and its expiry. Read-only; does not mutate storage.
+    pub fn get_invite_code_info(
+        env: Env,
+        code: Symbol,
+    ) -> Result<crate::storage_types::InviteCodeInfo, InsightArenaError> {
+        invite::get_invite_code_info(&env, code)
+    }
+
     /// List all season IDs which have snapshots available.
     pub fn list_snapshot_seasons(env: Env) -> Vec<u32> {
         env.storage()
@@ -889,6 +942,41 @@ impl InsightArenaContract {
         new_season_id: u32,
     ) -> Result<u32, InsightArenaError> {
         season::reset_season_points(&env, admin, new_season_id)
+    }
+
+    // ── Season Reward Vesting ─────────────────────────────────────────────────
+
+    /// Claim every currently-unlocked, not-yet-claimed tranche of the
+    /// caller's season reward. Returns the amount transferred (`0` if
+    /// nothing new has unlocked since the last claim).
+    pub fn claim_vested_reward(
+        env: Env,
+        user: Address,
+        season_id: u32,
+    ) -> Result<i128, InsightArenaError> {
+        season::claim_vested_reward(&env, user, season_id)
+    }
+
+    /// Return the vesting schedule for `user` in `season_id`: total awarded,
+    /// tranche layout, and claimed-vs-unclaimed progress.
+    pub fn get_vesting_schedule(
+        env: Env,
+        season_id: u32,
+        user: Address,
+    ) -> Result<crate::storage_types::VestingSchedule, InsightArenaError> {
+        season::get_vesting_schedule(&env, season_id, user)
+    }
+
+    /// Update the number and spacing of tranches used to vest season
+    /// rewards. Caller must be the current admin. Only affects schedules
+    /// created by `finalize_season` calls made after this update.
+    pub fn set_vesting_config(
+        env: Env,
+        admin: Address,
+        tranche_count: u32,
+        interval_seconds: u64,
+    ) -> Result<(), InsightArenaError> {
+        config::set_vesting_config(&env, admin, tranche_count, interval_seconds)
     }
 
     /// Season points for `user` in `season_id` (snapshot if finalized, else live profile when applicable).
@@ -1115,5 +1203,21 @@ impl InsightArenaContract {
         new_config: crate::storage_types::FeeTierConfig,
     ) -> Result<(), InsightArenaError> {
         liquidity::set_fee_tier_config(&env, admin, new_config)
+    }
+
+    // ── Volume-Based Fee Tiers (#1326) ──────────────────────────────────────────
+
+    /// Return the current volume-based fee tier schedule.
+    pub fn get_volume_fee_config(env: Env) -> crate::storage_types::VolumeFeeConfig {
+        config::get_volume_fee_config(&env)
+    }
+
+    /// Update the volume-based fee tier schedule. Caller must be the platform admin.
+    pub fn update_volume_fee_config(
+        env: Env,
+        admin: Address,
+        new_config: crate::storage_types::VolumeFeeConfig,
+    ) -> Result<(), InsightArenaError> {
+        config::set_volume_fee_config(&env, admin, new_config)
     }
 }

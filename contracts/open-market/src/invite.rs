@@ -1,7 +1,7 @@
 use crate::config;
 use crate::errors::InsightArenaError;
 use crate::market;
-use crate::storage_types::{DataKey, InviteCode};
+use crate::storage_types::{DataKey, InviteCode, InviteCodeInfo};
 
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{symbol_short, Address, Env, IntoVal, Symbol, Val, Vec};
@@ -142,6 +142,28 @@ pub fn redeem_invite_code(
     );
 
     Ok(invite.market_id)
+}
+
+/// Read-only view of an invite code's remaining redemption budget: uses left
+/// before `max_uses` is hit, and the expiry ledger timestamp. Does not mutate
+/// storage or extend any TTL, so it is safe to call as a lightweight probe
+/// ahead of `redeem_invite_code`.
+pub fn get_invite_code_info(env: &Env, code: Symbol) -> Result<InviteCodeInfo, InsightArenaError> {
+    let invite: InviteCode = env
+        .storage()
+        .persistent()
+        .get(&DataKey::InviteCode(code.clone()))
+        .ok_or(InsightArenaError::InvalidInviteCode)?;
+
+    let remaining_uses = invite.max_uses.saturating_sub(invite.current_uses);
+
+    Ok(InviteCodeInfo {
+        code,
+        market_id: invite.market_id,
+        remaining_uses,
+        expires_at: invite.expires_at,
+        is_active: invite.is_active,
+    })
 }
 
 fn byte_to_char(b: u8) -> u8 {

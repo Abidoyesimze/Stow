@@ -8,7 +8,7 @@ pub enum ReputationDecayMode {
 }
 
 use crate::errors::InsightArenaError;
-use crate::storage_types::DataKey;
+use crate::storage_types::{DataKey, VolumeFeeConfig};
 
 // ── TTL constants ─────────────────────────────────────────────────────────────
 // Assuming ~5 s per ledger:
@@ -248,6 +248,32 @@ pub struct Config {
     /// Maximum number of mutually exclusive outcomes allowed per market.
     /// Admin-configurable via [`set_max_outcomes`]. Defaults to 10 at initialization.
     pub max_outcomes: u32,
+/// Volume-based fee tier schedule. Governs the swap fee charged by every
+    /// market's AMM pool based on its cumulative trading volume.
+    /// Governance-configurable via `set_volume_fee_config` (admin, immediate).
+    /// Defaults to [`VolumeFeeConfig::default_config`] at initialization.
+    pub volume_fee_config: VolumeFeeConfig,
+    /// Stake (stroops) an oracle must lock via
+    /// `dispute::submit_resolution_with_stake` when submitting a market
+    /// resolution. Held through the market's dispute window; slashed if a
+    /// dispute overturns the resolution, refunded plus a reward otherwise.
+    /// Admin-configurable via `set_oracle_stake_config`. Defaults to
+    /// `100_000_000` (10 XLM) at initialization.
+    pub oracle_stake_amount: i128,
+    /// Reward paid to the oracle (bps of their locked stake) when their
+    /// submitted resolution stands unchallenged or survives a dispute.
+    /// Paid out of the protocol treasury balance, capped at what the
+    /// treasury actually holds. Admin-configurable via
+    /// `set_oracle_stake_config`. Defaults to `500` (5%) at initialization.
+    pub oracle_reward_bps: u32,
+    /// Number of vesting tranches a `season::finalize_season` reward is
+    /// split into, instead of one lump payout. Admin-configurable via
+    /// `set_vesting_config`. Defaults to `4` at initialization.
+    pub vesting_tranche_count: u32,
+    /// Seconds between successive tranche unlocks in a season reward vesting
+    /// schedule. Admin-configurable via `set_vesting_config`. Defaults to
+    /// `2_592_000` (~30 days) at initialization.
+    pub vesting_interval_seconds: u64,
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -383,6 +409,11 @@ pub fn initialize(
         arbiter_voting_period_seconds: 172_800, // ~2 days
         governance_quorum_bps: 1000, // 10% of registered users must participate
         max_outcomes: DEFAULT_MAX_OUTCOMES,
+volume_fee_config: VolumeFeeConfig::default_config(env),
+        oracle_stake_amount: 100_000_000, // 10 XLM expressed in stroops
+        oracle_reward_bps: 500, // 5% of stake paid as a reward when resolution stands
+        vesting_tranche_count: 4,
+        vesting_interval_seconds: 2_592_000, // ~30 days
     };
 
     env.storage().persistent().set(&DataKey::Config, &config);
@@ -1091,6 +1122,42 @@ pub fn set_max_outcomes(
     new_max: u32,
 ) -> Result<(), InsightArenaError> {
     ensure_not_paused(env)?;
+// ── Volume Fee Config ──────────────────────────────────────────────────────────
+
+fn validate_volume_fee_config(config: &VolumeFeeConfig) -> Result<(), InsightArenaError> {
+    if config.tiers.is_empty() {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    // Tier 0 must have threshold 0.
+    let first = config.tiers.get(0).unwrap();
+    if first.volume_threshold != 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    // Thresholds must be monotonically increasing.
+    let mut prev_threshold = first.volume_threshold;
+    for i in 1..config.tiers.len() {
+        let entry = config.tiers.get(i).unwrap();
+        if entry.volume_threshold <= prev_threshold {
+            return Err(InsightArenaError::InvalidInput);
+        }
+        prev_threshold = entry.volume_threshold;
+    }
+
+    Ok(())
+}
+
+/// Update the volume-based fee tier schedule. Caller must be the stored admin.
+///
+/// The new schedule must have at least one tier, with tier 0's threshold at `0`,
+/// and monotonically increasing thresholds thereafter. All fee rates must be
+/// ≤ 10_000 bps.
+pub fn set_volume_fee_config(
+    env: &Env,
+    admin: Address,
+    new_config: VolumeFeeConfig,
+) -> Result<(), InsightArenaError> {
     let mut config = load_config(env)?;
 
     admin.require_auth();
@@ -1108,6 +1175,120 @@ pub fn set_max_outcomes(
     bump_config(env);
 
     emit_max_outcomes_updated(env, old_max, new_max);
+    validate_volume_fee_config(&new_config)?;
+
+    let old_config = config.volume_fee_config.clone();
+    config.volume_fee_config = new_config;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_volume_fee_config_updated(env, &old_config, &config.volume_fee_config);
+
+    Ok(())
+}
+
+fn emit_volume_fee_config_updated(
+    env: &Env,
+    old_config: &VolumeFeeConfig,
+    new_config: &VolumeFeeConfig,
+) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("vfc_upd")),
+        (old_config.clone(), new_config.clone()),
+    );
+}
+
+/// Return the current volume-based fee tier schedule. Extends the Config TTL.
+pub fn get_volume_fee_config(env: &Env) -> VolumeFeeConfig {
+    match load_config(env) {
+        Ok(config) => {
+            bump_config(env);
+            config.volume_fee_config
+        }
+        Err(_) => VolumeFeeConfig::default_config(env),
+    }
+}
+
+fn validate_oracle_stake_config(stake_amount: i128, reward_bps: u32) -> Result<(), InsightArenaError> {
+    if stake_amount <= 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+    if reward_bps > 10_000 {
+        return Err(InsightArenaError::InvalidFee);
+    }
+    Ok(())
+}
+
+/// Update the required oracle submission stake and the reward (bps of stake)
+/// paid when a submission stands. Caller must be the stored admin. Only
+/// affects submissions made after this call.
+pub fn set_oracle_stake_config(
+    env: &Env,
+    admin: Address,
+    stake_amount: i128,
+    reward_bps: u32,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    validate_oracle_stake_config(stake_amount, reward_bps)?;
+
+    config.oracle_stake_amount = stake_amount;
+    config.oracle_reward_bps = reward_bps;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_oracle_stake_config_updated(env, stake_amount, reward_bps);
+
+    Ok(())
+}
+
+fn emit_oracle_stake_config_updated(env: &Env, stake_amount: i128, reward_bps: u32) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("orc_upd")),
+        (stake_amount, reward_bps),
+    );
+}
+
+fn validate_vesting_config(tranche_count: u32, interval_seconds: u64) -> Result<(), InsightArenaError> {
+    if tranche_count == 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+    if interval_seconds == 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+    Ok(())
+}
+
+/// Update the number and spacing of tranches used to vest season rewards.
+/// Caller must be the stored admin. Only affects schedules created by
+/// `season::finalize_season` calls made after this update — already-created
+/// vesting schedules keep the parameters snapshotted at creation time.
+pub fn set_vesting_config(
+    env: &Env,
+    admin: Address,
+    tranche_count: u32,
+    interval_seconds: u64,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    validate_vesting_config(tranche_count, interval_seconds)?;
+
+    config.vesting_tranche_count = tranche_count;
+    config.vesting_interval_seconds = interval_seconds;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_vesting_config_updated(env, tranche_count, interval_seconds);
 
     Ok(())
 }
@@ -1116,6 +1297,10 @@ fn emit_max_outcomes_updated(env: &Env, old_max: u32, new_max: u32) {
     env.events().publish(
         (symbol_short!("cfg"), symbol_short!("max_out")),
         (old_max, new_max),
+fn emit_vesting_config_updated(env: &Env, tranche_count: u32, interval_seconds: u64) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("vst_upd")),
+        (tranche_count, interval_seconds),
     );
 }
 
