@@ -48,7 +48,6 @@ export class AuthController {
   }
 
   @Post('verify')
-  @Throttle({ auth: {} })
   @HttpCode(HttpStatus.OK)
   async verifyChallenge(@Body() verifyChallengeDto: VerifyChallengeDto) {
     return this.authService.verifyChallenge(

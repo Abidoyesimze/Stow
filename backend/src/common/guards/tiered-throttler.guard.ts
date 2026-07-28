@@ -8,7 +8,6 @@ import type { ThrottlerModuleOptions } from '@nestjs/throttler/dist/throttler-mo
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { THROTTLE_TIER_KEY } from '../decorators/throttle-tier.decorator';
-import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 
 @Injectable()
 export class TieredThrottlerGuard extends ThrottlerGuard {
@@ -24,11 +23,6 @@ export class TieredThrottlerGuard extends ThrottlerGuard {
 
   override async canActivate(context: ExecutionContext): Promise<boolean> {
     const tier = this.reflector.getAllAndOverride<string>(THROTTLE_TIER_KEY, [
-      context.getHandler(),
-      context.getClass(),
-    ]);
-
-    const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
       context.getHandler(),
       context.getClass(),
     ]);
