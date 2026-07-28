@@ -7,7 +7,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import {
@@ -17,9 +17,11 @@ import {
   DisputeSlaStage,
 } from './entities/dispute.entity';
 import { DisputeEvidence } from './entities/dispute-evidence.entity';
+import { DisputeVote } from './entities/dispute-vote.entity';
 import { CreateDisputeDto } from './dto/create-dispute.dto';
 import { ResolveDisputeDto } from './dto/resolve-dispute.dto';
 import { AttachEvidenceDto } from './dto/attach-evidence.dto';
+import { CastVoteDto } from './dto/cast-vote.dto';
 import { Market } from '../markets/entities/market.entity';
 import { User } from '../users/entities/user.entity';
 import { Role } from '../common/enums/role.enum';
@@ -40,6 +42,18 @@ const DEFAULT_SLA_ESCALATION_HOURS = 24;
 const DEFAULT_SLA_APPROACHING_WINDOW_HOURS = 6;
 const DEFAULT_SLA_REESCALATION_INTERVAL_HOURS = 24;
 
+/**
+ * Highest tier a dispute may be escalated to. A tier-MAX_TIER dispute is
+ * terminal: escalation past it is rejected.
+ */
+export const MAX_TIER = 3;
+/** How long after a tier resolves it may still be escalated, in hours. */
+const DEFAULT_ESCALATION_WINDOW_HOURS = 72;
+/** Reputation-weighted participation required to finalize a tier-1 dispute. */
+const DEFAULT_TIER1_QUORUM = 100;
+/** Each successive tier multiplies the required quorum by this factor. */
+const DEFAULT_QUORUM_TIER_MULTIPLIER = 2;
+
 @Injectable()
 export class DisputesService {
   private readonly logger = new Logger(DisputesService.name);
@@ -56,6 +70,8 @@ export class DisputesService {
     private readonly marketsRepository: Repository<Market>,
     @InjectRepository(DisputeEvidence)
     private readonly evidenceRepository: Repository<DisputeEvidence>,
+    @InjectRepository(DisputeVote)
+    private readonly votesRepository: Repository<DisputeVote>,
     @InjectRepository(User)
     private readonly usersRepository: Repository<User>,
     private readonly sorobanService: SorobanService,
@@ -122,7 +138,7 @@ export class DisputesService {
     const slaDeadline = new Date();
     slaDeadline.setHours(
       slaDeadline.getHours() +
-        this.getSlaHoursConfig(
+        this.getNumericConfig(
           'DISPUTE_SLA_INITIAL_REVIEW_HOURS',
           DEFAULT_SLA_INITIAL_REVIEW_HOURS,
         ),
@@ -133,6 +149,8 @@ export class DisputesService {
       disputantId: user.id,
       reason,
       status: DisputeStatus.PENDING,
+      tier: 1,
+      quorumThreshold: this.quorumForTier(1),
       slaStage: DisputeSlaStage.INITIAL_REVIEW,
       slaDeadline,
     });
@@ -191,6 +209,223 @@ export class DisputesService {
     }
 
     return this.findOne(id);
+  }
+
+  /**
+   * Cast a reputation-weighted vote on a pending dispute tier.
+   *
+   * Each vote is weighted by the voter's reputation score (snapshotted at
+   * cast time), so a small brigade of low-reputation addresses cannot swing
+   * an outcome the way it could under naive 1-address-1-vote. A given wallet
+   * address may vote at most once across the entire escalation chain (this
+   * tier plus every lower tier it escalated from). Once the summed weight of
+   * a tier's votes reaches its quorum threshold, the tier finalizes to the
+   * outcome carrying the most weight; until then it stays open.
+   */
+  async castVote(
+    disputeId: string,
+    dto: CastVoteDto,
+    user: User,
+  ): Promise<Dispute> {
+    const dispute = await this.findOne(disputeId);
+
+    if (dispute.status !== DisputeStatus.PENDING) {
+      throw new BadRequestException('Voting is closed for this dispute');
+    }
+
+    const voterAddress = user.stellar_address;
+    if (!voterAddress) {
+      throw new BadRequestException(
+        'Voter must have a wallet address to vote on a dispute',
+      );
+    }
+
+    // Reject a second vote from the same address anywhere in the chain.
+    const chainIds = await this.getChainDisputeIds(dispute);
+    const existingVote = await this.votesRepository.findOne({
+      where: { voterAddress, disputeId: In(chainIds) },
+    });
+    if (existingVote) {
+      throw new ConflictException(
+        'This address has already voted in this dispute',
+      );
+    }
+
+    const weight = Math.max(0, user.reputation_score ?? 0);
+    const vote = this.votesRepository.create({
+      disputeId,
+      voterId: user.id,
+      voterAddress,
+      outcome: dto.outcome,
+      weight,
+      tier: dispute.tier,
+    });
+    await this.votesRepository.save(vote);
+
+    await this.tryFinalizeByQuorum(dispute);
+
+    return this.findOne(disputeId);
+  }
+
+  /**
+   * Escalate a resolved dispute tier to the next tier. Only permitted once a
+   * tier has resolved and only within the escalation window that follows its
+   * resolution. A fresh dispute is created one tier up, linked back to this
+   * one via {@link Dispute.escalatedFrom}, with a higher quorum threshold.
+   * Escalation past {@link MAX_TIER}, outside the window, or of an
+   * already-escalated tier is rejected.
+   */
+  async escalate(disputeId: string, user: User): Promise<Dispute> {
+    const dispute = await this.findOne(disputeId);
+
+    if (dispute.status !== DisputeStatus.RESOLVED) {
+      throw new BadRequestException(
+        'Only a resolved dispute tier can be escalated',
+      );
+    }
+
+    if (dispute.tier >= MAX_TIER) {
+      throw new BadRequestException(
+        `Dispute has reached the maximum tier (${MAX_TIER})`,
+      );
+    }
+
+    if (!dispute.resolvedAt) {
+      throw new BadRequestException(
+        'Resolved dispute is missing a resolution timestamp',
+      );
+    }
+
+    const windowHours = this.getNumericConfig(
+      'DISPUTE_ESCALATION_WINDOW_HOURS',
+      DEFAULT_ESCALATION_WINDOW_HOURS,
+    );
+    const windowEnd = new Date(
+      dispute.resolvedAt.getTime() + windowHours * 60 * 60 * 1000,
+    );
+    if (new Date() > windowEnd) {
+      throw new BadRequestException('Escalation window has passed');
+    }
+
+    // A tier can only be escalated once - guard against duplicate chains.
+    const existingEscalation = await this.disputesRepository.findOne({
+      where: { escalatedFromId: disputeId },
+    });
+    if (existingEscalation) {
+      throw new ConflictException('This dispute has already been escalated');
+    }
+
+    const nextTier = dispute.tier + 1;
+    const slaDeadline = new Date();
+    slaDeadline.setHours(
+      slaDeadline.getHours() +
+        this.getNumericConfig(
+          'DISPUTE_SLA_INITIAL_REVIEW_HOURS',
+          DEFAULT_SLA_INITIAL_REVIEW_HOURS,
+        ),
+    );
+
+    const escalated = this.disputesRepository.create({
+      marketId: dispute.marketId,
+      disputantId: dispute.disputantId,
+      reason: dispute.reason,
+      status: DisputeStatus.PENDING,
+      tier: nextTier,
+      quorumThreshold: this.quorumForTier(nextTier),
+      escalatedFromId: dispute.id,
+      slaStage: DisputeSlaStage.INITIAL_REVIEW,
+      slaDeadline,
+    });
+
+    const saved = await this.disputesRepository.save(escalated);
+
+    this.logger.log(
+      `Dispute ${disputeId} (tier ${dispute.tier}) escalated to tier ` +
+        `${nextTier} as dispute ${saved.id} by user ${user.id}`,
+    );
+
+    return this.findOne(saved.id);
+  }
+
+  /**
+   * Reputation-weighted quorum for a given tier. Higher tiers require more
+   * weighted participation before they can finalize.
+   */
+  private quorumForTier(tier: number): number {
+    const base = this.getNumericConfig(
+      'DISPUTE_TIER1_QUORUM',
+      DEFAULT_TIER1_QUORUM,
+    );
+    const multiplier = this.getNumericConfig(
+      'DISPUTE_QUORUM_TIER_MULTIPLIER',
+      DEFAULT_QUORUM_TIER_MULTIPLIER,
+    );
+    return Math.round(base * Math.pow(multiplier, tier - 1));
+  }
+
+  /**
+   * IDs of every dispute in this tier's escalation chain: itself plus each
+   * lower tier it was escalated from, walking the {@link Dispute.escalatedFrom}
+   * links up to the tier-1 root. Used to enforce one-vote-per-address across
+   * the whole chain.
+   */
+  private async getChainDisputeIds(dispute: Dispute): Promise<string[]> {
+    const ids = [dispute.id];
+    let parentId = dispute.escalatedFromId;
+
+    while (parentId) {
+      ids.push(parentId);
+      const parent = await this.disputesRepository.findOne({
+        where: { id: parentId },
+        select: ['id', 'escalatedFromId'],
+      });
+      parentId = parent?.escalatedFromId ?? null;
+    }
+
+    return ids;
+  }
+
+  /**
+   * Finalize a tier once its votes' summed weight meets quorum. Tallies the
+   * reputation-weighted votes; if participation is still below the threshold
+   * the dispute is left open. Ties favour the status quo (UPHELD).
+   */
+  private async tryFinalizeByQuorum(dispute: Dispute): Promise<void> {
+    const votes = await this.votesRepository.find({
+      where: { disputeId: dispute.id },
+    });
+
+    let totalWeight = 0;
+    let upheldWeight = 0;
+    let overturnedWeight = 0;
+    for (const vote of votes) {
+      totalWeight += vote.weight;
+      if (vote.outcome === DisputeResolution.OVERTURNED) {
+        overturnedWeight += vote.weight;
+      } else {
+        upheldWeight += vote.weight;
+      }
+    }
+
+    if (totalWeight < dispute.quorumThreshold) {
+      // Below quorum - the dispute stays open.
+      return;
+    }
+
+    const resolution =
+      overturnedWeight > upheldWeight
+        ? DisputeResolution.OVERTURNED
+        : DisputeResolution.UPHELD;
+
+    dispute.status = DisputeStatus.RESOLVED;
+    dispute.resolution = resolution;
+    dispute.resolvedAt = new Date();
+    await this.disputesRepository.save(dispute);
+
+    this.logger.log(
+      `Dispute ${dispute.id} (tier ${dispute.tier}) reached quorum ` +
+        `(${totalWeight}/${dispute.quorumThreshold}) and resolved as ${resolution}`,
+    );
   }
 
   /**
@@ -543,11 +778,11 @@ export class DisputesService {
     dispute: Dispute,
     now: Date,
   ): Promise<'none' | 'approaching' | 'breached' | 'escalated'> {
-    const approachingWindowHours = this.getSlaHoursConfig(
+    const approachingWindowHours = this.getNumericConfig(
       'DISPUTE_SLA_APPROACHING_WINDOW_HOURS',
       DEFAULT_SLA_APPROACHING_WINDOW_HOURS,
     );
-    const reescalationIntervalHours = this.getSlaHoursConfig(
+    const reescalationIntervalHours = this.getNumericConfig(
       'DISPUTE_SLA_REESCALATION_INTERVAL_HOURS',
       DEFAULT_SLA_REESCALATION_INTERVAL_HOURS,
     );
@@ -576,7 +811,7 @@ export class DisputesService {
 
       if (dispute.slaStage === DisputeSlaStage.INITIAL_REVIEW) {
         dispute.slaStage = DisputeSlaStage.ESCALATED;
-        const escalationHours = this.getSlaHoursConfig(
+        const escalationHours = this.getNumericConfig(
           'DISPUTE_SLA_ESCALATION_HOURS',
           DEFAULT_SLA_ESCALATION_HOURS,
         );
@@ -656,7 +891,7 @@ export class DisputesService {
     return Array.from(addresses);
   }
 
-  private getSlaHoursConfig(key: string, fallback: number): number {
+  private getNumericConfig(key: string, fallback: number): number {
     const raw = this.configService.get<string>(key);
     const parsed = raw !== undefined ? parseFloat(raw) : NaN;
     return Number.isFinite(parsed) ? parsed : fallback;
