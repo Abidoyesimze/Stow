@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
+import { Readable } from 'stream';
 import { Prediction } from './entities/prediction.entity';
 import { SubmitPredictionDto } from './dto/submit-prediction.dto';
 import { UpdatePredictionNoteDto } from './dto/update-prediction-note.dto';
@@ -22,6 +23,7 @@ import {
   PredictionWithStatus,
   PaginatedMyPredictionsResponse,
 } from './dto/list-my-predictions.dto';
+import { ExportPredictionsDto } from './dto/export-predictions.dto';
 import { User } from '../users/entities/user.entity';
 import { Market } from '../markets/entities/market.entity';
 import { SorobanService } from '../soroban/soroban.service';
@@ -466,4 +468,94 @@ export class PredictionsService {
 
     return { data, total, page, limit };
   }
+
+  /**
+   * Stream the user's predictions as a CSV without loading all rows into memory.
+   * Returns a Readable stream that pipes CSV rows as they are fetched.
+   */
+  exportCsv(user: User, dto: ExportPredictionsDto): Readable {
+    const qb = this.predictionsRepository
+      .createQueryBuilder('prediction')
+      .leftJoinAndSelect('prediction.market', 'market')
+      .where('prediction.userId = :userId', { userId: user.id })
+      .orderBy('prediction.submitted_at', 'DESC')
+      .select([
+        'prediction.id',
+        'prediction.chosen_outcome',
+        'prediction.stake_amount_stroops',
+        'prediction.payout_claimed',
+        'prediction.payout_amount_stroops',
+        'prediction.submitted_at',
+        'prediction.note',
+        'market.title',
+        'market.resolved_outcome',
+        'market.is_resolved',
+        'market.is_cancelled',
+      ]);
+
+    if (dto.start_date) {
+      qb.andWhere('prediction.submitted_at >= :startDate', {
+        startDate: new Date(dto.start_date),
+      });
+    }
+    if (dto.end_date) {
+      qb.andWhere('prediction.submitted_at <= :endDate', {
+        endDate: new Date(dto.end_date),
+      });
+    }
+
+    const readable = new Readable({ read() {} });
+
+    // Start streaming asynchronously
+    (async () => {
+      try {
+        readable.push(
+          'id,market_title,chosen_outcome,stake_stroops,status,payout_stroops,note,submitted_at\n',
+        );
+
+        const stream = await qb.stream();
+
+        for await (const prediction of stream) {
+          const market = (prediction as any).market ?? {};
+          const status = computeExportStatus(prediction, market);
+          const note = ((prediction as any).note ?? '').replace(/"/g, '""');
+          const title = (market.title ?? '').replace(/"/g, '""');
+          const row = [
+            (prediction as any).id,
+            `"${title}"`,
+            `"${(prediction as any).chosen_outcome}"`,
+            (prediction as any).stake_amount_stroops,
+            status,
+            (prediction as any).payout_amount_stroops ?? '0',
+            `"${note}"`,
+            (prediction as any).submitted_at instanceof Date
+              ? (prediction as any).submitted_at.toISOString()
+              : String((prediction as any).submitted_at),
+          ].join(',');
+
+          readable.push(row + '\n');
+        }
+
+        readable.push(null);
+      } catch (err) {
+        readable.destroy(err instanceof Error ? err : new Error(String(err)));
+      }
+    })();
+
+    return readable;
+  }
+}
+
+function computeExportStatus(
+  prediction: { chosen_outcome: string },
+  market: {
+    is_cancelled?: boolean;
+    is_resolved?: boolean;
+    resolved_outcome?: string | null;
+  },
+): string {
+  if (market.is_cancelled) return 'pending';
+  if (!market.is_resolved) return 'active';
+  if (market.resolved_outcome === prediction.chosen_outcome) return 'won';
+  return 'lost';
 }

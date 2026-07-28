@@ -963,4 +963,42 @@ describe('PredictionsService', () => {
       expect(result.data).toHaveLength(5);
     });
   });
+
+  describe('exportCsv', () => {
+    let csvQbMock: any;
+
+    beforeEach(() => {
+      csvQbMock = {
+        leftJoinAndSelect: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        select: jest.fn().mockReturnThis(),
+        stream: jest.fn().mockResolvedValue({
+          [Symbol.asyncIterator]: function* () {},
+          on: jest.fn(),
+        }),
+      };
+      (mockPredictionsRepo as any).createQueryBuilder = jest
+        .fn()
+        .mockReturnValue(csvQbMock);
+    });
+
+    it('returns a readable stream', () => {
+      const user = makeUser();
+      const stream = service.exportCsv(user, {});
+      expect(stream).toBeDefined();
+      expect(typeof stream.pipe).toBe('function');
+    });
+
+    it('builds query with date filters when provided', () => {
+      const user = makeUser();
+      const stream = service.exportCsv(user, {
+        start_date: '2026-01-01',
+        end_date: '2026-06-30',
+      });
+      expect(stream).toBeDefined();
+      expect(csvQbMock.andWhere).toHaveBeenCalledTimes(2);
+    });
+  });
 });

@@ -20,7 +20,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
-import { Throttle } from '@nestjs/throttler';
+import { ThrottleTier } from '../common/decorators/throttle-tier.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { DateRangeQueryDto } from '../common/dto/date-range-query.dto';
 import { Public } from '../common/decorators/public.decorator';
@@ -158,7 +158,7 @@ export class MarketsController {
 
   @Post('bulk')
   @UseGuards(BanGuard)
-  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @ThrottleTier('write')
   @HttpCode(HttpStatus.CREATED)
   @ApiBearerAuth()
   @UseInterceptors(OptionalIdempotencyInterceptor)
@@ -220,6 +220,7 @@ export class MarketsController {
 
   @Get()
   @Public()
+  @ThrottleTier('read')
   @ApiOperation({ summary: 'List and filter markets with pagination' })
   @ApiResponse({
     status: 200,
