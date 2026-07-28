@@ -375,6 +375,10 @@ pub struct Market {
     /// SHA-256 content hash of off-chain market metadata. Set once at creation
     /// and never mutated by any subsequent market operation.
     pub metadata_hash: BytesN<32>,
+    /// Cumulative trading volume (stroops) processed by this market's AMM pool.
+    /// Updated on every swap; used to select the volume-based fee tier at
+    /// fee-charge time. Monotonic; never decreases.
+    pub cumulative_volume: i128,
 }
 
 impl Market {
@@ -421,6 +425,7 @@ impl Market {
             dispute_window,
             outcome_liquidity_cap: 0,
             metadata_hash,
+            cumulative_volume: 0,
         }
     }
 }
@@ -528,6 +533,11 @@ pub struct SwapRecord {
     pub amount_out: i128,
     pub fee_paid: i128,
     pub timestamp: u64,
+    /// Index of the volume-based fee tier active when this swap was executed.
+    /// `0` corresponds to the first entry in `VolumeFeeConfig::tiers` (lowest
+    /// volume tier). Snapshotted at fee-charge time so historical fees remain
+    /// auditable even if the tier schedule is later reconfigured.
+    pub volume_tier_index: u32,
 }
 
 impl SwapRecord {
@@ -541,6 +551,7 @@ impl SwapRecord {
         amount_out: i128,
         fee_paid: i128,
         timestamp: u64,
+        volume_tier_index: u32,
     ) -> Self {
         Self {
             trader,
@@ -551,6 +562,7 @@ impl SwapRecord {
             amount_out,
             fee_paid,
             timestamp,
+            volume_tier_index,
         }
     }
 }
@@ -633,6 +645,62 @@ impl FeeTierConfig {
     }
 }
 
+/// A single volume-fee tier: markets whose cumulative volume reaches
+/// `volume_threshold` are charged `fee_bps` rather than the next-lower tier's
+/// rate. Thresholds are monotonically increasing: tier *N*'s threshold must be
+/// strictly greater than tier *N-1*'s threshold.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VolumeFeeEntry {
+    /// Minimum cumulative volume (stroops) required to activate this tier.
+    pub volume_threshold: i128,
+    /// Swap fee (bps) applied once this tier is active.
+    pub fee_bps: u32,
+}
+
+/// Admin-configurable volume-based fee schedule used by
+/// `liquidity::select_volume_fee_tier` to pick the swap fee for a market
+/// based on its `Market::cumulative_volume`.
+///
+/// The schedule is a list of [`VolumeFeeEntry`] sorted by ascending
+/// `volume_threshold`. Every market starts at tier 0 regardless of its
+/// volume; tier 0's `volume_threshold` is always `0`. The last entry is
+/// the ceiling — once a market exceeds its threshold, no higher tier applies.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VolumeFeeConfig {
+    pub tiers: Vec<VolumeFeeEntry>,
+}
+
+impl VolumeFeeConfig {
+    /// Returns a sensible default volume-fee schedule.
+    ///
+    /// - Tier 0 (volume < 10_000 XLM):  30 bps (0.3%)
+    /// - Tier 1 (volume ≥ 10_000 XLM):  25 bps (0.25%)
+    /// - Tier 2 (volume ≥ 100_000 XLM): 20 bps (0.20%)
+    /// - Tier 3 (volume ≥ 1_000_000 XLM): 15 bps (0.15%)
+    pub fn default_config(env: &Env) -> Self {
+        let mut tiers = Vec::new(env);
+        tiers.push_back(VolumeFeeEntry {
+            volume_threshold: 0,
+            fee_bps: 30,
+        });
+        tiers.push_back(VolumeFeeEntry {
+            volume_threshold: 100_000_000_000, // 10_000 XLM in stroops
+            fee_bps: 25,
+        });
+        tiers.push_back(VolumeFeeEntry {
+            volume_threshold: 1_000_000_000_000, // 100_000 XLM in stroops
+            fee_bps: 20,
+        });
+        tiers.push_back(VolumeFeeEntry {
+            volume_threshold: 10_000_000_000_000, // 1_000_000 XLM in stroops
+            fee_bps: 15,
+        });
+        Self { tiers }
+    }
+}
+
 /// Read-only view of a market's current dynamic fee state, returned by `get_market_fee_info`.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -641,6 +709,10 @@ pub struct MarketFeeInfo {
     pub tier: FeeTier,
     pub effective_fee_bps: u32,
     pub volatility_ema_bps: u32,
+    /// Index of the volume-based fee tier currently active for this market.
+    pub volume_tier_index: u32,
+    /// Fee (bps) charged by the currently active volume-based tier.
+    pub volume_tier_fee_bps: u32,
 }
 
 // ── TWAP Price Oracle Types ───────────────────────────────────────────────────

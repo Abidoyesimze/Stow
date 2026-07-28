@@ -1106,4 +1106,20 @@ impl InsightArenaContract {
     ) -> Result<(), InsightArenaError> {
         liquidity::set_fee_tier_config(&env, admin, new_config)
     }
+
+    // ── Volume-Based Fee Tiers (#1326) ──────────────────────────────────────────
+
+    /// Return the current volume-based fee tier schedule.
+    pub fn get_volume_fee_config(env: Env) -> crate::storage_types::VolumeFeeConfig {
+        config::get_volume_fee_config(&env)
+    }
+
+    /// Update the volume-based fee tier schedule. Caller must be the platform admin.
+    pub fn update_volume_fee_config(
+        env: Env,
+        admin: Address,
+        new_config: crate::storage_types::VolumeFeeConfig,
+    ) -> Result<(), InsightArenaError> {
+        config::set_volume_fee_config(&env, admin, new_config)
+    }
 }
