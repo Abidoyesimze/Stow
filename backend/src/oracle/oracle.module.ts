@@ -10,6 +10,8 @@ import { WebhookAuthGuard } from './guards/webhook-auth.guard';
 import { SubmissionHistoryService } from './submission-history.service';
 import { OracleSubmission } from './entities/oracle-submission.entity';
 import { OracleSubmissionFlag } from './entities/oracle-submission-flag.entity';
+import { OracleSourceReliability } from './entities/oracle-source-reliability.entity';
+import { OracleReliabilityService } from './oracle-reliability.service';
 
 @Module({
   imports: [
@@ -18,6 +20,7 @@ import { OracleSubmissionFlag } from './entities/oracle-submission-flag.entity';
       CreatorEvent,
       OracleSubmission,
       OracleSubmissionFlag,
+      OracleSourceReliability,
     ]),
     ScheduleModule.forRoot(),
   ],
@@ -27,7 +30,8 @@ import { OracleSubmissionFlag } from './entities/oracle-submission-flag.entity';
     WebhookService,
     WebhookAuthGuard,
     SubmissionHistoryService,
+    OracleReliabilityService,
   ],
-  exports: [OracleService, WebhookService, SubmissionHistoryService],
+  exports: [OracleService, WebhookService, SubmissionHistoryService, OracleReliabilityService],
 })
 export class OracleModule {}

@@ -3,7 +3,7 @@ use insightarena_contract::market::CreateMarketParams;
 use insightarena_contract::storage_types::{DataKey, InviteCode};
 use insightarena_contract::{InsightArenaContract, InsightArenaContractClient};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
-use soroban_sdk::{vec, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{vec, Address, Env, String, Symbol, Vec, BytesN};
 
 fn setup_test(env: &Env) -> (Address, Address, u64, InsightArenaContractClient<'_>) {
     env.mock_all_auths();
@@ -30,6 +30,7 @@ fn setup_test(env: &Env) -> (Address, Address, u64, InsightArenaContractClient<'
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: false,
+        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
     };
 
     let market_id = client.create_market(&creator, &params);
@@ -324,6 +325,7 @@ fn test_generate_invite_code_rejects_public_market() {
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: true,
+        metadata_hash: BytesN::from_array(&env, &[0u8; 32]),
     };
     let market_id = client.create_market(&creator, &params);
 
@@ -359,6 +361,7 @@ fn test_generate_invite_code_succeeds_for_private_market() {
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: false,
+        metadata_hash: BytesN::from_array(&env, &[0u8; 32]),
     };
     let market_id = client.create_market(&creator, &params);
 

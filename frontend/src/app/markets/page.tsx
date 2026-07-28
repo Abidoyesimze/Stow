@@ -4,10 +4,13 @@ import { useEffect, useState, useMemo, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { apiClient, ApiError } from "@/lib/api";
 import { useFavorites } from "@/context/FavoritesContext";
+import { usePredictionSlip } from "@/context/PredictionSlipContext";
+import { useInfiniteScroll } from "@/hooks/useInfiniteScroll";
+import { useDebounce } from "@/hooks/useDebounce";
 import MarketCard from "@/component/MarketCard";
+import { MarketsPageLoadingSkeleton } from "@/component/loading-route-skeletons";
 import { EmptyState } from "@/component/ui/empty-state";
-import { Skeleton } from "@/component/ui/skeleton";
-import { Heart, AlertCircle, Inbox } from "lucide-react";
+import { Heart, AlertCircle, Inbox, Loader2, Search, X } from "lucide-react";
 
 interface Market {
   id: string;
@@ -20,6 +23,8 @@ interface Market {
 }
 
 const CATEGORIES = ["All", "Sports", "Finance", "Crypto", "Politics", "Tech"];
+const PAGE_SIZE = 12;
+const SCROLL_POSITION_KEY = "markets_scroll_position";
 
 export default function MarketsPage() {
   const router = useRouter();
@@ -29,57 +34,103 @@ export default function MarketsPage() {
     toggleFavorite,
     isLoading: favoritesLoading,
   } = useFavorites();
+  const { addItem, openSlip } = usePredictionSlip();
 
   const [markets, setMarkets] = useState<Market[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [page, setPage] = useState(0);
+  const [hasMore, setHasMoreState] = useState(true);
   const [selectedCategory, setSelectedCategory] = useState<string>(
     searchParams.get("category") || "All",
   );
+  const [searchQuery, setSearchQuery] = useState<string>(
+    searchParams.get("q") || "",
+  );
+  const debouncedSearch = useDebounce(searchQuery, 300);
   const [viewMode, setViewMode] = useState<"all" | "favorites">(
     searchParams.get("view") === "favorites" ? "favorites" : "all",
   );
-
-  // Fetch markets
+  // Save scroll position before navigating away
   useEffect(() => {
-    const abortController = new AbortController();
-
-    const fetchMarkets = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const data = await apiClient.get<Market[]>("/markets", {
-          signal: abortController.signal,
-        });
-        setMarkets(data || []);
-      } catch (err) {
-        if (err instanceof ApiError) {
-          if (
-            err.kind !== "network" ||
-            err.message !== "Network error: The user aborted a request."
-          ) {
-            setError(err.message);
-          }
-        } else if (err instanceof Error && err.name === "AbortError") {
-          // Ignore
-        } else {
-          setError("An unexpected error occurred");
-        }
-      } finally {
-        if (!abortController.signal.aborted) {
-          setLoading(false);
-        }
-      }
+    const saveScrollPosition = () => {
+      sessionStorage.setItem(SCROLL_POSITION_KEY, String(window.scrollY));
     };
-
-    fetchMarkets();
-
+    window.addEventListener("beforeunload", saveScrollPosition);
     return () => {
-      abortController.abort();
+      saveScrollPosition();
+      window.removeEventListener("beforeunload", saveScrollPosition);
     };
   }, []);
 
-  // Update URL when category changes
+  // Fetch markets (initial + paginated)
+  const fetchMarketsPage = useCallback(async (pageNum: number) => {
+    try {
+      const data = await apiClient.get<Market[]>(
+        `/markets?page=${pageNum}&limit=${PAGE_SIZE}`,
+      );
+      const newMarkets = data || [];
+
+      if (pageNum === 0) {
+        setMarkets(newMarkets);
+      } else {
+        setMarkets((prev) => {
+          const ids = new Set(prev.map((m) => m.id));
+          const filtered = newMarkets.filter((m) => !ids.has(m.id));
+          return [...prev, ...filtered];
+        });
+      }
+
+      setHasMoreState(newMarkets.length === PAGE_SIZE);
+      setError(null);
+    } catch (err) {
+      const errorMessage =
+        err instanceof ApiError ? err.message : "An unexpected error occurred";
+      setError(errorMessage);
+      setHasMoreState(false);
+    }
+  }, []);
+
+  // Initial fetch
+  useEffect(() => {
+    setLoading(true);
+    setPage(0);
+    setMarkets([]);
+    setHasMoreState(true);
+
+    const fetchInitial = async () => {
+      await fetchMarketsPage(0);
+      setLoading(false);
+    };
+
+    fetchInitial();
+  }, [fetchMarketsPage]);
+
+  // Restore scroll position after markets are loaded (e.g. returning via back navigation)
+  useEffect(() => {
+    if (loading || markets.length === 0) return;
+    const saved = sessionStorage.getItem(SCROLL_POSITION_KEY);
+    if (!saved) return;
+    sessionStorage.removeItem(SCROLL_POSITION_KEY);
+    requestAnimationFrame(() => {
+      window.scrollTo({ top: Number(saved), behavior: "instant" as ScrollBehavior });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, markets.length > 0]);
+
+  // Infinite scroll handler
+  const handleLoadMore = useCallback(async () => {
+    const nextPage = page + 1;
+    setPage(nextPage);
+    await fetchMarketsPage(nextPage);
+  }, [page, fetchMarketsPage]);
+
+  const { observerTarget, isLoading: isLoadingMore } = useInfiniteScroll({
+    onLoadMore: handleLoadMore,
+    enabled: viewMode === "all" && hasMore && !loading,
+  });
+
+  // Update URL when category, search, or view changes
   useEffect(() => {
     const params = new URLSearchParams(searchParams);
     if (selectedCategory === "All") {
@@ -87,15 +138,20 @@ export default function MarketsPage() {
     } else {
       params.set("category", selectedCategory);
     }
+    if (debouncedSearch) {
+      params.set("q", debouncedSearch);
+    } else {
+      params.delete("q");
+    }
     if (viewMode === "favorites") {
       params.set("view", "favorites");
     } else {
       params.delete("view");
     }
     router.push(`?${params.toString()}`);
-  }, [selectedCategory, viewMode, router, searchParams]);
+  }, [selectedCategory, debouncedSearch, viewMode, router, searchParams]);
 
-  // Filter markets by category and favorites
+  // Filter markets by category, search, and favorites
   const filteredMarkets = useMemo(() => {
     let filtered = markets;
 
@@ -105,12 +161,21 @@ export default function MarketsPage() {
       );
     }
 
+    if (debouncedSearch) {
+      const q = debouncedSearch.toLowerCase();
+      filtered = filtered.filter(
+        (m) =>
+          m.title.toLowerCase().includes(q) ||
+          m.category.toLowerCase().includes(q),
+      );
+    }
+
     if (viewMode === "favorites") {
       filtered = filtered.filter((m) => favoriteIds.has(m.id));
     }
 
     return filtered;
-  }, [markets, selectedCategory, viewMode, favoriteIds]);
+  }, [markets, selectedCategory, debouncedSearch, viewMode, favoriteIds]);
 
   const handleCategoryChange = useCallback((category: string) => {
     setSelectedCategory(category);
@@ -128,9 +193,18 @@ export default function MarketsPage() {
   );
 
   const handlePredict = useCallback((marketId: string) => {
-    // TODO: Navigate to prediction modal/page
-    console.log(`Predict clicked for market ${marketId}`);
-  }, []);
+    const market = markets.find((m) => m.id === marketId);
+    if (market) {
+      addItem({
+        marketId: market.id,
+        marketTitle: market.title,
+        category: market.category,
+        outcome: "Yes",
+        odds: market.probability > 0 ? 1 / market.probability : 2,
+      });
+      openSlip();
+    }
+  }, [markets, addItem, openSlip]);
 
   // Category counts
   const categoryCounts = useMemo(() => {
@@ -147,30 +221,7 @@ export default function MarketsPage() {
     return counts;
   }, [markets]);
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-gray-900 via-black to-gray-900 p-6 md:p-10">
-        <div className="mx-auto max-w-7xl space-y-8">
-          <div>
-            <div className="mb-4 flex items-center justify-between">
-              <div>
-                <h1 className="text-3xl font-bold text-white">Markets</h1>
-                <p className="mt-2 text-gray-400">
-                  Browse and predict on various markets
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-            {Array.from({ length: 6 }).map((_, idx) => (
-              <Skeleton key={idx} className="h-64 rounded-lg bg-white/10" />
-            ))}
-          </div>
-        </div>
-      </div>
-    );
-  }
+  if (loading || favoritesLoading) return <MarketsPageLoadingSkeleton />;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-900 via-black to-gray-900 p-6 md:p-10">
@@ -181,6 +232,28 @@ export default function MarketsPage() {
           <p className="mt-2 text-gray-400">
             Browse and predict on various markets
           </p>
+        </div>
+
+        {/* Search Bar */}
+        <div className="relative mb-6">
+          <Search className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search markets by title or category…"
+            className="w-full rounded-xl border border-white/10 bg-white/5 py-3 pl-11 pr-10 text-sm text-white outline-none transition focus:border-orange-400 focus:ring-2 focus:ring-orange-400/20 placeholder:text-slate-500"
+            aria-label="Search markets"
+          />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery("")}
+              className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition"
+              aria-label="Clear search"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
         </div>
 
         {/* View Mode Tabs */}
@@ -246,17 +319,44 @@ export default function MarketsPage() {
 
         {/* Markets Grid */}
         {filteredMarkets.length > 0 ? (
-          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-            {filteredMarkets.map((market) => (
-              <MarketCard
-                key={market.id}
-                market={market}
-                isFavorite={favoriteIds.has(market.id)}
-                onFavoriteToggle={() => handleFavoriteToggle(market.id)}
-                onPredict={() => handlePredict(market.id)}
-              />
-            ))}
-          </div>
+          <>
+            <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
+              {filteredMarkets.map((market) => (
+                <MarketCard
+                  key={market.id}
+                  market={market}
+                  isFavorite={favoriteIds.has(market.id)}
+                  onFavoriteToggle={() => handleFavoriteToggle(market.id)}
+                  onPredict={() => handlePredict(market.id)}
+                />
+              ))}
+            </div>
+
+            {/* Infinite scroll trigger and loading state */}
+            {viewMode === "all" && (
+              <>
+                <div
+                  ref={observerTarget}
+                  className="mt-12 flex justify-center"
+                  aria-hidden="true"
+                />
+
+                {isLoadingMore && (
+                  <div className="flex justify-center py-8">
+                    <Loader2 className="h-6 w-6 animate-spin text-[#4FD1C5]" />
+                  </div>
+                )}
+
+                {!hasMore && markets.length > 0 && (
+                  <div className="mt-8 text-center">
+                    <p className="text-sm text-slate-400">
+                      You've reached the end of the list
+                    </p>
+                  </div>
+                )}
+              </>
+            )}
+          </>
         ) : (
           <EmptyState
             icon={
@@ -267,16 +367,20 @@ export default function MarketsPage() {
               )
             }
             title={
-              viewMode === "favorites"
-                ? "No Favorite Markets Yet"
-                : selectedCategory === "All"
-                  ? "No Markets Available"
-                  : `No ${selectedCategory} Markets`
+              debouncedSearch
+                ? "No Results Found"
+                : viewMode === "favorites"
+                  ? "No Favorite Markets Yet"
+                  : selectedCategory === "All"
+                    ? "No Markets Available"
+                    : `No ${selectedCategory} Markets`
             }
             description={
-              viewMode === "favorites"
-                ? "Start adding markets to your watchlist to see them here. Click the heart icon on any market to favorite it."
-                : `No markets found in this category. Try selecting a different category or check back soon.`
+              debouncedSearch
+                ? `No markets match "${debouncedSearch}". Try a different search term.`
+                : viewMode === "favorites"
+                  ? "Start adding markets to your watchlist to see them here. Click the heart icon on any market to favorite it."
+                  : `No markets found in this category. Try selecting a different category or check back soon.`
             }
             action={
               viewMode === "favorites"

@@ -95,6 +95,7 @@ fn create_event_with_match(
             String::from_str(env, "Team B"),
             env.ledger().timestamp() + match_time_offset,
             1u32,
+            0,
         );
         storage::set_match(env, match_id, &match_record);
         storage::add_event_match(env, event_id, match_id);
@@ -377,6 +378,7 @@ fn test_get_user_score_aggregates_points_across_multiple_matches() {
             String::from_str(&env, "Team D"),
             env.ledger().timestamp() + 10_000,
             1u32,
+            0,
         );
         storage::set_match(&env, match_id, &match_record);
         storage::add_event_match(&env, event_id, match_id);
@@ -396,6 +398,7 @@ fn test_get_user_score_aggregates_points_across_multiple_matches() {
             String::from_str(&env, "Team F"),
             env.ledger().timestamp() + 10_000,
             1u32,
+            0,
         );
         storage::set_match(&env, match_id, &match_record);
         storage::add_event_match(&env, event_id, match_id);

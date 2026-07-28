@@ -244,3 +244,109 @@ fn set_stake_bounds_rejects_non_positive() {
     let result = client.try_set_stake_bounds(&admin, &10_i128, &0_i128);
     assert!(matches!(result, Err(Ok(InsightArenaError::InvalidInput))));
 }
+
+// ── Protocol Treasury Fee Split (#1336) ───────────────────────────────────────
+
+#[test]
+fn treasury_split_defaults_on_initialize() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    client.initialize(&admin, &oracle, &200_u32, &register_token(&env));
+
+    let cfg = client.get_config();
+    // Defaults preserve the pre-existing behaviour: the whole protocol fee
+    // share keeps flowing to the treasury (now the admin address) and none
+    // is redirected to liquidity providers, until an admin opts in.
+    assert_eq!(cfg.treasury_address, admin);
+    assert_eq!(cfg.treasury_split_bps, 10_000);
+    assert_eq!(cfg.lp_split_bps, 0);
+}
+
+#[test]
+fn set_treasury_split_updates_config() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    client.initialize(&admin, &oracle, &200_u32, &register_token(&env));
+
+    let new_treasury = Address::generate(&env);
+    client.set_treasury_split(&admin, &new_treasury, &7_000_u32, &3_000_u32);
+
+    let cfg = client.get_config();
+    assert_eq!(cfg.treasury_address, new_treasury);
+    assert_eq!(cfg.treasury_split_bps, 7_000);
+    assert_eq!(cfg.lp_split_bps, 3_000);
+}
+
+#[test]
+fn set_treasury_split_accepts_uneven_ratio_that_still_sums_to_10000() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    client.initialize(&admin, &oracle, &200_u32, &register_token(&env));
+
+    let new_treasury = Address::generate(&env);
+    // 33.33% / 66.67% — an uneven split that only sums to exactly 10_000
+    // because the two bps values are complementary, not because either is a
+    // "round" number.
+    client.set_treasury_split(&admin, &new_treasury, &3_333_u32, &6_667_u32);
+
+    let cfg = client.get_config();
+    assert_eq!(cfg.treasury_split_bps, 3_333);
+    assert_eq!(cfg.lp_split_bps, 6_667);
+}
+
+#[test]
+fn set_treasury_split_rejects_bps_summing_below_10000() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    client.initialize(&admin, &oracle, &200_u32, &register_token(&env));
+
+    let new_treasury = Address::generate(&env);
+    let result = client.try_set_treasury_split(&admin, &new_treasury, &4_000_u32, &4_000_u32);
+    assert!(matches!(result, Err(Ok(InsightArenaError::InvalidFee))));
+
+    // Config is untouched on rejection.
+    let cfg = client.get_config();
+    assert_eq!(cfg.treasury_split_bps, 10_000);
+    assert_eq!(cfg.lp_split_bps, 0);
+}
+
+#[test]
+fn set_treasury_split_rejects_bps_summing_above_10000() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    client.initialize(&admin, &oracle, &200_u32, &register_token(&env));
+
+    let new_treasury = Address::generate(&env);
+    let result = client.try_set_treasury_split(&admin, &new_treasury, &6_000_u32, &6_000_u32);
+    assert!(matches!(result, Err(Ok(InsightArenaError::InvalidFee))));
+}
+
+#[test]
+fn set_treasury_split_rejects_unauthorized_caller() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let admin = Address::generate(&env);
+    let oracle = Address::generate(&env);
+    client.initialize(&admin, &oracle, &200_u32, &register_token(&env));
+
+    let not_admin = Address::generate(&env);
+    let new_treasury = Address::generate(&env);
+    let result = client.try_set_treasury_split(&not_admin, &new_treasury, &5_000_u32, &5_000_u32);
+    assert!(matches!(result, Err(Ok(InsightArenaError::Unauthorized))));
+}

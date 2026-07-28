@@ -29,6 +29,12 @@ pub enum ProposalType {
     /// Governance-timelocked removal of an address from the trusted-creator
     /// allowlist.
     RemoveTrustedCreator(Address),
+    /// Governance-timelocked update of `Config::governance_quorum_bps`, the
+    /// minimum participation fraction (bps of total registered users) required
+    /// for a proposal to pass. Valid range is 0-10000. Notably, this variant
+    /// intentionally cannot lower the timelock delay or replace the guardian;
+    /// those remain admin-only to preserve the veto safety net.
+    UpdateQuorum(u32),
 }
 
 #[contracttype]
@@ -85,16 +91,6 @@ fn store_proposal(env: &Env, proposal: &Proposal) {
         .set(&DataKey::Proposal(proposal.proposal_id), proposal);
 }
 
-fn proposal_quorum(total_users: u32) -> u32 {
-    // 10% quorum, rounded up; minimum 1 to avoid auto-pass with zero participation.
-    let rounded = total_users.saturating_add(9) / 10;
-    if rounded == 0 {
-        1
-    } else {
-        rounded
-    }
-}
-
 fn emit_proposal_executed(env: &Env, proposal_id: u32, summary: Symbol) {
     env.events().publish(
         (symbol_short!("gov"), symbol_short!("executed")),
@@ -113,6 +109,16 @@ fn emit_proposal_queued(env: &Env, proposal_id: u32, ready_at: u64) {
     env.events().publish(
         (symbol_short!("gov"), symbol_short!("queued")),
         (proposal_id, ready_at),
+    );
+}
+
+/// Emitted when a queued proposal's timelock has elapsed and it is now
+/// executable. Published by `execute_proposal` on the second call once
+/// `now >= ready_at`, immediately before the proposal effect is applied.
+fn emit_proposal_executable(env: &Env, proposal_id: u32) {
+    env.events().publish(
+        (symbol_short!("gov"), symbol_short!("execable")),
+        proposal_id,
     );
 }
 
@@ -246,12 +252,28 @@ pub fn execute_proposal(
             .checked_add(proposal.votes_against)
             .ok_or(InsightArenaError::Overflow)?;
 
-        let quorum = proposal_quorum(total_users);
-        if total_votes < quorum || proposal.votes_for <= proposal.votes_against {
+        // Config-driven quorum: governance_quorum_bps fraction of registered
+        // users must have participated (total_votes / total_users >= quorum_bps / 10000).
+        // Rearranged to avoid division: total_votes * 10000 >= total_users * quorum_bps.
+        let cfg = config::get_config(env)?;
+        let quorum_met = if total_users == 0 {
+            // No registered users: any vote (even zero) satisfies quorum
+            // only when quorum_bps is also 0; otherwise, reject.
+            cfg.governance_quorum_bps == 0
+        } else {
+            let required_votes = (total_users as u64)
+                .checked_mul(cfg.governance_quorum_bps as u64)
+                .unwrap_or(u64::MAX);
+            let actual_votes_scaled = (total_votes as u64)
+                .checked_mul(10_000)
+                .unwrap_or(u64::MAX);
+            actual_votes_scaled >= required_votes
+        };
+
+        if !quorum_met || proposal.votes_for <= proposal.votes_against {
             return Err(InsightArenaError::Unauthorized);
         }
 
-        let cfg = config::get_config(env)?;
         let ready_at = now
             .checked_add(cfg.timelock_delay)
             .ok_or(InsightArenaError::Overflow)?;
@@ -267,6 +289,9 @@ pub fn execute_proposal(
     if now < ready_at {
         return Err(InsightArenaError::TimelockNotElapsed);
     }
+
+    // Emit the "executable" transition event before applying the effect.
+    emit_proposal_executable(env, proposal_id);
 
     let summary = match proposal.proposal_type.clone() {
         ProposalType::UpdateProtocolFee(bps) => {
@@ -300,6 +325,10 @@ pub fn execute_proposal(
         ProposalType::RemoveTrustedCreator(addr) => {
             reputation::remove_trusted_creator_from_governance(env, addr)?;
             symbol_short!("trstrem")
+        }
+        ProposalType::UpdateQuorum(new_quorum_bps) => {
+            config::update_governance_quorum_from_governance(env, new_quorum_bps)?;
+            symbol_short!("quorum")
         }
     };
 

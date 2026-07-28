@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, symbol_short, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, String, Symbol, Vec, BytesN};
 
 use crate::config::{self, PERSISTENT_BUMP, PERSISTENT_THRESHOLD};
 use crate::errors::InsightArenaError;
@@ -27,6 +27,8 @@ pub struct CreateMarketParams {
     pub min_stake: i128,
     pub max_stake: i128,
     pub is_public: bool,
+    /// SHA-256 content hash of the market's off-chain metadata (immutable after create).
+    pub metadata_hash: BytesN<32>,
 }
 
 // ── TTL helpers ───────────────────────────────────────────────────────────────
@@ -136,10 +138,16 @@ fn next_market_id(env: &Env) -> Result<u64, InsightArenaError> {
 
 // ── Event emission ────────────────────────────────────────────────────────────
 
-fn emit_market_created(env: &Env, market_id: u64, creator: &Address, end_time: u64) {
+fn emit_market_created(
+    env: &Env,
+    market_id: u64,
+    creator: &Address,
+    end_time: u64,
+    metadata_hash: &BytesN<32>,
+) {
     env.events().publish(
         (symbol_short!("mkt"), symbol_short!("created")),
-        (market_id, creator.clone(), end_time),
+        (market_id, creator.clone(), end_time, metadata_hash.clone()),
     );
 }
 
@@ -293,6 +301,7 @@ pub fn create_market(
     let market_id = next_market_id(env)?;
 
     // ── Construct and persist the market ─────────────────────────────────────
+    let metadata_hash = params.metadata_hash.clone();
     let market = Market::new(
         market_id,
         creator.clone(),
@@ -308,6 +317,7 @@ pub fn create_market(
         params.min_stake,
         params.max_stake,
         params.dispute_window,
+        metadata_hash.clone(),
     );
 
     env.storage()
@@ -317,7 +327,7 @@ pub fn create_market(
     append_market_to_category_index(env, &market.category, market_id);
 
     // ── Emit MarketCreated event ──────────────────────────────────────────────
-    emit_market_created(env, market_id, &creator, params.end_time);
+    emit_market_created(env, market_id, &creator, params.end_time, &metadata_hash);
 
     // ── Update creator reputation stats ──────────────────────────────────────
     reputation::on_market_created(env, &creator);
@@ -335,6 +345,13 @@ pub fn get_market(env: &Env, market_id: u64) -> Result<Market, InsightArenaError
         .ok_or(InsightArenaError::MarketNotFound)?;
     bump_market(env, market_id);
     Ok(market)
+}
+
+/// Return the immutable off-chain metadata content hash anchored at market creation.
+/// The hash lives on the Market record and is never rewritten after create.
+pub fn get_metadata_hash(env: &Env, market_id: u64) -> Result<BytesN<32>, InsightArenaError> {
+    let market = get_market(env, market_id)?;
+    Ok(market.metadata_hash)
 }
 
 /// Return the total number of markets ever created (0 before any are made).
@@ -612,6 +629,44 @@ pub fn extend_market_end_time(
         .persistent()
         .set(&DataKey::Market(market_id), &market);
     bump_market(env, market_id);
+
+    Ok(())
+}
+
+fn emit_market_liquidity_cap_updated(env: &Env, market_id: u64, old_cap: i128, new_cap: i128) {
+    env.events().publish(
+        (symbol_short!("mkt"), symbol_short!("liq_cap")),
+        (market_id, old_cap, new_cap),
+    );
+}
+
+/// Set a per-market override for the maximum liquidity a single outcome's
+/// AMM reserve may hold. `0` clears the override, reverting the market to
+/// the global `Config::max_liquidity_per_outcome` cap. Caller must be the
+/// platform admin. See `liquidity::add_liquidity` and
+/// `liquidity::get_remaining_outcome_capacity`.
+pub fn set_market_liquidity_cap(
+    env: &Env,
+    admin: Address,
+    market_id: u64,
+    cap: i128,
+) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(env)?;
+    require_admin(env, &admin)?;
+
+    if cap < 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    let mut market = get_market(env, market_id)?;
+    let old_cap = market.outcome_liquidity_cap;
+    market.outcome_liquidity_cap = cap;
+    env.storage()
+        .persistent()
+        .set(&DataKey::Market(market_id), &market);
+    bump_market(env, market_id);
+
+    emit_market_liquidity_cap_updated(env, market_id, old_cap, cap);
 
     Ok(())
 }

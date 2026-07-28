@@ -1,5 +1,5 @@
-import { IsString, IsUUID, IsNumberString, MinLength } from 'class-validator';
-import { ApiProperty } from '@nestjs/swagger';
+import { IsString, IsUUID, IsNumberString, MinLength, IsOptional } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class SubmitPredictionDto {
   @ApiProperty({
@@ -23,4 +23,22 @@ export class SubmitPredictionDto {
   })
   @IsNumberString()
   stake_amount_stroops: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Maximum acceptable price per share. If actual price exceeds this, prediction is rejected with SlippageExceededException. Optional slippage protection.',
+    example: '5000000',
+  })
+  @IsOptional()
+  @IsNumberString()
+  maxPrice?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Minimum acceptable shares received. If actual shares are less than this, prediction is rejected with SlippageExceededException. Optional slippage protection.',
+    example: '2000000',
+  })
+  @IsOptional()
+  @IsNumberString()
+  minSharesOut?: string;
 }

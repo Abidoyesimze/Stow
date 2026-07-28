@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { CacheModule } from '@nestjs/cache-manager';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { LeaderboardEntry } from './entities/leaderboard-entry.entity';
@@ -9,6 +9,7 @@ import { SeasonsModule } from '../seasons/seasons.module';
 import { LeaderboardService } from './leaderboard.service';
 import { LeaderboardScheduler } from './leaderboard.scheduler';
 import { LeaderboardController } from './leaderboard.controller';
+import { CacheWarmingModule } from '../cache/cache-warming.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { LeaderboardController } from './leaderboard.controller';
     ]),
     UsersModule,
     SeasonsModule,
+    forwardRef(() => CacheWarmingModule),
   ],
   controllers: [LeaderboardController],
   providers: [LeaderboardService, LeaderboardScheduler],

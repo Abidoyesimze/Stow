@@ -3,10 +3,12 @@ import { SchedulerRegistry } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { LeaderboardScheduler } from './leaderboard.scheduler';
 import { LeaderboardService } from './leaderboard.service';
+import { CacheWarmingService } from '../cache/warming.service';
 
 describe('LeaderboardScheduler', () => {
   let scheduler: LeaderboardScheduler;
   let service: LeaderboardService;
+  let cacheWarmingService: CacheWarmingService;
 
   const mockSchedulerRegistry = {
     addCronJob: jest.fn(),
@@ -29,6 +31,10 @@ describe('LeaderboardScheduler', () => {
           },
         },
         {
+          provide: CacheWarmingService,
+          useValue: { warmLeaderboard: jest.fn().mockResolvedValue(undefined) },
+        },
+        {
           provide: SchedulerRegistry,
           useValue: mockSchedulerRegistry,
         },
@@ -41,6 +47,7 @@ describe('LeaderboardScheduler', () => {
 
     scheduler = module.get<LeaderboardScheduler>(LeaderboardScheduler);
     service = module.get<LeaderboardService>(LeaderboardService);
+    cacheWarmingService = module.get<CacheWarmingService>(CacheWarmingService);
     jest.clearAllMocks();
   });
 
@@ -49,12 +56,14 @@ describe('LeaderboardScheduler', () => {
   });
 
   describe('handleHourlyRecalculation', () => {
-    it('should call recalculateRanks', async () => {
-      const spy = jest.spyOn(service, 'recalculateRanks').mockResolvedValue();
+    it('should call recalculateRanks then warm leaderboard cache', async () => {
+      const recalcSpy = jest.spyOn(service, 'recalculateRanks').mockResolvedValue();
+      const warmSpy = jest.spyOn(cacheWarmingService, 'warmLeaderboard').mockResolvedValue();
 
       await scheduler.handleHourlyRecalculation();
 
-      expect(spy).toHaveBeenCalled();
+      expect(recalcSpy).toHaveBeenCalled();
+      expect(warmSpy).toHaveBeenCalled();
     });
 
     it('should not throw if recalculateRanks fails', async () => {

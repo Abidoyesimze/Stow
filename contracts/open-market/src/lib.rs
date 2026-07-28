@@ -26,7 +26,7 @@ pub use crate::storage_types::ProposalState;
 pub use crate::liquidity::{calculate_liquidity_value, calculate_lp_tokens, calculate_swap_output};
 pub use crate::market::CreateMarketParams;
 pub use crate::storage_types::{
-    BatchPredictionRequest,
+    ArbiterAssignment, ArbiterTally, BatchPredictionRequest,
     ConditionalChain, ConditionalMarket, CreatorLeaderboardEntry, CreatorStats, DataKey,
     DependencyStatus, Dispute, Event, EventMatch, EventPrediction, FeeTier, FeeTierConfig,
     InviteCode, LPPosition, LeaderboardEntry, LeaderboardSnapshot, LiquidityPool, Market,
@@ -81,7 +81,10 @@ impl InsightArenaContract {
         config::update_protocol_fee(&env, new_fee_bps)
     }
 
-    /// Pause or resume the contract. Caller must be the stored admin.
+    /// Pause or resume the contract. Only the stored **guardian** may pause
+    /// (`paused = true`); only the stored **admin** may unpause
+    /// (`paused = false`) — a deliberate separation of duties so no single
+    /// role can both trigger and clear an emergency halt.
     /// `reason_code` is recorded on the emitted event for auditing.
     pub fn set_paused(env: Env, paused: bool, reason_code: u32) -> Result<(), InsightArenaError> {
         config::set_paused(&env, paused, reason_code)
@@ -181,6 +184,14 @@ impl InsightArenaContract {
     /// Fetch a market by ID. Returns `MarketNotFound` if it does not exist.
     pub fn get_market(env: Env, market_id: u64) -> Result<Market, InsightArenaError> {
         market::get_market(&env, market_id)
+    }
+
+    /// Return the immutable off-chain metadata content hash stored at market creation.
+    pub fn get_metadata_hash(
+        env: Env,
+        market_id: u64,
+    ) -> Result<soroban_sdk::BytesN<32>, InsightArenaError> {
+        market::get_metadata_hash(&env, market_id)
     }
 
     /// Return the total number of markets ever created (0 if none yet).
@@ -348,6 +359,73 @@ impl InsightArenaContract {
     /// Get the total count of currently open disputes.
     pub fn get_open_dispute_count(env: Env) -> u32 {
         dispute::get_open_dispute_count(&env)
+    }
+
+    // ── Weighted arbiter quorum voting ───────────────────────────────────────
+
+    /// Deposit a bond making `arbiter` eligible for panel assignment via
+    /// `assign_arbiters`. Cumulative; no withdrawal path in this iteration.
+    pub fn stake_as_arbiter(env: Env, arbiter: Address, amount: i128) -> Result<(), InsightArenaError> {
+        dispute::stake_as_arbiter(env, arbiter, amount)
+    }
+
+    /// Return `arbiter`'s current staked bond (stroops). `0` if never staked.
+    pub fn get_arbiter_stake(env: Env, arbiter: Address) -> i128 {
+        dispute::get_arbiter_stake(&env, &arbiter)
+    }
+
+    /// Assign a weighted arbiter panel to a pending dispute (admin-only).
+    /// Each address must have a positive arbiter stake; weight is snapshotted
+    /// at assignment time from stake and current reputation.
+    pub fn assign_arbiters(
+        env: Env,
+        admin: Address,
+        market_id: u64,
+        arbiters: Vec<Address>,
+    ) -> Result<(), InsightArenaError> {
+        dispute::assign_arbiters(env, admin, market_id, arbiters)
+    }
+
+    /// Cast a single vote as an assigned arbiter on a dispute.
+    pub fn cast_arbiter_vote(
+        env: Env,
+        arbiter: Address,
+        market_id: u64,
+        uphold: bool,
+    ) -> Result<(), InsightArenaError> {
+        dispute::cast_arbiter_vote(env, arbiter, market_id, uphold)
+    }
+
+    /// Read-only tally, quorum progress, and per-arbiter participation for a
+    /// dispute's arbiter panel.
+    pub fn get_arbiter_tally(
+        env: Env,
+        market_id: u64,
+    ) -> Result<crate::storage_types::ArbiterTally, InsightArenaError> {
+        dispute::get_arbiter_tally(env, market_id)
+    }
+
+    /// Finalize a dispute's arbiter panel (admin-only): requires the voting
+    /// window closed and quorum met, slashes non-voters and redistributes to
+    /// voters, then settles the dispute per the vote outcome.
+    pub fn finalize_arbiter_vote(
+        env: Env,
+        caller: Address,
+        market_id: u64,
+    ) -> Result<(), InsightArenaError> {
+        dispute::finalize_arbiter_vote(env, caller, market_id)
+    }
+
+    /// Update the arbiter quorum threshold, slash share, and voting period
+    /// (admin-only). Only affects panels assigned after this call.
+    pub fn set_arbiter_config(
+        env: Env,
+        admin: Address,
+        quorum_bps: u32,
+        slash_bps: u32,
+        voting_period_seconds: u64,
+    ) -> Result<(), InsightArenaError> {
+        config::set_arbiter_config(&env, admin, quorum_bps, slash_bps, voting_period_seconds)
     }
 
     // ── Prediction ────────────────────────────────────────────────────────────
@@ -566,6 +644,22 @@ impl InsightArenaContract {
         config::set_guardian(&env, admin, new_guardian)
     }
 
+    /// Update the governance proposal quorum threshold (bps of total registered
+    /// users that must participate for a proposal to pass). Caller must be the
+    /// current admin. For the timelocked governance path, use
+    /// `ProposalType::UpdateQuorum` via `create_proposal`.
+    ///
+    /// # Errors
+    /// - `Unauthorized` if `admin` is not the stored admin.
+    /// - `InvalidInput` if `new_quorum_bps > 10_000`.
+    pub fn set_governance_quorum_bps(
+        env: Env,
+        admin: Address,
+        new_quorum_bps: u32,
+    ) -> Result<(), InsightArenaError> {
+        config::set_governance_quorum_bps(&env, admin, new_quorum_bps)
+    }
+
     /// Return the total protocol fees accumulated in the treasury.
     pub fn get_treasury_balance(env: Env) -> i128 {
         escrow::get_treasury_balance(&env)
@@ -579,6 +673,95 @@ impl InsightArenaContract {
         amount: i128,
     ) -> Result<(), InsightArenaError> {
         escrow::transfer_fee(&env, &admin, &to, amount)
+    }
+
+    /// Update the protocol treasury address and the split (bps) of the
+    /// protocol's fee cut between the treasury and liquidity providers.
+    /// Caller must be the current admin. Reverts with `InvalidFee` if
+    /// `treasury_split_bps + lp_split_bps != 10_000`. See
+    /// `liquidity::swap_outcome` for where the split is applied and its
+    /// `(fee, split)` event emitted.
+    pub fn set_treasury_split(
+        env: Env,
+        admin: Address,
+        treasury_address: Address,
+        treasury_split_bps: u32,
+        lp_split_bps: u32,
+    ) -> Result<(), InsightArenaError> {
+        config::set_treasury_split(
+            &env,
+            admin,
+            treasury_address,
+            treasury_split_bps,
+            lp_split_bps,
+        )
+    }
+
+    // ── Slashed-funds insurance pool ─────────────────────────────────────────
+
+    /// Update the share (bps) of every slashed bond routed into the
+    /// insurance pool. Caller must be the current admin.
+    pub fn set_insurance_pool_share_bps(
+        env: Env,
+        admin: Address,
+        new_share_bps: u32,
+    ) -> Result<(), InsightArenaError> {
+        config::set_insurance_pool_share_bps(&env, admin, new_share_bps)
+    }
+
+    /// Draw `amount` from the insurance pool to `to`, to cover a documented
+    /// accounting/settlement shortfall. Caller must be the current admin.
+    pub fn draw_insurance_pool(
+        env: Env,
+        admin: Address,
+        to: Address,
+        amount: i128,
+    ) -> Result<(), InsightArenaError> {
+        escrow::draw_insurance_pool(env, admin, to, amount)
+    }
+
+    /// Return the current insurance pool balance (stroops).
+    pub fn get_insurance_pool_balance(env: Env) -> i128 {
+        escrow::get_insurance_pool_balance(&env)
+    }
+
+    /// Return the cumulative total ever paid out of the insurance pool.
+    pub fn get_insurance_pool_payouts_total(env: Env) -> i128 {
+        escrow::get_insurance_pool_payouts_total(&env)
+    }
+
+    // ── Per-outcome liquidity caps ────────────────────────────────────────────
+
+    /// Update the global maximum liquidity a single outcome's AMM reserve
+    /// may hold (`0` = unlimited). Caller must be the current admin.
+    pub fn set_max_liquidity_per_outcome(
+        env: Env,
+        admin: Address,
+        new_cap: i128,
+    ) -> Result<(), InsightArenaError> {
+        config::set_max_liquidity_per_outcome(&env, admin, new_cap)
+    }
+
+    /// Set a per-market override for the maximum liquidity a single
+    /// outcome's AMM reserve may hold (`0` clears the override). Caller
+    /// must be the current admin.
+    pub fn set_market_liquidity_cap(
+        env: Env,
+        admin: Address,
+        market_id: u64,
+        cap: i128,
+    ) -> Result<(), InsightArenaError> {
+        market::set_market_liquidity_cap(&env, admin, market_id, cap)
+    }
+
+    /// Return the remaining liquidity capacity for `outcome` in `market_id`,
+    /// or `None` if no cap applies (unlimited).
+    pub fn get_remaining_outcome_capacity(
+        env: Env,
+        market_id: u64,
+        outcome: Symbol,
+    ) -> Result<Option<i128>, InsightArenaError> {
+        liquidity::get_remaining_outcome_capacity(&env, market_id, outcome)
     }
 
     // ── Invite ────────────────────────────────────────────────────────────────
@@ -847,6 +1030,21 @@ impl InsightArenaContract {
         market_id: u64,
     ) -> Result<crate::storage_types::LPPosition, InsightArenaError> {
         liquidity::get_lp_position_public(&env, provider, market_id)
+    }
+
+    /// Return the current impermanent loss (bps, always `<= 0`) for an open LP
+    /// position, computed live against the pool's current reserves relative to
+    /// the position's immutable entry-price snapshot. See
+    /// `liquidity::calculate_impermanent_loss_bps` for the formula and
+    /// `liquidity::get_position_il` for how it differs from the
+    /// `LPPosition::cumulative_il_bps` field (which only reflects the last
+    /// withdrawal).
+    pub fn get_position_il(
+        env: Env,
+        provider: Address,
+        market_id: u64,
+    ) -> Result<i128, InsightArenaError> {
+        liquidity::get_position_il(&env, provider, market_id)
     }
 
     /// Get all active LP positions for a market.

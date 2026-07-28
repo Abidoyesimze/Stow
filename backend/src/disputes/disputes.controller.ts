@@ -20,6 +20,7 @@ import {
 import { DisputesService } from './disputes.service';
 import { CreateDisputeDto } from './dto/create-dispute.dto';
 import { AttachEvidenceDto } from './dto/attach-evidence.dto';
+import { CastVoteDto } from './dto/cast-vote.dto';
 import { Dispute, DisputeStatus } from './entities/dispute.entity';
 import { DisputeEvidence } from './entities/dispute-evidence.entity';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
@@ -186,6 +187,72 @@ export class DisputesController {
     @CurrentUser() user: User,
   ): Promise<DisputeEvidence> {
     return this.disputesService.attachEvidence(id, attachEvidenceDto, user);
+  }
+
+  @Post(':id/vote')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Cast a reputation-weighted vote on a pending dispute. The tier ' +
+      'finalizes automatically once weighted participation meets quorum.',
+  })
+  @ApiParam({ name: 'id', description: 'Dispute ID' })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: 'Vote recorded; dispute returned (resolved if quorum reached)',
+    type: Dispute,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: 'Voting is closed, or the voter has no wallet address',
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: 'This address has already voted in this dispute',
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Dispute not found',
+  })
+  async vote(
+    @Param('id') id: string,
+    @Body() castVoteDto: CastVoteDto,
+    @CurrentUser() user: User,
+  ): Promise<Dispute> {
+    return this.disputesService.castVote(id, castVoteDto, user);
+  }
+
+  @Post(':id/escalate')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({
+    summary:
+      'Escalate a resolved dispute tier to the next tier. Allowed only ' +
+      'after the tier resolves and within the escalation window.',
+  })
+  @ApiParam({ name: 'id', description: 'Dispute ID' })
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: 'Dispute escalated; the new higher-tier dispute is returned',
+    type: Dispute,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      'Dispute is not resolved, at max tier, or the escalation window passed',
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: 'This dispute has already been escalated',
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: 'Dispute not found',
+  })
+  async escalate(
+    @Param('id') id: string,
+    @CurrentUser() user: User,
+  ): Promise<Dispute> {
+    return this.disputesService.escalate(id, user);
   }
 
   @Get(':id/evidence')

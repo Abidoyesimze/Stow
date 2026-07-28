@@ -1,6 +1,6 @@
 use soroban_sdk::{symbol_short, Address, Env, Vec};
 
-use crate::config::{PERSISTENT_BUMP, PERSISTENT_THRESHOLD};
+use crate::config::{ReputationDecayMode, PERSISTENT_BUMP, PERSISTENT_THRESHOLD};
 use crate::errors::InsightArenaError;
 use crate::storage_types::{CreatorLeaderboardEntry, CreatorStats, DataKey};
 
@@ -16,6 +16,7 @@ fn load_stats(env: &Env, creator: &Address) -> CreatorStats {
             average_participant_count: 0,
             dispute_count: 0,
             reputation_score: 0,
+            last_updated: env.ledger().timestamp(),
         })
 }
 
@@ -51,6 +52,65 @@ pub fn calculate_creator_reputation(stats: &CreatorStats) -> u32 {
     score.min(1000)
 }
 
+// ── Time-decay ─────────────────────────────────────────────────────────────
+
+/// Apply time-decay to `score` based on ledgers elapsed since the record's
+/// `last_updated` and the governance-configured half-life/mode. Pure
+/// function — no storage access. Never returns a value above `score` or
+/// below 0.
+pub fn apply_reputation_decay(
+    score: u32,
+    elapsed_seconds: u64,
+    half_life_seconds: u32,
+    mode: ReputationDecayMode,
+) -> u32 {
+    if score == 0 || elapsed_seconds == 0 || half_life_seconds == 0 {
+        return score;
+    }
+    let half_life_seconds = half_life_seconds as u64;
+    match mode {
+        ReputationDecayMode::Linear => {
+            let full_life = half_life_seconds.saturating_mul(2);
+            if elapsed_seconds >= full_life {
+                0
+            } else {
+                let remaining = full_life - elapsed_seconds;
+                ((score as u64 * remaining) / full_life) as u32
+            }
+        }
+        ReputationDecayMode::Exponential => {
+            let halvings = (elapsed_seconds / half_life_seconds).min(31) as u32;
+            let remainder = elapsed_seconds % half_life_seconds;
+            let mut decayed = score >> halvings;
+            if remainder > 0 && decayed > 0 {
+                let next = decayed >> 1;
+                let diff = decayed - next;
+                let interpolated = ((diff as u64) * remainder / half_life_seconds) as u32;
+                decayed = decayed.saturating_sub(interpolated);
+            }
+            decayed
+        }
+    }
+}
+
+/// Recompute the live (undecayed) formula score, then decay it against the
+/// record's `last_updated` using the current governance config. Falls back
+/// to the raw score, undecayed, if the contract hasn't been initialized yet.
+fn decayed_score(env: &Env, stats: &CreatorStats) -> u32 {
+    let raw_score = calculate_creator_reputation(stats);
+    let cfg = match crate::config::get_config_readonly(env) {
+        Ok(c) => c,
+        Err(_) => return raw_score,
+    };
+    let elapsed = env.ledger().timestamp().saturating_sub(stats.last_updated);
+    apply_reputation_decay(
+        raw_score,
+        elapsed,
+        cfg.reputation_half_life_seconds,
+        cfg.reputation_decay_mode,
+    )
+}
+
 // ── Mutation hooks ────────────────────────────────────────────────────────────
 
 /// Called after a market is successfully created.
@@ -58,6 +118,7 @@ pub fn on_market_created(env: &Env, creator: &Address) {
     let mut stats = load_stats(env, creator);
     stats.markets_created = stats.markets_created.saturating_add(1);
     stats.reputation_score = calculate_creator_reputation(&stats);
+    stats.last_updated = env.ledger().timestamp();
     save_stats(env, creator, &stats);
 }
 
@@ -76,6 +137,7 @@ pub fn on_market_resolved(env: &Env, creator: &Address, participant_count: u32) 
     stats.markets_resolved = new_resolved;
     stats.average_participant_count = new_avg as u32;
     stats.reputation_score = calculate_creator_reputation(&stats);
+    stats.last_updated = env.ledger().timestamp();
     save_stats(env, creator, &stats);
 }
 
@@ -85,20 +147,23 @@ pub fn on_dispute_raised(env: &Env, creator: &Address) {
     let mut stats = load_stats(env, creator);
     stats.dispute_count = stats.dispute_count.saturating_add(1);
     stats.reputation_score = calculate_creator_reputation(&stats);
+    stats.last_updated = env.ledger().timestamp();
     save_stats(env, creator, &stats);
 }
 
 // ── View ──────────────────────────────────────────────────────────────────────
 
 pub fn get_creator_stats(env: Env, creator: Address) -> Result<CreatorStats, InsightArenaError> {
-    Ok(load_stats(&env, &creator))
+    let mut stats = load_stats(&env, &creator);
+    stats.reputation_score = decayed_score(&env, &stats);
+    Ok(stats)
 }
 
 /// Return `creator`'s current reputation score without mutating any storage.
 /// Reuses `load_stats` + `calculate_creator_reputation`; safe to call from
 /// gating logic (e.g. `market::create_market`) ahead of any writes.
 pub fn get_reputation_score(env: &Env, creator: &Address) -> u32 {
-    calculate_creator_reputation(&load_stats(env, creator))
+    decayed_score(env, &load_stats(env, creator))
 }
 
 // ── Trusted-creator allowlist (reputation-gate exemption) ────────────────────
@@ -228,12 +293,13 @@ pub fn get_top_creators(env: &Env, limit: u32) -> Vec<CreatorLeaderboardEntry> {
     let mut creators = Vec::new(env);
 
     for user in users.iter() {
-        if let Some(stats) = env
+        if let Some(mut stats) = env
             .storage()
             .persistent()
             .get::<DataKey, CreatorStats>(&DataKey::CreatorStats(user.clone()))
         {
             if stats.markets_created > 0 {
+                stats.reputation_score = decayed_score(env, &stats);
                 creators.push_back(CreatorLeaderboardEntry {
                     address: user,
                     stats,
@@ -290,6 +356,7 @@ pub fn reset_creator_stats(
     stats.average_participant_count = 0;
     stats.dispute_count = 0;
     stats.reputation_score = 0;
+    stats.last_updated = env.ledger().timestamp();
 
     save_stats(env, &creator, &stats);
     Ok(())

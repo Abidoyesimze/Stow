@@ -513,4 +513,96 @@ describe('LeaderboardService', () => {
       expect(result.data[1].rank_delta).toBe(3);
     });
   });
+
+  describe('getSnapshots', () => {
+    const mockSnapshotQbForDate = {
+      leftJoinAndSelect: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      addOrderBy: jest.fn().mockReturnThis(),
+      take: jest.fn().mockReturnThis(),
+      skip: jest.fn().mockReturnThis(),
+      getOne: jest.fn(),
+      getManyAndCount: jest.fn(),
+    };
+
+    beforeEach(() => {
+      mockSnapshotRepository.createQueryBuilder.mockReturnValue(
+        mockSnapshotQbForDate,
+      );
+      mockSnapshotQbForDate.leftJoinAndSelect.mockReturnThis();
+      mockSnapshotQbForDate.where.mockReturnThis();
+      mockSnapshotQbForDate.andWhere.mockReturnThis();
+      mockSnapshotQbForDate.orderBy.mockReturnThis();
+      mockSnapshotQbForDate.take.mockReturnThis();
+      mockSnapshotQbForDate.skip.mockReturnThis();
+      mockSnapshotQbForDate.getOne.mockResolvedValue(null);
+      mockSnapshotQbForDate.getManyAndCount.mockResolvedValue([[], 0]);
+    });
+
+    it('should return a message when no snapshots exist before the date', async () => {
+      mockSnapshotQbForDate.getOne.mockResolvedValue(null);
+
+      const result = await service.getSnapshots({ date: '2026-01-01' });
+
+      expect(result.data).toEqual([]);
+      expect(result.message).toContain('No snapshots found');
+      expect(result.total).toBe(0);
+    });
+
+    it('should return rankings from the nearest snapshot', async () => {
+      const snapshotDate = new Date('2026-07-01T12:00:00Z');
+      mockSnapshotQbForDate.getOne.mockResolvedValue({
+        captured_at: snapshotDate,
+      });
+      mockSnapshotQbForDate.getManyAndCount.mockResolvedValue([
+        [
+          {
+            rank: 1,
+            user_id: 'user-uuid-1',
+            user: { username: 'testuser', stellar_address: 'GABC...' },
+            score: 100,
+            captured_at: snapshotDate,
+          },
+        ],
+        1,
+      ]);
+
+      const result = await service.getSnapshots({ date: '2026-07-15' });
+
+      expect(result.snapshot_date).toEqual(snapshotDate);
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0].rank).toBe(1);
+      expect(result.data[0].username).toBe('testuser');
+    });
+
+    it('should filter by season_id when provided', async () => {
+      const snapshotDate = new Date('2026-07-01T12:00:00Z');
+      mockSnapshotQbForDate.getOne.mockResolvedValue({
+        captured_at: snapshotDate,
+      });
+      mockSnapshotQbForDate.getManyAndCount.mockResolvedValue([[], 0]);
+
+      await service.getSnapshots({ date: '2026-07-15', season_id: 'season-1' });
+
+      // First query (find nearest snapshot) should filter by season
+      expect(mockSnapshotQbForDate.andWhere).toHaveBeenCalledWith(
+        'snap.season_id = :season_id',
+        { season_id: 'season-1' },
+      );
+    });
+
+    it('should cap limit at 100', async () => {
+      const snapshotDate = new Date('2026-07-01T12:00:00Z');
+      mockSnapshotQbForDate.getOne.mockResolvedValue({
+        captured_at: snapshotDate,
+      });
+      mockSnapshotQbForDate.getManyAndCount.mockResolvedValue([[], 0]);
+
+      await service.getSnapshots({ date: '2026-07-15', limit: 999 });
+
+      expect(mockSnapshotQbForDate.take).toHaveBeenCalledWith(100);
+    });
+  });
 });

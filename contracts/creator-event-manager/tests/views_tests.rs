@@ -1,6 +1,8 @@
 /// Tests for aggregate event statistics views.
 use creator_event_manager::storage;
-use creator_event_manager::storage_types::{FINALIZATION_BOND_STROOPS, Match, MatchResult, Prediction};
+use creator_event_manager::storage_types::{
+    Match, MatchResult, Prediction, FINALIZATION_BOND_STROOPS,
+};
 use creator_event_manager::CreatorEventManagerContractClient;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::testutils::Ledger as _;
@@ -60,6 +62,7 @@ fn add_match(env: &Env, event_id: u64, submitted: bool) -> u64 {
         String::from_str(env, "Team B"),
         env.ledger().timestamp() + 10_000,
         1u32,
+        0,
     );
 
     if submitted {
@@ -582,13 +585,14 @@ fn test_get_platform_statistics_comprehensive_counter_test() {
     assert_eq!(after_events.total_fees_collected, FEE * 2);
 
     // Add 2 matches to each event (4 total); assert total_matches == 4.
-    let (match_id_1_1, match_id_1_2, match_id_2_1, match_id_2_2) = env.as_contract(&contract_id, || {
-        let m1_1 = add_match(&env, event_id_1, false);
-        let m1_2 = add_match(&env, event_id_1, false);
-        let m2_1 = add_match(&env, event_id_2, false);
-        let m2_2 = add_match(&env, event_id_2, false);
-        (m1_1, m1_2, m2_1, m2_2)
-    });
+    let (match_id_1_1, match_id_1_2, match_id_2_1, match_id_2_2) =
+        env.as_contract(&contract_id, || {
+            let m1_1 = add_match(&env, event_id_1, false);
+            let m1_2 = add_match(&env, event_id_1, false);
+            let m2_1 = add_match(&env, event_id_2, false);
+            let m2_2 = add_match(&env, event_id_2, false);
+            (m1_1, m1_2, m2_1, m2_2)
+        });
 
     let after_matches = client.get_platform_statistics();
     assert_eq!(after_matches.total_matches, 4);
@@ -929,6 +933,7 @@ fn test_get_event_prize_pool_post_finalize_is_readable() {
             String::from_str(&env, "Team B"),
             env.ledger().timestamp() + 100,
             1u32,
+            0,
         );
         storage::set_match(&env, mid, &m);
         storage::add_event_match(&env, event_id, mid);

@@ -177,8 +177,12 @@ pub fn submit_prediction(
         return Err(PredictionError::NotJoined);
     }
 
+    // Predictions close at the match's stored `prediction_lock_time`
+    // (`match_time` minus the configured lock lead-time at match creation),
+    // not at `match_time` itself — this blocks late in-play betting on
+    // near-certain outcomes right up to kickoff.
     let now = env.ledger().timestamp();
-    if now >= match_record.match_time {
+    if now >= match_record.prediction_lock_time {
         return Err(PredictionError::MatchStarted);
     }
 

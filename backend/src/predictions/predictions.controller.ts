@@ -20,6 +20,7 @@ import {
 } from '@nestjs/swagger';
 import { PredictionsService } from './predictions.service';
 import { SubmitPredictionDto } from './dto/submit-prediction.dto';
+import { SubmitPredictionResponseDto } from './dto/submit-prediction-response.dto';
 import { UpdatePredictionNoteDto } from './dto/update-prediction-note.dto';
 import {
   ListMyPredictionsDto,
@@ -45,17 +46,17 @@ import {
 @ApiBearerAuth()
 @Controller('predictions')
 export class PredictionsController {
-  constructor(private readonly predictionsService: PredictionsService) {}
+  constructor(private readonly predictionsService: PredictionsService) { }
 
   @Post()
   @UseGuards(BanGuard)
   @Idempotent()
   @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({ summary: 'Submit a prediction on a market' })
+  @ApiOperation({ summary: 'Submit a prediction on a market with optional slippage protection' })
   @ApiResponse({
     status: 201,
-    description: 'Prediction submitted',
-    type: Prediction,
+    description: 'Prediction submitted with realized price and shares',
+    type: SubmitPredictionResponseDto,
   })
   @ApiResponse({
     status: 400,
@@ -65,7 +66,7 @@ export class PredictionsController {
   @ApiResponse({
     status: 409,
     description:
-      'Duplicate prediction on this market, or a request with the same Idempotency-Key is already in progress',
+      'Duplicate prediction on this market, slippage exceeded, or request with the same Idempotency-Key is already in progress',
   })
   @ApiResponse({
     status: 422,
@@ -74,7 +75,7 @@ export class PredictionsController {
   async submit(
     @Body() dto: SubmitPredictionDto,
     @CurrentUser() user: User,
-  ): Promise<Prediction> {
+  ): Promise<SubmitPredictionResponseDto> {
     return this.predictionsService.submit(dto, user);
   }
 

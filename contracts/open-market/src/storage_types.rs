@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Env, Map, String, Symbol, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, Env, Map, String, Symbol, Vec};
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -149,10 +149,28 @@ pub struct Dispute {
     pub appeal_tier: u32,
     pub appealer: Option<Address>,
     pub appeal_bond: i128,
+    /// Arbiters assigned to weigh in on this dispute via
+    /// `dispute::assign_arbiters`, with per-arbiter weight snapshotted at
+    /// assignment time. Empty until a panel is assigned; the dispute can
+    /// still be settled directly by admin via `resolve_dispute` if no panel
+    /// is ever assigned.
+    pub arbiters: Vec<ArbiterAssignment>,
+    /// Fraction (bps, of total assigned weight) of weight that must have
+    /// voted before `dispute::finalize_arbiter_vote` will settle the panel.
+    /// Snapshotted from `Config::arbiter_quorum_bps` when the panel is
+    /// assigned, so a later config change never retroactively affects an
+    /// in-flight vote.
+    pub quorum_bps: u32,
+    /// Ledger timestamp after which `dispute::finalize_arbiter_vote`
+    /// becomes callable. Set when the panel is assigned.
+    pub voting_deadline: u64,
+    /// True once `dispute::finalize_arbiter_vote` has settled this
+    /// dispute's arbiter panel.
+    pub arbiters_finalized: bool,
 }
 
 impl Dispute {
-    pub fn new(disputer: Address, bond: i128, filed_at: u64) -> Self {
+    pub fn new(env: &Env, disputer: Address, bond: i128, filed_at: u64) -> Self {
         Self {
             disputer,
             bond,
@@ -160,8 +178,47 @@ impl Dispute {
             appeal_tier: 0,
             appealer: None,
             appeal_bond: 0,
+            arbiters: Vec::new(env),
+            quorum_bps: 0,
+            voting_deadline: 0,
+            arbiters_finalized: false,
         }
     }
+}
+
+/// A single arbiter's assignment to a dispute's panel. `weight` is a
+/// snapshot (stake at assignment time scaled by a reputation multiplier)
+/// and never changes afterward, even if the arbiter's live stake or
+/// reputation later changes. See `dispute::assign_arbiters`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArbiterAssignment {
+    pub arbiter: Address,
+    pub weight: i128,
+    pub voted: bool,
+    /// Meaningful only when `voted` is true. `true` = uphold the dispute
+    /// (the disputer was right, market gets reopened); `false` = reject it
+    /// (the original resolution stands).
+    pub vote_uphold: bool,
+}
+
+/// Read-only tally for a dispute's arbiter panel, returned by
+/// `dispute::get_arbiter_tally`. Recomputed on every call from the stored
+/// `Dispute.arbiters` list rather than cached, so it always reflects the
+/// latest votes.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArbiterTally {
+    pub market_id: u64,
+    pub total_weight: i128,
+    pub voted_weight: i128,
+    pub uphold_weight: i128,
+    pub reject_weight: i128,
+    pub quorum_bps: u32,
+    pub quorum_met: bool,
+    pub voting_deadline: u64,
+    pub finalized: bool,
+    pub arbiters: Vec<ArbiterAssignment>,
 }
 
 #[contracttype]
@@ -190,6 +247,7 @@ pub struct CreatorStats {
     pub average_participant_count: u32,
     pub dispute_count: u32,
     pub reputation_score: u32,
+    pub last_updated: u64, // ledger timestamp (unix seconds) at last mutating call
 }
 
 #[contracttype]
@@ -308,6 +366,15 @@ pub struct Market {
     pub participant_count: u32,
     /// Dispute window duration in seconds after resolution.
     pub dispute_window: u64,
+    /// Per-market override (stroops) for the maximum liquidity a single
+    /// outcome's AMM reserve may hold. `0` means "inherit the global
+    /// `Config::max_liquidity_per_outcome` cap". Set via
+    /// `market::set_market_liquidity_cap`; takes precedence over the global
+    /// cap whenever non-zero. See `liquidity::add_liquidity`.
+    pub outcome_liquidity_cap: i128,
+    /// SHA-256 content hash of off-chain market metadata. Set once at creation
+    /// and never mutated by any subsequent market operation.
+    pub metadata_hash: BytesN<32>,
 }
 
 impl Market {
@@ -328,6 +395,7 @@ impl Market {
         min_stake: i128,
         max_stake: i128,
         dispute_window: u64,
+        metadata_hash: BytesN<32>,
     ) -> Self {
         Self {
             market_id,
@@ -351,6 +419,8 @@ impl Market {
             max_stake,
             participant_count: 0,
             dispute_window,
+            outcome_liquidity_cap: 0,
+            metadata_hash,
         }
     }
 }
@@ -401,15 +471,37 @@ pub struct LPPosition {
     pub initial_deposit: i128,
     pub fees_earned: i128,
     pub created_at: u64,
+    /// Reserve of the pool's first IL-tracked outcome (`Market::outcome_options[0]`)
+    /// at the moment this position was opened. An immutable entry-price snapshot:
+    /// set once in `LPPosition::new` / `liquidity::add_liquidity` and never
+    /// mutated afterward, even when the same provider tops up their position with
+    /// additional deposits. Used as the impermanent-loss baseline — see
+    /// `liquidity::calculate_impermanent_loss_bps`.
+    pub entry_reserve_a: i128,
+    /// Reserve of the pool's second IL-tracked outcome (`Market::outcome_options[1]`)
+    /// at the moment this position was opened. Immutable; see `entry_reserve_a`.
+    /// For single-outcome markets this mirrors `entry_reserve_a`, which yields a
+    /// price ratio of 1 (i.e. impermanent loss is always zero in that case).
+    pub entry_reserve_b: i128,
+    /// Impermanent loss, in basis points (always `<= 0`), computed relative to
+    /// `entry_reserve_a` / `entry_reserve_b` the last time this position was
+    /// withdrawn from via `liquidity::remove_liquidity`. Zero until the first
+    /// withdrawal. For the always-current figure, use `liquidity::get_position_il`,
+    /// which recomputes live against the pool's current reserves instead of
+    /// relying on this cached, withdrawal-time value.
+    pub cumulative_il_bps: i128,
 }
 
 impl LPPosition {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider: Address,
         market_id: u64,
         lp_tokens: i128,
         initial_deposit: i128,
         created_at: u64,
+        entry_reserve_a: i128,
+        entry_reserve_b: i128,
     ) -> Self {
         Self {
             provider,
@@ -418,6 +510,9 @@ impl LPPosition {
             initial_deposit,
             fees_earned: 0,
             created_at,
+            entry_reserve_a,
+            entry_reserve_b,
+            cumulative_il_bps: 0,
         }
     }
 }
