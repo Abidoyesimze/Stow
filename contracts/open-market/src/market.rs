@@ -33,7 +33,7 @@ pub struct CreateMarketParams {
 
 // ── TTL helpers ───────────────────────────────────────────────────────────────
 
-fn bump_market(env: &Env, market_id: u64) {
+pub(crate) fn bump_market(env: &Env, market_id: u64) {
     config::extend_market_ttl(env, market_id);
 }
 

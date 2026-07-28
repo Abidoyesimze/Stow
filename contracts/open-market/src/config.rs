@@ -8,7 +8,7 @@ pub enum ReputationDecayMode {
 }
 
 use crate::errors::InsightArenaError;
-use crate::storage_types::DataKey;
+use crate::storage_types::{DataKey, VolumeFeeConfig};
 
 // ── TTL constants ─────────────────────────────────────────────────────────────
 // Assuming ~5 s per ledger:
@@ -244,6 +244,11 @@ pub struct Config {
     /// via `ProposalType::UpdateQuorum` (timelocked governance path). Defaults
     /// to `1000` (10%) at initialization.
     pub governance_quorum_bps: u32,
+/// Volume-based fee tier schedule. Governs the swap fee charged by every
+    /// market's AMM pool based on its cumulative trading volume.
+    /// Governance-configurable via `set_volume_fee_config` (admin, immediate).
+    /// Defaults to [`VolumeFeeConfig::default_config`] at initialization.
+    pub volume_fee_config: VolumeFeeConfig,
     /// Stake (stroops) an oracle must lock via
     /// `dispute::submit_resolution_with_stake` when submitting a market
     /// resolution. Held through the market's dispute window; slashed if a
@@ -399,6 +404,7 @@ pub fn initialize(
         arbiter_slash_bps: 1000,  // 10% of stake slashed for a missed vote
         arbiter_voting_period_seconds: 172_800, // ~2 days
         governance_quorum_bps: 1000, // 10% of registered users must participate
+volume_fee_config: VolumeFeeConfig::default_config(env),
         oracle_stake_amount: 100_000_000, // 10 XLM expressed in stroops
         oracle_reward_bps: 500, // 5% of stake paid as a reward when resolution stands
         vesting_tranche_count: 4,
@@ -1102,6 +1108,83 @@ fn emit_governance_quorum_updated(env: &Env, old_quorum_bps: u32, new_quorum_bps
         (symbol_short!("cfg"), symbol_short!("qrm_upd")),
         (old_quorum_bps, new_quorum_bps),
     );
+}
+
+// ── Volume Fee Config ──────────────────────────────────────────────────────────
+
+fn validate_volume_fee_config(config: &VolumeFeeConfig) -> Result<(), InsightArenaError> {
+    if config.tiers.is_empty() {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    // Tier 0 must have threshold 0.
+    let first = config.tiers.get(0).unwrap();
+    if first.volume_threshold != 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    // Thresholds must be monotonically increasing.
+    let mut prev_threshold = first.volume_threshold;
+    for i in 1..config.tiers.len() {
+        let entry = config.tiers.get(i).unwrap();
+        if entry.volume_threshold <= prev_threshold {
+            return Err(InsightArenaError::InvalidInput);
+        }
+        prev_threshold = entry.volume_threshold;
+    }
+
+    Ok(())
+}
+
+/// Update the volume-based fee tier schedule. Caller must be the stored admin.
+///
+/// The new schedule must have at least one tier, with tier 0's threshold at `0`,
+/// and monotonically increasing thresholds thereafter. All fee rates must be
+/// ≤ 10_000 bps.
+pub fn set_volume_fee_config(
+    env: &Env,
+    admin: Address,
+    new_config: VolumeFeeConfig,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    validate_volume_fee_config(&new_config)?;
+
+    let old_config = config.volume_fee_config.clone();
+    config.volume_fee_config = new_config;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_volume_fee_config_updated(env, &old_config, &config.volume_fee_config);
+
+    Ok(())
+}
+
+fn emit_volume_fee_config_updated(
+    env: &Env,
+    old_config: &VolumeFeeConfig,
+    new_config: &VolumeFeeConfig,
+) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("vfc_upd")),
+        (old_config.clone(), new_config.clone()),
+    );
+}
+
+/// Return the current volume-based fee tier schedule. Extends the Config TTL.
+pub fn get_volume_fee_config(env: &Env) -> VolumeFeeConfig {
+    match load_config(env) {
+        Ok(config) => {
+            bump_config(env);
+            config.volume_fee_config
+        }
+        Err(_) => VolumeFeeConfig::default_config(env),
+    }
 }
 
 fn validate_oracle_stake_config(stake_amount: i128, reward_bps: u32) -> Result<(), InsightArenaError> {

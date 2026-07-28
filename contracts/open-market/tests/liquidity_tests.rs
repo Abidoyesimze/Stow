@@ -1917,7 +1917,7 @@ fn test_update_fee_tier_config_rejects_invalid_protocol_share() {
 // ── Dynamic Fee: End-to-End Swap Behaviour ────────────────────────────────────
 
 #[test]
-fn test_market_fee_info_defaults_to_calm_before_any_swap() {
+fn test_market_fee_info_defaults_to_volume_tier_zero_before_any_swap() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin, _oracle, xlm_token) = deploy_with_token(&env);
@@ -1932,13 +1932,17 @@ fn test_market_fee_info_defaults_to_calm_before_any_swap() {
     client.add_liquidity(&provider, &market_id, &liquidity);
 
     let info = client.get_market_fee_info(&market_id);
+    // Volatility tier is informational; Calm with no samples.
     assert_eq!(info.tier, FeeTier::Calm);
     assert_eq!(info.volatility_ema_bps, 0);
-    assert_eq!(info.effective_fee_bps, FeeTierConfig::default_config().calm_fee_bps);
+    // effective_fee_bps is the volume-based tier 0 fee (30 bps default).
+    let default_vol_cfg = FeeTierConfig::default_config();
+    assert_eq!(info.volume_tier_index, 0);
+    assert_eq!(info.effective_fee_bps, 30);
 }
 
 #[test]
-fn test_price_moving_swap_burst_raises_fee_tier() {
+fn test_volume_accumulation_lowers_fee_tier() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin, _oracle, xlm_token) = deploy_with_token(&env);
@@ -1949,70 +1953,53 @@ fn test_price_moving_swap_burst_raises_fee_tier() {
     let sa = StellarAssetClient::new(&env, &xlm_token);
     let token = TokenClient::new(&env, &xlm_token);
 
-    // Balanced pool: 500_000 / 500_000 reserves.
     let liquidity = 1_000_000_i128;
     sa.mint(&provider, &liquidity);
     token.approve(&provider, &client.address, &liquidity, &9999);
     client.add_liquidity(&provider, &market_id, &liquidity);
 
-    let swap_amount = 500_000_i128;
-    sa.mint(&trader, &(swap_amount * 5));
-    token.approve(&trader, &client.address, &(swap_amount * 5), &9999);
+    // Start at volume tier 0 (30 bps default).
+    let info0 = client.get_market_fee_info(&market_id);
+    assert_eq!(info0.volume_tier_index, 0);
+    assert_eq!(info0.effective_fee_bps, 30);
 
-    // Swap 1: pool has no prior sample, so the EMA stays at 0 (still calm).
+    // Push volume past the 10_000 XLM threshold (100_000_000_000 stroops).
+    let tier1_volume = 100_000_000_000_i128;
+    sa.mint(&trader, &tier1_volume);
+    token.approve(&trader, &client.address, &tier1_volume, &9999);
     client.swap_outcome(
         &trader,
         &market_id,
         &symbol_short!("yes"),
         &symbol_short!("no"),
-        &swap_amount,
+        &tier1_volume,
         &0_i128,
     );
-    assert_eq!(client.get_market_fee_info(&market_id).tier, FeeTier::Calm);
 
-    // Swap 2: a large same-direction trade moves the price sharply -> tier rises to normal.
+    let info1 = client.get_market_fee_info(&market_id);
+    assert_eq!(info1.volume_tier_index, 1);
+    assert_eq!(info1.effective_fee_bps, 25);
+
+    // Push volume past the 100_000 XLM threshold.
+    let tier2_volume = 900_000_000_000_i128; // cumulative = 1_000_000_000_000
+    sa.mint(&trader, &tier2_volume);
+    token.approve(&trader, &client.address, &tier2_volume, &9999);
     client.swap_outcome(
         &trader,
         &market_id,
         &symbol_short!("yes"),
         &symbol_short!("no"),
-        &swap_amount,
+        &tier2_volume,
         &0_i128,
     );
-    assert_eq!(client.get_market_fee_info(&market_id).tier, FeeTier::Normal);
 
-    // Swap 3: another large same-direction trade -> tier rises to volatile.
-    client.swap_outcome(
-        &trader,
-        &market_id,
-        &symbol_short!("yes"),
-        &symbol_short!("no"),
-        &swap_amount,
-        &0_i128,
-    );
-    let info_after_3 = client.get_market_fee_info(&market_id);
-    assert_eq!(info_after_3.tier, FeeTier::Volatile);
-    assert_eq!(
-        info_after_3.effective_fee_bps,
-        FeeTierConfig::default_config().volatile_fee_bps
-    );
-
-    // Two more bursts stay in the volatile tier.
-    for _ in 0..2 {
-        client.swap_outcome(
-            &trader,
-            &market_id,
-            &symbol_short!("yes"),
-            &symbol_short!("no"),
-            &swap_amount,
-            &0_i128,
-        );
-    }
-    assert_eq!(client.get_market_fee_info(&market_id).tier, FeeTier::Volatile);
+    let info2 = client.get_market_fee_info(&market_id);
+    assert_eq!(info2.volume_tier_index, 2);
+    assert_eq!(info2.effective_fee_bps, 20);
 }
 
 #[test]
-fn test_quiet_period_lowers_fee_tier_back_to_calm() {
+fn test_volatility_tier_still_tracked_informational() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin, _oracle, xlm_token) = deploy_with_token(&env);
@@ -2067,10 +2054,9 @@ fn test_quiet_period_lowers_fee_tier_back_to_calm() {
 
     let info = client.get_market_fee_info(&market_id);
     assert_eq!(info.tier, FeeTier::Calm);
-    assert_eq!(
-        info.effective_fee_bps,
-        FeeTierConfig::default_config().calm_fee_bps
-    );
+    // effective_fee_bps is volume-based, not volatility-based.
+    // It stays at the volume tier 0 rate since cumulative volume is still low.
+    assert_eq!(info.effective_fee_bps, 30);
 }
 
 #[test]
