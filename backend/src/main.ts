@@ -11,7 +11,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  const app = await NestFactory.create(AppModule, {
+    bufferLogs: true,
+    rawBody: true,
+  });
   app.useLogger(app.get(Logger));
 
   // Enable URI-based versioning
@@ -36,6 +39,16 @@ async function bootstrap() {
         description: 'Oracle API key',
       },
       'api-key',
+    )
+    .addApiKey(
+      {
+        type: 'apiKey',
+        name: 'x-api-key',
+        in: 'header',
+        description:
+          'Public API key. Keys must include the public:read scope and use the dedicated public rate-limit tier.',
+      },
+      'public-api-key',
     )
     .build();
   const document = SwaggerModule.createDocument(app, config);

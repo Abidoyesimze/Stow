@@ -23,11 +23,12 @@ import { NotificationGeneratorService } from '../notifications/notification-gene
 import { BroadcasterService } from '../websocket/broadcaster.service';
 import { ReconciliationService } from './reconciliation.service';
 
-const CHECKPOINT_LEDGER_KEY = 'indexer:last_processed_ledger';
+export const CHECKPOINT_LEDGER_KEY = 'indexer:last_processed_ledger';
 const CHECKPOINT_LEDGER_KEY_LATEST = 'indexer:latest_contract_ledger';
 const MAX_RETRIES = 5;
 const DLQ_THRESHOLD = 5;
 const BATCH_SIZE = 100;
+const BACKFILL_BATCH_SIZE = 50;
 const DEFAULT_CREATOR_EVENT_CATEGORY = 'general';
 // Matches MAX_EVENT_DURATION_SECONDS in contracts/creator-event-manager.
 const DEFAULT_EVENT_DURATION_SECONDS = 7_776_000;
@@ -1342,6 +1343,93 @@ export class IndexerService implements OnModuleInit {
     });
 
     return result.affected ?? 0;
+  }
+
+  /**
+   * Backfill events over a historical ledger range.
+   * Reuses existing event handlers idempotently.
+   * Already-indexed events are skipped.
+   */
+  async backfillEvents(
+    fromLedger: number,
+    toLedger: number,
+  ): Promise<{
+    total_fetched: number;
+    newly_processed: number;
+    already_indexed: number;
+    errors: number;
+    from_ledger: number;
+    to_ledger: number;
+  }> {
+    this.logger.log(`Backfill started: ledgers ${fromLedger} to ${toLedger}`);
+
+    let totalFetched = 0;
+    let newlyProcessed = 0;
+    let alreadyIndexed = 0;
+    let errors = 0;
+    let currentLedger = fromLedger;
+
+    while (currentLedger <= toLedger) {
+      const batchEnd = Math.min(currentLedger + BACKFILL_BATCH_SIZE, toLedger);
+
+      try {
+        const { events } = await this.fetchEventsFromContract(currentLedger);
+
+        if (events.length === 0) {
+          currentLedger = batchEnd + 1;
+          continue;
+        }
+
+        const sorted = [...events].sort(
+          (a, b) => a.ledger - b.ledger || a.log_index - b.log_index,
+        );
+
+        for (const rawEvent of sorted) {
+          if (rawEvent.ledger > toLedger) break;
+
+          totalFetched++;
+
+          // Check if already indexed
+          const existing = await this.contractEventRepository.findOne({
+            where: { ledger: rawEvent.ledger, log_index: rawEvent.log_index },
+          });
+
+          if (existing && existing.status === ContractEventStatus.PROCESSED) {
+            alreadyIndexed++;
+            continue;
+          }
+
+          try {
+            await this.storeAndProcessEvent(rawEvent);
+            newlyProcessed++;
+          } catch (err) {
+            errors++;
+            this.logger.error(
+              `Backfill error at ledger ${rawEvent.ledger}: ${err instanceof Error ? err.message : 'Unknown'}`,
+            );
+          }
+        }
+      } catch (err) {
+        this.logger.error(
+          `Backfill batch failed for ledgers ${currentLedger}-${batchEnd}: ${err instanceof Error ? err.message : 'Unknown'}`,
+        );
+        errors++;
+      }
+
+      currentLedger = batchEnd + 1;
+    }
+
+    const summary = {
+      total_fetched: totalFetched,
+      newly_processed: newlyProcessed,
+      already_indexed: alreadyIndexed,
+      errors,
+      from_ledger: fromLedger,
+      to_ledger: toLedger,
+    };
+
+    this.logger.log(`Backfill completed: ${JSON.stringify(summary)}`);
+    return summary;
   }
 
   private async getLastProcessedLedger(): Promise<number> {

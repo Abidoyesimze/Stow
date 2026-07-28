@@ -22,6 +22,7 @@ import {
   CategoryStatsDto,
   CategoryAnalyticsResponseDto,
 } from './dto/category-analytics.dto';
+import { CohortDataDto, RetentionResponseDto } from './dto/retention.dto';
 import { PlatformStatsDto } from './dto/platform-stats.dto';
 
 /** Tier thresholds: Bronze < 200, Silver < 500, Gold < 1000, Platinum ≥ 1000 */
@@ -55,6 +56,32 @@ export class AnalyticsService {
     @InjectRepository(MarketHistory)
     private readonly marketHistoryRepository: Repository<MarketHistory>,
   ) {}
+  private readonly activeSessions = new Map<string, number>();
+  private readonly IDLE_WINDOW_MS = parseInt(
+    process.env.ACTIVE_USERS_IDLE_WINDOW_MS || '300000',
+    10,
+  );
+
+  trackActiveSession(sessionId: string) {
+    this.activeSessions.set(sessionId, Date.now());
+  }
+
+  removeActiveSession(sessionId: string) {
+    this.activeSessions.delete(sessionId);
+  }
+
+  getActiveUsersCount(): number {
+    const now = Date.now();
+    let count = 0;
+    for (const [sessionId, lastActive] of this.activeSessions.entries()) {
+      if (now - lastActive > this.IDLE_WINDOW_MS) {
+        this.activeSessions.delete(sessionId);
+      } else {
+        count++;
+      }
+    }
+    return count;
+  }
 
   async logActivity(
     userId: string,
@@ -284,7 +311,6 @@ export class AnalyticsService {
     address: string,
     days: number = 30,
   ): Promise<UserTrendsDto> {
-    // Validate days parameter (default 30, max 90)
     const validDays = Math.min(Math.max(days || 30, 1), 90);
 
     const user = await this.usersRepository.findOne({
@@ -301,13 +327,11 @@ export class AnalyticsService {
     const predictions = await this.predictionsRepository.find({
       where: {
         user: { id: user.id },
-        submitted_at: validDays < 90 ? undefined : undefined,
       },
       relations: ['market'],
       order: { submitted_at: 'ASC' },
     });
 
-    // Filter predictions by date range
     const filteredPredictions = predictions.filter(
       (p) => p.submitted_at >= cutoffDate,
     );
@@ -511,6 +535,170 @@ export class AnalyticsService {
     return activeRatio > 0.5;
   }
 
+  /**
+   * Get retention analysis by cohort
+   */
+  async getRetention(
+    period: 'day' | 'week' | 'month' = 'week',
+    periods: number = 8,
+  ): Promise<RetentionResponseDto> {
+    const maxPeriods = Math.min(Math.max(periods || 8, 1), 52);
+
+    const users = await this.usersRepository.find({
+      order: { created_at: 'ASC' },
+    });
+
+    // Get user activity based on prediction submissions and activity logs
+    const userActivities = new Map<string, Set<string>>();
+    const userSignupDates = new Map<string, Date>();
+
+    for (const user of users) {
+      userActivities.set(user.id, new Set());
+      userSignupDates.set(user.id, user.created_at);
+    }
+
+    // Gather prediction submission dates for activity
+    const predictions = await this.predictionsRepository.find({
+      relations: ['user'],
+    });
+    for (const p of predictions) {
+      const activities = userActivities.get(p.user.id);
+      if (activities) {
+        activities.add(p.submitted_at.toISOString().split('T')[0]);
+      }
+    }
+
+    // Gather activity log dates
+    const activityLogs = await this.activityLogsRepository.find({
+      select: ['userId', 'timestamp'],
+    });
+    for (const log of activityLogs) {
+      const activities = userActivities.get(log.userId);
+      if (activities) {
+        activities.add(log.timestamp.toISOString().split('T')[0]);
+      }
+    }
+
+    // Build cohort buckets
+    const cohortMap = new Map<string, string[]>();
+
+    for (const [userId, signupDate] of userSignupDates) {
+      const cohortKey = this.getCohortKey(signupDate, period);
+      if (!cohortMap.has(cohortKey)) {
+        cohortMap.set(cohortKey, []);
+      }
+      cohortMap.get(cohortKey)!.push(userId);
+    }
+
+    const now = new Date();
+    const cohortKeys = Array.from(cohortMap.keys()).sort();
+    const recentCohorts = cohortKeys.slice(-maxPeriods);
+
+    const cohorts: CohortDataDto[] = recentCohorts.map((cohortKey) => {
+      const cohortUserIds = cohortMap.get(cohortKey) || [];
+      const totalUsers = cohortUserIds.length;
+
+      const retentionRates: Record<string, number> = {};
+      const userCounts: Record<string, number> = {};
+
+      for (let offset = 0; offset < maxPeriods; offset++) {
+        const periodStart = this.addPeriod(
+          this.parseCohortDate(cohortKey, period),
+          offset,
+          period,
+        );
+        const periodEnd = this.addPeriod(periodStart, 1, period);
+
+        if (periodStart > now) break;
+
+        let activeInPeriod = 0;
+        for (const userId of cohortUserIds) {
+          const activities = userActivities.get(userId);
+          if (activities) {
+            for (const dateStr of activities) {
+              const activityDate = new Date(dateStr);
+              if (activityDate >= periodStart && activityDate < periodEnd) {
+                activeInPeriod++;
+                break;
+              }
+            }
+          }
+        }
+
+        userCounts[String(offset)] = activeInPeriod;
+        retentionRates[String(offset)] =
+          totalUsers > 0
+            ? Math.round((activeInPeriod / totalUsers) * 10000) / 100
+            : 0;
+      }
+
+      return {
+        cohort: cohortKey,
+        total_users: totalUsers,
+        retention_rates: retentionRates,
+        user_counts: userCounts,
+      };
+    });
+
+    return {
+      period,
+      total_users: users.length,
+      cohorts,
+      generated_at: new Date(),
+    };
+  }
+
+  private getCohortKey(date: Date, period: 'day' | 'week' | 'month'): string {
+    switch (period) {
+      case 'day':
+        return date.toISOString().split('T')[0];
+      case 'week': {
+        const d = new Date(date);
+        const dayOfWeek = d.getDay();
+        const diff = d.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1);
+        const monday = new Date(d.setDate(diff));
+        return monday.toISOString().split('T')[0];
+      }
+      case 'month':
+        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+    }
+  }
+
+  private parseCohortDate(
+    cohortKey: string,
+    period: 'day' | 'week' | 'month',
+  ): Date {
+    switch (period) {
+      case 'day':
+        return new Date(cohortKey);
+      case 'week':
+        return new Date(cohortKey);
+      case 'month': {
+        const [year, month] = cohortKey.split('-').map(Number);
+        return new Date(year, month - 1, 1);
+      }
+    }
+  }
+
+  private addPeriod(
+    date: Date,
+    offset: number,
+    period: 'day' | 'week' | 'month',
+  ): Date {
+    const d = new Date(date);
+    switch (period) {
+      case 'day':
+        d.setDate(d.getDate() + offset);
+        break;
+      case 'week':
+        d.setDate(d.getDate() + offset * 7);
+        break;
+      case 'month':
+        d.setMonth(d.getMonth() + offset);
+        break;
+    }
+    return d;
+  }
   async getPlatformStats(): Promise<PlatformStatsDto> {
     const [total_markets, total_predictions, active_markets, active_users] =
       await Promise.all([

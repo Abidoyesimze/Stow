@@ -23,6 +23,10 @@ import {
   UserMarketsSortOrder,
 } from './dto/list-user-markets.dto';
 import { UserBookmark } from '../markets/entities/user-bookmark.entity';
+import {
+  ReferralStatus,
+  UserReferral,
+} from './entities/user-referral.entity';
 
 describe('UsersService', () => {
   let service: UsersService;
@@ -31,6 +35,7 @@ describe('UsersService', () => {
   let predictionsRepository: Repository<Prediction>;
   let participantsRepository: Repository<CompetitionParticipant>;
   let marketsRepository: Repository<Market>;
+  let referralsRepository: Repository<UserReferral>;
 
   const mockUser: User = {
     id: '123e4567-e89b-12d3-a456-426614174000',
@@ -118,6 +123,17 @@ describe('UsersService', () => {
             delete: jest.fn(),
           },
         },
+        {
+          provide: getRepositoryToken(UserReferral),
+          useValue: {
+            findOne: jest.fn(),
+            find: jest.fn(),
+            create: jest.fn((data: Partial<UserReferral>) => data),
+            save: jest.fn((entity: Partial<UserReferral>) =>
+              Promise.resolve({ id: 'referral-uuid-1', ...entity }),
+            ),
+          },
+        },
       ],
     }).compile();
 
@@ -131,6 +147,9 @@ describe('UsersService', () => {
     );
     marketsRepository = module.get<Repository<Market>>(
       getRepositoryToken(Market),
+    );
+    referralsRepository = module.get<Repository<UserReferral>>(
+      getRepositoryToken(UserReferral),
     );
   });
 
@@ -679,6 +698,134 @@ describe('UsersService', () => {
         followers_count: 0,
         following_count: 0,
       });
+    });
+  });
+
+  describe('claimReferral', () => {
+    it('records a referral relationship', async () => {
+      jest.spyOn(repository, 'findOneBy').mockResolvedValue({
+        id: 'referrer-1',
+      } as User);
+      jest.spyOn(referralsRepository, 'findOne').mockResolvedValue(null);
+
+      const result = await service.claimReferral('referred-1', 'referrer-1');
+
+      expect(result).toEqual({
+        success: true,
+        message: 'Referral recorded successfully',
+      });
+      expect(referralsRepository.create).toHaveBeenCalledWith({
+        referrer_id: 'referrer-1',
+        referred_id: 'referred-1',
+      });
+      expect(referralsRepository.save).toHaveBeenCalled();
+    });
+
+    it('rejects self-referral', async () => {
+      await expect(
+        service.claimReferral('user-1', 'user-1'),
+      ).rejects.toThrow(BadRequestException);
+      expect(repository.findOneBy).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when the referrer does not exist', async () => {
+      jest.spyOn(repository, 'findOneBy').mockResolvedValue(null);
+
+      await expect(
+        service.claimReferral('referred-1', 'missing-referrer'),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('rejects duplicate attribution when a referral already exists', async () => {
+      jest.spyOn(repository, 'findOneBy').mockResolvedValue({
+        id: 'referrer-1',
+      } as User);
+      jest.spyOn(referralsRepository, 'findOne').mockResolvedValue({
+        id: 'existing-referral',
+      } as UserReferral);
+
+      await expect(
+        service.claimReferral('referred-1', 'referrer-1'),
+      ).rejects.toThrow(ConflictException);
+      expect(referralsRepository.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getMyReferrals', () => {
+    it('reports total, pending, and qualified counts', async () => {
+      const referrals: UserReferral[] = [
+        {
+          id: 'r1',
+          referrer_id: 'user-1',
+          referred_id: 'friend-1',
+          status: ReferralStatus.PENDING,
+          qualified_at: null,
+          created_at: new Date(),
+          referred: { username: 'friend1', stellar_address: 'GFRIEND1' },
+        } as UserReferral,
+        {
+          id: 'r2',
+          referrer_id: 'user-1',
+          referred_id: 'friend-2',
+          status: ReferralStatus.QUALIFIED,
+          qualified_at: new Date(),
+          created_at: new Date(),
+          referred: { username: 'friend2', stellar_address: 'GFRIEND2' },
+        } as UserReferral,
+      ];
+      jest.spyOn(referralsRepository, 'find').mockResolvedValue(referrals);
+
+      const result = await service.getMyReferrals('user-1');
+
+      expect(result.referral_code).toBe('user-1');
+      expect(result.total).toBe(2);
+      expect(result.pending).toBe(1);
+      expect(result.qualified).toBe(1);
+      expect(result.referrals).toHaveLength(2);
+      expect(result.referrals[0].referred_username).toBe('friend1');
+    });
+
+    it('returns zeroed counts when the user has no referrals', async () => {
+      jest.spyOn(referralsRepository, 'find').mockResolvedValue([]);
+
+      const result = await service.getMyReferrals('user-1');
+
+      expect(result).toEqual({
+        referral_code: 'user-1',
+        total: 0,
+        pending: 0,
+        qualified: 0,
+        referrals: [],
+      });
+    });
+  });
+
+  describe('recordQualifyingAction', () => {
+    it('advances a pending referral to qualified', async () => {
+      const referral = {
+        id: 'r1',
+        referred_id: 'friend-1',
+        status: ReferralStatus.PENDING,
+        qualified_at: null,
+      } as UserReferral;
+      jest.spyOn(referralsRepository, 'findOne').mockResolvedValue(referral);
+
+      await service.recordQualifyingAction('friend-1');
+
+      expect(referralsRepository.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: ReferralStatus.QUALIFIED,
+          qualified_at: expect.any(Date),
+        }),
+      );
+    });
+
+    it('is a no-op when the user has no pending referral', async () => {
+      jest.spyOn(referralsRepository, 'findOne').mockResolvedValue(null);
+
+      await service.recordQualifyingAction('friend-1');
+
+      expect(referralsRepository.save).not.toHaveBeenCalled();
     });
   });
 });

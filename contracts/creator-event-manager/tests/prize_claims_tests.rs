@@ -14,7 +14,9 @@
 ///   claim/no-show subset) scenarios, `sum(claims) + clawed_back` always
 ///   equals the original prize pool.
 use creator_event_manager::storage;
-use creator_event_manager::storage_types::{MatchResult, CLAIM_PERIOD_SECONDS};
+use creator_event_manager::storage_types::{
+    MatchResult, CLAIM_PERIOD_SECONDS, FINALIZATION_BOND_STROOPS,
+};
 use creator_event_manager::CreatorEventManagerContractClient;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::testutils::Ledger as _;
@@ -116,6 +118,7 @@ fn create_funded_event(
                 String::from_str(env, &std::format!("Team B{}", i)),
                 env.ledger().timestamp() + 100 + (i as u64) * 60,
                 1u32,
+                0,
             );
             storage::set_match(env, match_id, &match_record);
             storage::add_event_match(env, event_id, match_id);
@@ -185,6 +188,7 @@ fn test_claim_prize_transfers_allocation_once() {
     );
 
     let caller = Address::generate(&env);
+    fund(&env, &xlm_token, &caller, FINALIZATION_BOND_STROOPS);
     client.finalize_event(&caller, &event_id);
 
     // Nothing moved yet.
@@ -193,7 +197,10 @@ fn test_claim_prize_transfers_allocation_once() {
     let claimed = client.claim_prize(&user, &event_id);
     assert_eq!(claimed, PRIZE);
     assert_eq!(balance(&env, &xlm_token, &user), PRIZE);
-    assert_eq!(balance(&env, &xlm_token, &contract_id), 0);
+    assert_eq!(
+        balance(&env, &xlm_token, &contract_id),
+        FINALIZATION_BOND_STROOPS
+    );
 }
 
 #[test]
@@ -226,6 +233,7 @@ fn test_claim_prize_twice_rejected() {
     );
 
     let caller = Address::generate(&env);
+    fund(&env, &xlm_token, &caller, FINALIZATION_BOND_STROOPS);
     client.finalize_event(&caller, &event_id);
 
     client.claim_prize(&user, &event_id);
@@ -266,6 +274,7 @@ fn test_claim_prize_non_winner_rejected() {
     );
 
     let caller = Address::generate(&env);
+    fund(&env, &xlm_token, &caller, FINALIZATION_BOND_STROOPS);
     client.finalize_event(&caller, &event_id);
 
     // Never joined, never allocated a prize.
@@ -330,6 +339,7 @@ fn test_clawback_before_deadline_rejected() {
     );
 
     let caller = Address::generate(&env);
+    fund(&env, &xlm_token, &caller, FINALIZATION_BOND_STROOPS);
     client.finalize_event(&caller, &event_id);
 
     // Deadline is CLAIM_PERIOD_SECONDS away — calling immediately must fail.
@@ -391,6 +401,7 @@ fn test_clawback_after_deadline_sweeps_only_unclaimed() {
     );
 
     let caller = Address::generate(&env);
+    fund(&env, &xlm_token, &caller, FINALIZATION_BOND_STROOPS);
     client.finalize_event(&caller, &event_id);
 
     let rank1 = PRIZE * 60 / 100;
@@ -416,8 +427,11 @@ fn test_clawback_after_deadline_sweeps_only_unclaimed() {
     assert_eq!(balance(&env, &xlm_token, &claimer), rank1);
     // The no-show never receives anything.
     assert_eq!(balance(&env, &xlm_token, &no_show), 0);
-    // Nothing stranded.
-    assert_eq!(balance(&env, &xlm_token, &contract_id), 0);
+    // Only the finalization bond remains after prize settlements.
+    assert_eq!(
+        balance(&env, &xlm_token, &contract_id),
+        FINALIZATION_BOND_STROOPS
+    );
 }
 
 #[test]
@@ -450,6 +464,7 @@ fn test_claim_after_clawback_rejected() {
     );
 
     let caller = Address::generate(&env);
+    fund(&env, &xlm_token, &caller, FINALIZATION_BOND_STROOPS);
     client.finalize_event(&caller, &event_id);
 
     env.ledger()
@@ -491,6 +506,7 @@ fn test_clawback_called_twice_is_noop() {
     );
 
     let caller = Address::generate(&env);
+    fund(&env, &xlm_token, &caller, FINALIZATION_BOND_STROOPS);
     client.finalize_event(&caller, &event_id);
 
     env.ledger()
@@ -584,6 +600,7 @@ fn test_property_claims_plus_clawback_equals_prize_pool() {
         }
 
         let caller = Address::generate(&env);
+        fund(&env, &xlm_token, &caller, FINALIZATION_BOND_STROOPS);
         let payouts = client.finalize_event(&caller, &event_id);
         assert_eq!(payouts.len(), num_winners);
 
@@ -613,8 +630,11 @@ fn test_property_claims_plus_clawback_equals_prize_pool() {
             "iteration {iteration}: num_winners={num_winners} prize_pool={prize_pool} claimed_total={claimed_total} swept={swept}",
         );
 
-        // Nothing stranded once every allocation is settled one way or the other.
-        assert_eq!(balance(&env, &xlm_token, &contract_id), 0);
+        // Finalization bond remains after every prize allocation is settled.
+        assert_eq!(
+            balance(&env, &xlm_token, &contract_id),
+            FINALIZATION_BOND_STROOPS
+        );
 
         // Repeat clawback is a harmless no-op — invariant still holds.
         assert_eq!(client.clawback_unclaimed(&caller, &event_id), 0);

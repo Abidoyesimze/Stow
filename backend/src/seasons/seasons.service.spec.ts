@@ -6,6 +6,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { SeasonsService } from './seasons.service';
 import { Season } from './entities/season.entity';
 import { SorobanService } from '../soroban/soroban.service';
+import { WebhookDispatcherService } from '../webhooks/services/webhook-dispatcher.service';
 import { CreateSeasonDto } from './dto/create-season.dto';
 
 describe('SeasonsService', () => {
@@ -58,6 +59,10 @@ describe('SeasonsService', () => {
             }),
           },
         },
+        {
+          provide: WebhookDispatcherService,
+          useValue: { emit: jest.fn().mockResolvedValue(undefined) },
+        },
       ],
     }).compile();
 
@@ -88,6 +93,7 @@ describe('SeasonsService', () => {
         top_winner: winner as Season['top_winner'],
         on_chain_season_id: null,
         soroban_tx_hash: null,
+        rollover_processed_at: null,
         created_at: new Date(),
         updated_at: new Date(),
       };
@@ -136,6 +142,7 @@ describe('SeasonsService', () => {
         top_winner: winner as Season['top_winner'],
         on_chain_season_id: null,
         soroban_tx_hash: null,
+        rollover_processed_at: null,
         created_at: new Date(),
         updated_at: new Date(),
       };
@@ -183,6 +190,7 @@ describe('SeasonsService', () => {
         top_winner: null,
         on_chain_season_id: null,
         soroban_tx_hash: null,
+        rollover_processed_at: null,
         created_at: new Date(),
         updated_at: new Date(),
       };
@@ -274,6 +282,7 @@ describe('SeasonsService', () => {
         top_winner: null,
         on_chain_season_id: null,
         soroban_tx_hash: null,
+        rollover_processed_at: null,
         created_at: new Date(),
         updated_at: new Date(),
       };
@@ -289,6 +298,7 @@ describe('SeasonsService', () => {
         top_winner: null,
         on_chain_season_id: null,
         soroban_tx_hash: null,
+        rollover_processed_at: null,
         created_at: new Date(),
         updated_at: new Date(),
       };
@@ -327,6 +337,7 @@ describe('SeasonsService', () => {
       top_winner: null,
       on_chain_season_id: null,
       soroban_tx_hash: null,
+        rollover_processed_at: null,
       created_at: new Date(),
       updated_at: new Date(),
     };
@@ -535,4 +546,142 @@ describe('SeasonsService', () => {
       expect(seasonsRepository.remove).toHaveBeenCalledWith(savedSeason);
     });
   });
+
+  describe('processSeasonRollover', () => {
+    const ending: Season = {
+      id: 'end-1',
+      season_number: 1,
+      name: 'Season 1',
+      starts_at: new Date('2020-01-01T00:00:00.000Z'),
+      ends_at: new Date('2020-06-01T00:00:00.000Z'),
+      reward_pool_stroops: '1000',
+      is_active: true,
+      is_finalized: false,
+      participant_count: 0,
+      top_winner: null,
+      on_chain_season_id: null,
+      soroban_tx_hash: null,
+      rollover_processed_at: null,
+      created_at: new Date(),
+      updated_at: new Date(),
+    };
+
+    const nextSeason: Season = {
+      id: 'next-1',
+      season_number: 2,
+      name: 'Season 2',
+      starts_at: new Date('2020-06-01T00:00:00.000Z'),
+      ends_at: new Date('2020-12-01T00:00:00.000Z'),
+      reward_pool_stroops: '2000',
+      is_active: false,
+      is_finalized: false,
+      participant_count: 0,
+      top_winner: null,
+      on_chain_season_id: null,
+      soroban_tx_hash: null,
+      rollover_processed_at: null,
+      created_at: new Date(),
+      updated_at: new Date(),
+    };
+
+    it('closes ending season, opens next, and is idempotent on re-run', async () => {
+      const now = new Date('2020-06-01T00:00:00.000Z');
+      const winner = {
+        id: 'u1',
+        username: 'winner',
+        stellar_address: 'GWINNER',
+        season_points: 10,
+      };
+      const finalized: Season = {
+        ...ending,
+        is_active: false,
+        is_finalized: true,
+        top_winner: winner as Season['top_winner'],
+      };
+
+      seasonsRepository.createQueryBuilder.mockReturnValue({
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        getOne: jest.fn().mockResolvedValue(ending),
+      } as never);
+
+      const manager = {
+        findOne: jest
+          .fn()
+          .mockResolvedValueOnce(ending)
+          .mockResolvedValueOnce(winner),
+        save: jest.fn().mockResolvedValue(finalized),
+        update: jest.fn().mockResolvedValue(undefined),
+      };
+      const qr = {
+        connect: jest.fn().mockResolvedValue(undefined),
+        startTransaction: jest.fn().mockResolvedValue(undefined),
+        manager,
+        commitTransaction: jest.fn().mockResolvedValue(undefined),
+        rollbackTransaction: jest.fn().mockResolvedValue(undefined),
+        release: jest.fn().mockResolvedValue(undefined),
+      };
+      (
+        service as unknown as { dataSource: { createQueryRunner: jest.Mock } }
+      ).dataSource.createQueryRunner = jest.fn().mockReturnValue(qr);
+
+      seasonsRepository.findOne = jest.fn().mockImplementation(
+        async (opts: { where?: { id?: string; season_number?: number } }) => {
+          if (opts?.where?.id === 'end-1') return finalized;
+          if (opts?.where?.season_number === 2) return nextSeason;
+          return null;
+        },
+      );
+
+      seasonsRepository.save = jest
+        .fn()
+        .mockImplementation(async (s: Season) => s);
+
+      const first = await service.processSeasonRollover(now);
+      expect(first.skipped).toBe(false);
+      expect(first.closedSeasonId).toBe('end-1');
+      expect(first.openedSeasonId).toBe('next-1');
+      expect(first.rewardsComputed).toBe(true);
+      expect(seasonsRepository.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'end-1',
+          rollover_processed_at: now,
+        }),
+      );
+
+      // Second run with already-processed ending season filtered out.
+      seasonsRepository.createQueryBuilder.mockReturnValue({
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        getOne: jest.fn().mockResolvedValue(null),
+      } as never);
+
+      const second = await service.processSeasonRollover(now);
+      expect(second.skipped).toBe(true);
+      expect(second.reason).toBe('nothing_to_rollover');
+    });
+
+    it('skips when rollover_processed_at is already set on ending season', async () => {
+      const processed = {
+        ...ending,
+        rollover_processed_at: new Date('2020-06-01T00:00:00.000Z'),
+      };
+      // Query filters rollover_processed_at IS NULL, so getOne returns null
+      seasonsRepository.createQueryBuilder.mockReturnValue({
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        getOne: jest.fn().mockResolvedValue(null),
+      } as never);
+
+      const result = await service.processSeasonRollover(
+        new Date('2020-06-02T00:00:00.000Z'),
+      );
+      expect(result.skipped).toBe(true);
+      expect(processed.rollover_processed_at).toBeTruthy();
+    });
+  });
+
 });

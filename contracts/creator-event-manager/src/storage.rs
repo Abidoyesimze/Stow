@@ -9,7 +9,8 @@
 use soroban_sdk::{Address, Env, Vec};
 
 use crate::storage_types::{
-    DataKey, Event, Match, ParticipantScore, Prediction, PrizeAllocation, StandingEntry,
+    CreatorVestingSchedule, DataKey, Event, FinalizationBond, Match, OracleSubmission,
+    ParticipantScore, Prediction, PrizeAllocation, StandingEntry,
 };
 
 // ---------------------------------------------------------------------------
@@ -375,6 +376,194 @@ pub fn get_claim_deadline(env: &Env, event_id: u64) -> Option<u64> {
 pub fn set_claim_deadline(env: &Env, event_id: u64, deadline: u64) {
     let key = DataKey::ClaimDeadline(event_id);
     env.storage().persistent().set(&key, &deadline);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+}
+
+// ---------------------------------------------------------------------------
+// M-of-N event verification helpers (#1358)
+// ---------------------------------------------------------------------------
+
+/// Return the list of distinct verifier signers who have submitted
+/// verification for an event, or an empty Vec if none have yet.
+pub fn get_event_verification_signers(env: &Env, event_id: u64) -> Vec<Address> {
+    let key = DataKey::EventVerificationSigners(event_id);
+    match env
+        .storage()
+        .persistent()
+        .get::<DataKey, Vec<Address>>(&key)
+    {
+        Some(list) => {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+            list
+        }
+        None => Vec::new(env),
+    }
+}
+
+/// Append a verifier signer to an event's verification list and set the TTL.
+pub fn add_event_verification_signer(env: &Env, event_id: u64, signer: &Address) {
+    let key = DataKey::EventVerificationSigners(event_id);
+    let mut list = get_event_verification_signers(env, event_id);
+    list.push_back(signer.clone());
+    env.storage().persistent().set(&key, &list);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-source oracle aggregation helpers (#1347)
+// ---------------------------------------------------------------------------
+
+/// Return the configured set of authorized oracle sources, or an empty Vec
+/// if `oracle::configure_oracle_sources` has never been called.
+pub fn get_oracle_sources(env: &Env) -> Vec<Address> {
+    let key = DataKey::OracleSources;
+    match env
+        .storage()
+        .persistent()
+        .get::<DataKey, Vec<Address>>(&key)
+    {
+        Some(list) => {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+            list
+        }
+        None => Vec::new(env),
+    }
+}
+
+/// Write the configured set of authorized oracle sources and set its TTL.
+pub fn set_oracle_sources(env: &Env, sources: &Vec<Address>) {
+    let key = DataKey::OracleSources;
+    env.storage().persistent().set(&key, sources);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+}
+
+/// Return the configured minimum oracle source count, or `0` if
+/// `oracle::configure_oracle_sources` has never been called.
+pub fn get_oracle_min_sources(env: &Env) -> u32 {
+    let key = DataKey::OracleMinSources;
+    match env.storage().persistent().get::<DataKey, u32>(&key) {
+        Some(min_sources) => {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+            min_sources
+        }
+        None => 0,
+    }
+}
+
+/// Write the configured minimum oracle source count and set its TTL.
+pub fn set_oracle_min_sources(env: &Env, min_sources: u32) {
+    let key = DataKey::OracleMinSources;
+    env.storage().persistent().set(&key, &min_sources);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+}
+
+/// Return every oracle submission recorded for a match, or an empty Vec if
+/// none have been submitted yet. Extends the TTL on success.
+pub fn get_oracle_submissions(env: &Env, match_id: u64) -> Vec<OracleSubmission> {
+    let key = DataKey::OracleSubmissions(match_id);
+    match env
+        .storage()
+        .persistent()
+        .get::<DataKey, Vec<OracleSubmission>>(&key)
+    {
+        Some(list) => {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+            list
+        }
+        None => Vec::new(env),
+    }
+}
+
+/// Append an oracle submission to a match's submission list and set the TTL.
+pub fn add_oracle_submission(env: &Env, match_id: u64, submission: &OracleSubmission) {
+    let key = DataKey::OracleSubmissions(match_id);
+    let mut list = get_oracle_submissions(env, match_id);
+    list.push_back(submission.clone());
+    env.storage().persistent().set(&key, &list);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+}
+
+// ---------------------------------------------------------------------------
+// Finalization bond helpers (#1344)
+// ---------------------------------------------------------------------------
+
+/// Read the finalization bond record for an event, if any.
+pub fn get_finalization_bond(env: &Env, event_id: u64) -> Option<FinalizationBond> {
+    let key = DataKey::FinalizationBond(event_id);
+    match env
+        .storage()
+        .persistent()
+        .get::<DataKey, FinalizationBond>(&key)
+    {
+        Some(bond) => {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+            Some(bond)
+        }
+        None => None,
+    }
+}
+
+/// Persist a finalization bond record and set its TTL.
+pub fn set_finalization_bond(env: &Env, bond: &FinalizationBond) {
+    let key = DataKey::FinalizationBond(bond.event_id);
+    env.storage().persistent().set(&key, bond);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+}
+
+// ---------------------------------------------------------------------------
+// Creator revenue share vesting helpers
+// ---------------------------------------------------------------------------
+
+/// Read a creator's staged vesting schedule for an event, or `None` if none
+/// was ever staged (e.g. the event had no leftover revenue, or vesting was
+/// not configured at finalization time).
+pub fn get_creator_vesting(
+    env: &Env,
+    creator: &Address,
+    event_id: u64,
+) -> Option<CreatorVestingSchedule> {
+    let key = DataKey::CreatorVesting(creator.clone(), event_id);
+    match env
+        .storage()
+        .persistent()
+        .get::<DataKey, CreatorVestingSchedule>(&key)
+    {
+        Some(schedule) => {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
+            Some(schedule)
+        }
+        None => None,
+    }
+}
+
+/// Write a creator's vesting schedule and set its TTL.
+pub fn set_creator_vesting(env: &Env, schedule: &CreatorVestingSchedule) {
+    let key = DataKey::CreatorVesting(schedule.creator.clone(), schedule.event_id);
+    env.storage().persistent().set(&key, schedule);
     env.storage()
         .persistent()
         .extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);

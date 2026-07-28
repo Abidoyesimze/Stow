@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { MarketsService } from './markets.service';
+import { MarketSettlementScheduler } from './market-settlement.scheduler';
 import { Market } from './entities/market.entity';
 import { Comment } from './entities/comment.entity';
 import { MarketTemplate } from './entities/market-template.entity';
@@ -12,6 +13,7 @@ import { User } from '../users/entities/user.entity';
 import { CreateMarketDto } from './dto/create-market.dto';
 import { UserBookmark } from './entities/user-bookmark.entity';
 import { Prediction } from '../predictions/entities/prediction.entity';
+import { MarketPriceSnapshot } from './entities/market-price-snapshot.entity';
 import { WebhookDispatcherService } from '../webhooks/services/webhook-dispatcher.service';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 
@@ -101,6 +103,14 @@ describe('MarketsService - Bulk Creation', () => {
           },
         },
         {
+          provide: getRepositoryToken(MarketPriceSnapshot),
+          useValue: {
+            create: jest.fn(),
+            save: jest.fn(),
+            createQueryBuilder: jest.fn(),
+          },
+        },
+        {
           provide: UsersService,
           useValue: {},
         },
@@ -123,6 +133,13 @@ describe('MarketsService - Bulk Creation', () => {
             set: jest.fn(),
             del: jest.fn(),
             reset: jest.fn(),
+          },
+        },
+        {
+          provide: MarketSettlementScheduler,
+          useValue: {
+            getDeadLetterQueue: jest.fn(),
+            retrySettlement: jest.fn(),
           },
         },
       ],

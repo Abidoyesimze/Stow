@@ -11,7 +11,7 @@ use insightarena_contract::{
 };
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, Vec, BytesN};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -185,6 +185,7 @@ fn default_market_params(env: &Env) -> CreateMarketParams {
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: true,
+        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
     }
 }
 
@@ -855,5 +856,111 @@ fn test_season_overlap_touching_at_start_succeeds() {
 
     let season2_id = client.create_season(&admin, &50, &100, &100_000_000);
     assert_eq!(season2_id, 2);
+}
+
+// ── calculate_points arithmetic edge cases (#1266) ────────────────────────────
+
+/// Maximum realistic stake must saturate at `u32::MAX`, never wrap around.
+#[test]
+fn test_calculate_points_max_stake_saturates() {
+    use insightarena_contract::season::calculate_points;
+
+    // i128::MAX / 2 is an extreme but representable stake value.
+    // The saturating arithmetic in calculate_points must cap at u32::MAX.
+    let result = calculate_points(i128::MAX / 2, 1, 1);
+    assert_eq!(result, u32::MAX, "max stake must saturate at u32::MAX, not wrap");
+}
+
+/// Zero `total` predictions must return 0 immediately without dividing by zero.
+#[test]
+fn test_calculate_points_zero_total_returns_zero() {
+    use insightarena_contract::season::calculate_points;
+
+    let result = calculate_points(50_000_000, 0, 0);
+    assert_eq!(result, 0, "zero total must return 0, not panic");
+}
+
+/// `correct > total` is inconsistent input. The implementation clamps `correct`
+/// to `total` so the result equals the all-correct case for the given total.
+#[test]
+fn test_calculate_points_correct_exceeds_total_is_clamped() {
+    use insightarena_contract::season::calculate_points;
+
+    // correct=10, total=5 → clamped to correct=5, same as 5/5
+    let clamped = calculate_points(10_000_000, 10, 5);
+    let perfect = calculate_points(10_000_000, 5, 5);
+    assert_eq!(clamped, perfect, "correct > total must be clamped to total, not panic");
+}
+
+// ── finalize_season edge cases (#1266) ────────────────────────────────────────
+
+/// Finalizing a season in which nobody participated (empty leaderboard snapshot)
+/// must not panic; it must return a defined error (`InvalidInput`) because there
+/// is nothing to distribute.
+#[test]
+fn test_finalize_empty_season_does_not_panic() {
+    let env = Env::default();
+    let (client, xlm_token, admin, _oracle) = deploy(&env);
+
+    fund(&env, &xlm_token, &admin, 200_000_000);
+    approve_reward_pool(&env, &xlm_token, &admin, &client.address, 100_000_000);
+
+    // Season created but nobody makes any predictions.
+    let season_id = client.create_season(&admin, &0, &100, &100_000_000);
+
+    // Advance past end_time so the season is eligible for finalization.
+    env.ledger().set_timestamp(100);
+
+    // Must not panic. Current behavior: empty entries → InvalidInput (no payouts possible).
+    let result = client.try_finalize_season(&admin, &season_id);
+    assert_eq!(
+        result,
+        Err(Ok(InsightArenaError::InvalidInput)),
+        "empty season finalization must return a defined error, never panic"
+    );
+}
+
+/// Calling `finalize_season` a second time on an already-finalized season must
+/// be rejected with `SeasonAlreadyFinalized` (already covered by the idempotency
+/// test; kept here for explicit cross-reference with the AC).
+#[test]
+fn test_finalize_season_second_call_rejected() {
+    let env = Env::default();
+    let (client, xlm_token, admin, _oracle) = deploy(&env);
+
+    fund(&env, &xlm_token, &admin, 200_000_000);
+    approve_reward_pool(&env, &xlm_token, &admin, &client.address, 100_000_000);
+
+    let season_id = client.create_season(&admin, &10, &100, &100_000_000);
+    client.update_leaderboard(&admin, &season_id, &sample_entries(&env));
+
+    env.ledger().set_timestamp(100);
+    client.finalize_season(&admin, &season_id);
+
+    let result = client.try_finalize_season(&admin, &season_id);
+    assert_eq!(result, Err(Ok(InsightArenaError::SeasonAlreadyFinalized)));
+}
+
+/// Non-admin addresses must be rejected from finalizing a season.
+#[test]
+fn test_finalize_season_non_admin_rejected() {
+    let env = Env::default();
+    let (client, xlm_token, admin, _oracle) = deploy(&env);
+
+    fund(&env, &xlm_token, &admin, 200_000_000);
+    approve_reward_pool(&env, &xlm_token, &admin, &client.address, 100_000_000);
+
+    let season_id = client.create_season(&admin, &10, &100, &100_000_000);
+    client.update_leaderboard(&admin, &season_id, &sample_entries(&env));
+
+    env.ledger().set_timestamp(100);
+
+    let non_admin = Address::generate(&env);
+    let result = client.try_finalize_season(&non_admin, &season_id);
+    assert_eq!(
+        result,
+        Err(Ok(InsightArenaError::Unauthorized)),
+        "non-admin must not finalize a season"
+    );
 }
 

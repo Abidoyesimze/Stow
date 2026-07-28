@@ -123,6 +123,20 @@ export class SeasonsController {
     return this.seasonsService.create(dto);
   }
 
+  @Post('rollover')
+  @HttpCode(HttpStatus.OK)
+  @Roles(Role.Admin)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Run automated season rollover (Admin only)',
+    description:
+      'Closes an ending season, finalizes standings, computes rewards, and opens the next season. Safe to re-run (idempotent).',
+  })
+  @ApiResponse({ status: 200, description: 'Rollover result' })
+  async rollover() {
+    return this.seasonsService.processSeasonRollover();
+  }
+
   @Post(':id/finalize')
   @HttpCode(HttpStatus.OK)
   @Roles(Role.Admin)

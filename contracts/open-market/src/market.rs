@@ -1,11 +1,11 @@
-use soroban_sdk::{contracttype, symbol_short, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, String, Symbol, Vec, BytesN};
 
 use crate::config::{self, PERSISTENT_BUMP, PERSISTENT_THRESHOLD};
 use crate::errors::InsightArenaError;
-use crate::escrow;
 use crate::reputation;
 use crate::storage_types::{
-    ConditionalMarket, DataKey, Market, MarketStats, PlatformStats, Prediction, UserProfile,
+    ConditionalMarket, DataKey, DependencyStatus, Market, MarketStats, PlatformStats, Prediction,
+    UserProfile,
 };
 
 // ── Params struct ─────────────────────────────────────────────────────────────
@@ -27,6 +27,8 @@ pub struct CreateMarketParams {
     pub min_stake: i128,
     pub max_stake: i128,
     pub is_public: bool,
+    /// SHA-256 content hash of the market's off-chain metadata (immutable after create).
+    pub metadata_hash: BytesN<32>,
 }
 
 // ── TTL helpers ───────────────────────────────────────────────────────────────
@@ -136,10 +138,16 @@ fn next_market_id(env: &Env) -> Result<u64, InsightArenaError> {
 
 // ── Event emission ────────────────────────────────────────────────────────────
 
-fn emit_market_created(env: &Env, market_id: u64, creator: &Address, end_time: u64) {
+fn emit_market_created(
+    env: &Env,
+    market_id: u64,
+    creator: &Address,
+    end_time: u64,
+    metadata_hash: &BytesN<32>,
+) {
     env.events().publish(
         (symbol_short!("mkt"), symbol_short!("created")),
-        (market_id, creator.clone(), end_time),
+        (market_id, creator.clone(), end_time, metadata_hash.clone()),
     );
 }
 
@@ -226,7 +234,9 @@ fn has_duplicate_outcomes(outcomes: &Vec<Symbol>) -> bool {
 ///    address) otherwise.
 /// 7. `category` must be in the admin-managed whitelist
 /// 8. `creator_fee_bps` must not exceed the platform cap
-/// 9. `min_stake` >= platform minimum; `max_stake` >= `min_stake`
+/// 9. Stake bounds: `min_stake`/`max_stake` of `0` inherit the global Config
+///    bounds; non-zero values are per-market overrides. The resolved pair must
+///    satisfy `min <= max` with both sides strictly positive.
 pub fn create_market(
     env: &Env,
     creator: Address,
@@ -278,17 +288,20 @@ pub fn create_market(
     }
 
     // ── Guard 8: stake bounds ─────────────────────────────────────────────────
-    if params.min_stake < cfg.min_stake_xlm {
-        return Err(InsightArenaError::StakeTooLow);
-    }
-    if params.max_stake < params.min_stake {
+    // A zero min/max on the market means "inherit the global Config bound" and
+    // is resolved at prediction time. Non-zero values are per-market overrides
+    // that take precedence. Validate the resolved pair so create cannot store
+    // an inconsistent override / inherit combination.
+    if params.min_stake < 0 || params.max_stake < 0 {
         return Err(InsightArenaError::InvalidInput);
     }
+    let (_, _) = config::resolve_stake_bounds(env, params.min_stake, params.max_stake)?;
 
     // ── Atomically assign a new market ID ────────────────────────────────────
     let market_id = next_market_id(env)?;
 
     // ── Construct and persist the market ─────────────────────────────────────
+    let metadata_hash = params.metadata_hash.clone();
     let market = Market::new(
         market_id,
         creator.clone(),
@@ -304,6 +317,7 @@ pub fn create_market(
         params.min_stake,
         params.max_stake,
         params.dispute_window,
+        metadata_hash.clone(),
     );
 
     env.storage()
@@ -313,7 +327,7 @@ pub fn create_market(
     append_market_to_category_index(env, &market.category, market_id);
 
     // ── Emit MarketCreated event ──────────────────────────────────────────────
-    emit_market_created(env, market_id, &creator, params.end_time);
+    emit_market_created(env, market_id, &creator, params.end_time, &metadata_hash);
 
     // ── Update creator reputation stats ──────────────────────────────────────
     reputation::on_market_created(env, &creator);
@@ -331,6 +345,13 @@ pub fn get_market(env: &Env, market_id: u64) -> Result<Market, InsightArenaError
         .ok_or(InsightArenaError::MarketNotFound)?;
     bump_market(env, market_id);
     Ok(market)
+}
+
+/// Return the immutable off-chain metadata content hash anchored at market creation.
+/// The hash lives on the Market record and is never rewritten after create.
+pub fn get_metadata_hash(env: &Env, market_id: u64) -> Result<BytesN<32>, InsightArenaError> {
+    let market = get_market(env, market_id)?;
+    Ok(market.metadata_hash)
 }
 
 /// Return the total number of markets ever created (0 before any are made).
@@ -381,6 +402,7 @@ pub fn list_markets(env: &Env, start: u64, limit: u32) -> Vec<Market> {
 }
 
 pub fn add_category(env: &Env, admin: Address, category: Symbol) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(env)?;
     require_admin(env, &admin)?;
 
     let mut categories = load_categories(env);
@@ -397,6 +419,7 @@ pub fn remove_category(
     admin: Address,
     category: Symbol,
 ) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(env)?;
     require_admin(env, &admin)?;
 
     let mut categories = load_categories(env);
@@ -461,6 +484,8 @@ pub fn get_markets_by_category(env: &Env, category: Symbol, start: u64, limit: u
 /// On success the market's `is_closed` flag is set to `true`, the record is
 /// re-saved to persistent storage, and a `MarketClosed` event is emitted.
 pub fn close_market(env: &Env, caller: Address, market_id: u64) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(env)?;
+
     // ── Guard 1: market must exist ────────────────────────────────────────────
     let mut market = get_market(env, market_id)?;
 
@@ -608,23 +633,103 @@ pub fn extend_market_end_time(
     Ok(())
 }
 
+fn emit_market_liquidity_cap_updated(env: &Env, market_id: u64, old_cap: i128, new_cap: i128) {
+    env.events().publish(
+        (symbol_short!("mkt"), symbol_short!("liq_cap")),
+        (market_id, old_cap, new_cap),
+    );
+}
+
+/// Set a per-market override for the maximum liquidity a single outcome's
+/// AMM reserve may hold. `0` clears the override, reverting the market to
+/// the global `Config::max_liquidity_per_outcome` cap. Caller must be the
+/// platform admin. See `liquidity::add_liquidity` and
+/// `liquidity::get_remaining_outcome_capacity`.
+pub fn set_market_liquidity_cap(
+    env: &Env,
+    admin: Address,
+    market_id: u64,
+    cap: i128,
+) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(env)?;
+    require_admin(env, &admin)?;
+
+    if cap < 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    let mut market = get_market(env, market_id)?;
+    let old_cap = market.outcome_liquidity_cap;
+    market.outcome_liquidity_cap = cap;
+    env.storage()
+        .persistent()
+        .set(&DataKey::Market(market_id), &market);
+    bump_market(env, market_id);
+
+    emit_market_liquidity_cap_updated(env, market_id, old_cap, cap);
+
+    Ok(())
+}
+
+fn emit_market_ttl_extended(env: &Env, market_id: u64, caller: &Address, extension: u32) {
+    env.events().publish(
+        (symbol_short!("mkt"), symbol_short!("ttl_ext")),
+        (market_id, caller.clone(), extension),
+    );
+}
+
+/// Explicitly extend a market's persistent-storage TTL by the
+/// admin-configured extension amount (`Config::market_ttl_extension`).
+///
+/// Permissionless maintenance entrypoint — anyone may call this to keep a
+/// long-running market's storage from expiring between organic interactions;
+/// the caller must still authorize the call. Emits an event recording the
+/// extension.
+///
+/// # Errors
+/// * [`InsightArenaError::Paused`] — the platform is paused.
+/// * [`InsightArenaError::MarketNotFound`] — no market exists with the given ID.
+pub fn extend_market_ttl(
+    env: &Env,
+    caller: Address,
+    market_id: u64,
+) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(env)?;
+    caller.require_auth();
+
+    // Validates existence and bumps the market's TTL by the configured amount.
+    get_market(env, market_id)?;
+
+    let cfg = config::get_config(env)?;
+    emit_market_ttl_extended(env, market_id, &caller, cfg.market_ttl_extension);
+
+    Ok(())
+}
+
 /// Cancel a market that could not be resolved (oracle failure, creator error, etc.).
 ///
-/// Upon cancellation every predictor's full stake is refunded via the escrow
-/// module. No payouts or fees are processed.
+/// Marks the market as cancelled and freezes all further mutations (predictions,
+/// resolution, fee updates). Funds are NOT pushed in this call. Instead, each
+/// participant must call `claim_cancel_refund` to pull their stake back. This
+/// pull pattern keeps this function O(1) and gas-bounded regardless of participant
+/// count, and each individual transfer is isolated so one failing recipient cannot
+/// block the rest.
 ///
 /// Validation order:
-/// 1. Market exists
-/// 2. Market has not already been resolved
-/// 3. Market has not already been cancelled
-/// 4. `caller` must be the platform admin
+/// 1. Platform not paused
+/// 2. Market exists
+/// 3. Market has not already been resolved
+/// 4. Market has not already been cancelled
+/// 5. `caller` must be the platform admin
 ///
 /// On success:
 /// - `market.is_cancelled` is set to `true` and persisted.
-/// - All entries in `PredictorList(market_id)` are iterated; for each, the
-///   corresponding `Prediction` record is loaded and `escrow::refund` is called.
+/// - Conditional children are deactivated (their own stakes remain claimable per
+///   participant via `claim_cancel_refund` on each child market).
 /// - A `MarketCancelled` event is emitted.
 pub fn cancel_market(env: &Env, caller: Address, market_id: u64) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(env)?;
+
     // ── Guard 1: market must exist ────────────────────────────────────────────
     let mut market = get_market(env, market_id)?;
 
@@ -652,20 +757,9 @@ pub fn cancel_market(env: &Env, caller: Address, market_id: u64) -> Result<(), I
         .set(&DataKey::Market(market_id), &market);
     bump_market(env, market_id);
 
-    let predictors = env
-        .storage()
-        .persistent()
-        .get::<DataKey, Vec<Address>>(&DataKey::PredictorList(market_id))
-        .unwrap_or_else(|| Vec::new(env));
-
-    for predictor in predictors.iter() {
-        let key = DataKey::Prediction(market_id, predictor.clone());
-        if let Some(prediction) = env.storage().persistent().get::<DataKey, Prediction>(&key) {
-            escrow::refund(env, &predictor, prediction.stake_amount)?;
-        }
-    }
-
     // Deactivate all conditional children so no orphaned markets remain.
+    // Each child market is also marked cancelled; its participants may call
+    // claim_cancel_refund on the child market independently.
     let child_ids: Vec<u64> = env
         .storage()
         .persistent()
@@ -689,18 +783,22 @@ pub fn cancel_market(env: &Env, caller: Address, market_id: u64) -> Result<(), I
 /// 1. `oracle` address must provide valid cryptographic authorisation.
 /// 2. `oracle` must match the `oracle_address` stored in global configuration.
 /// 3. Market must exist in persistent storage.
-/// 4. `current_time >= market.resolution_time` — resolution window must be open.
-/// 5. `market.is_resolved == false` — prevents double-resolution.
-/// 6. `market.is_cancelled == false` — a cancelled market already refunded all
+/// 4. If this market is a conditional child, its immediate parent must
+///    already be resolved — reverts with `ParentNotResolved` otherwise, so a
+///    chain can never settle out of order.
+/// 5. `current_time >= market.resolution_time` — resolution window must be open.
+/// 6. `market.is_resolved == false` — prevents double-resolution.
+/// 7. `market.is_cancelled == false` — a cancelled market already refunded all
 ///    stakes, so resolving it would reopen the payout path and let predictors
 ///    extract funds a second time.
-/// 7. `resolved_outcome` must be one of the symbols in `market.outcome_options`.
+/// 8. `resolved_outcome` must be one of the symbols in `market.outcome_options`.
 pub fn resolve_market(
     env: Env,
     oracle: Address,
     market_id: u64,
     resolved_outcome: Symbol,
 ) -> Result<(), InsightArenaError> {
+    config::ensure_not_paused(&env)?;
     oracle.require_auth();
 
     let cfg = config::get_config(&env)?;
@@ -709,6 +807,17 @@ pub fn resolve_market(
     }
 
     let mut market = get_market(&env, market_id)?;
+
+    if let Some(parent_market_id) = env
+        .storage()
+        .persistent()
+        .get::<_, u64>(&DataKey::ConditionalParent(market_id))
+    {
+        let parent_market = get_market(&env, parent_market_id)?;
+        if !parent_market.is_resolved {
+            return Err(InsightArenaError::ParentNotResolved);
+        }
+    }
 
     let now = env.ledger().timestamp();
     if now < market.resolution_time {
@@ -798,6 +907,7 @@ pub fn create_conditional_market(
     required_outcome: Symbol,
     params: CreateMarketParams,
 ) -> Result<u64, InsightArenaError> {
+    config::ensure_not_paused(env)?;
     validate_conditional_params(env, parent_market_id, &required_outcome, &params)?;
 
     let parent_depth = calculate_conditional_depth(env, parent_market_id);
@@ -952,6 +1062,42 @@ pub fn calculate_conditional_depth(env: &Env, market_id: u64) -> u32 {
     depth
 }
 
+/// Return the conditional-dependency status for a market: whether it is a
+/// conditional child, its immediate parent (if any), and whether that parent
+/// has resolved. `resolve_market` blocks on `parent_resolved == false`.
+///
+/// Non-conditional (root) markets report `is_conditional: false`,
+/// `parent_market_id: None`, and `parent_resolved: true` — there is no parent
+/// dependency to block resolution.
+pub fn get_dependency_status(
+    env: &Env,
+    market_id: u64,
+) -> Result<DependencyStatus, InsightArenaError> {
+    if !env.storage().persistent().has(&DataKey::Market(market_id)) {
+        return Err(InsightArenaError::MarketNotFound);
+    }
+
+    let parent_market_id = env
+        .storage()
+        .persistent()
+        .get::<_, u64>(&DataKey::ConditionalParent(market_id));
+
+    let (is_conditional, parent_resolved) = match parent_market_id {
+        Some(parent_id) => {
+            let parent_market = get_market(env, parent_id)?;
+            (true, parent_market.is_resolved)
+        }
+        None => (false, true),
+    };
+
+    Ok(DependencyStatus {
+        market_id,
+        is_conditional,
+        parent_market_id,
+        parent_resolved,
+    })
+}
+
 fn validate_conditional_params(
     env: &Env,
     parent_market_id: u64,
@@ -1019,8 +1165,11 @@ fn emit_conditional_deactivated(env: &Env, market_id: u64) {
 
 /// Deactivate a conditional market whose parent was cancelled or resolved to a
 /// non-matching outcome. Sets `is_activated = false`, marks the underlying
-/// `Market` as `is_cancelled = true`, refunds any stakes already placed, and
-/// emits a deactivation event.
+/// `Market` as `is_cancelled = true` so `submit_prediction` rejects new entries,
+/// and emits a deactivation event.
+///
+/// Stakes already placed in the child market are claimable by each participant
+/// via `claim_cancel_refund` — the pull pattern keeps this function O(1).
 pub fn deactivate_conditional_market(env: &Env, market_id: u64) -> Result<(), InsightArenaError> {
     // Load and update the ConditionalMarket record.
     let mut conditional: ConditionalMarket = env
@@ -1035,7 +1184,8 @@ pub fn deactivate_conditional_market(env: &Env, market_id: u64) -> Result<(), In
         .persistent()
         .set(&DataKey::ConditionalMarket(market_id), &conditional);
 
-    // Mark the underlying Market as cancelled and refund any stakes.
+    // Mark the underlying Market as cancelled. Stakes remain in escrow and are
+    // individually claimable via claim_cancel_refund.
     let mut market = get_market(env, market_id)?;
 
     if !market.is_cancelled && !market.is_resolved {
@@ -1044,19 +1194,6 @@ pub fn deactivate_conditional_market(env: &Env, market_id: u64) -> Result<(), In
             .persistent()
             .set(&DataKey::Market(market_id), &market);
         bump_market(env, market_id);
-
-        let predictors = env
-            .storage()
-            .persistent()
-            .get::<DataKey, Vec<Address>>(&DataKey::PredictorList(market_id))
-            .unwrap_or_else(|| Vec::new(env));
-
-        for predictor in predictors.iter() {
-            let key = DataKey::Prediction(market_id, predictor.clone());
-            if let Some(prediction) = env.storage().persistent().get::<DataKey, Prediction>(&key) {
-                escrow::refund(env, &predictor, prediction.stake_amount)?;
-            }
-        }
     }
 
     emit_conditional_deactivated(env, market_id);

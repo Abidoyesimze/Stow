@@ -7,6 +7,7 @@
 /// - Live leaderboard before all matches are resolved
 /// - Empty event (no participants)
 /// - Single participant
+/// - Tie-handling and reward boundaries (#1270)
 use creator_event_manager::storage;
 use creator_event_manager::storage_types::MatchResult;
 use creator_event_manager::CreatorEventManagerContractClient;
@@ -92,6 +93,7 @@ fn create_event_with_matches(
                 String::from_str(env, &format!("Team B{}", i)),
                 env.ledger().timestamp() + 100 + (i as u64) * 60,
                 1u32,
+                0,
             );
             storage::set_match(env, match_id, &match_record);
             storage::add_event_match(env, event_id, match_id);
@@ -440,4 +442,290 @@ fn test_leaderboard_address_tiebreaker_insertion_order_irrelevant() {
     assert_eq!(leaderboard.get(0).unwrap().rank, 1);
     assert_eq!(leaderboard.get(1).unwrap().user, larger);
     assert_eq!(leaderboard.get(1).unwrap().rank, 2);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-way ties + exposed rank (#1343)
+// ---------------------------------------------------------------------------
+
+/// Three participants with identical scores are ordered by earliest
+/// qualifying timestamp, then address. Ranks are stable across repeated reads
+/// and match `get_user_rank`.
+#[test]
+fn test_leaderboard_multiway_tie_earliest_timestamp_then_address() {
+    let (env, client, contract_id, creator, ai_agent, xlm_token) = setup();
+
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+    let user_c = Address::generate(&env);
+
+    let (event_id, invite_code, match_ids) =
+        create_event_with_matches(&env, &contract_id, &client, &creator, &xlm_token, 1);
+
+    // Stagger join/predict times so each has a distinct earliest timestamp,
+    // then ensure points/exact_scores are identical.
+    client.join_event(&user_a, &invite_code);
+    client.submit_prediction(&user_a, &match_ids.get(0).unwrap(), &1u32, &0u32);
+    let t_a = env.ledger().timestamp();
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 10);
+    client.join_event(&user_b, &invite_code);
+    client.submit_prediction(&user_b, &match_ids.get(0).unwrap(), &1u32, &0u32);
+    let t_b = env.ledger().timestamp();
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 10);
+    client.join_event(&user_c, &invite_code);
+    client.submit_prediction(&user_c, &match_ids.get(0).unwrap(), &1u32, &0u32);
+    let t_c = env.ledger().timestamp();
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 300);
+    submit_match_result(
+        &env,
+        &client,
+        &ai_agent,
+        *match_ids.get(0).unwrap(),
+        MatchResult::TeamA,
+    );
+
+    let lb1 = client.get_event_leaderboard(&event_id);
+    let lb2 = client.get_event_leaderboard(&event_id);
+    assert_eq!(lb1, lb2);
+    assert_eq!(lb1.len(), 3);
+
+    // Earliest qualifier ranks first.
+    assert_eq!(lb1.get(0).unwrap().user, user_a);
+    assert_eq!(lb1.get(0).unwrap().rank, 1);
+    assert_eq!(lb1.get(0).unwrap().tie_break_key, t_a);
+    assert_eq!(lb1.get(1).unwrap().user, user_b);
+    assert_eq!(lb1.get(1).unwrap().rank, 2);
+    assert_eq!(lb1.get(1).unwrap().tie_break_key, t_b);
+    assert_eq!(lb1.get(2).unwrap().user, user_c);
+    assert_eq!(lb1.get(2).unwrap().rank, 3);
+    assert_eq!(lb1.get(2).unwrap().tie_break_key, t_c);
+
+    assert_eq!(client.get_user_rank(&event_id, &user_a), 1);
+    assert_eq!(client.get_user_rank(&event_id, &user_b), 2);
+    assert_eq!(client.get_user_rank(&event_id, &user_c), 3);
+}
+
+/// When timestamps are also identical, the address tie-break produces a
+/// stable three-way order independent of join order.
+#[test]
+fn test_leaderboard_multiway_tie_identical_timestamps_by_address() {
+    let (env, client, contract_id, creator, ai_agent, xlm_token) = setup();
+
+    let u1 = Address::generate(&env);
+    let u2 = Address::generate(&env);
+    let u3 = Address::generate(&env);
+
+    // Sort addresses lexicographically for the expected order.
+    let mut ordered = [u1.clone(), u2.clone(), u3.clone()];
+    ordered.sort();
+
+    let (event_id, invite_code, match_ids) =
+        create_event_with_matches(&env, &contract_id, &client, &creator, &xlm_token, 1);
+
+    // Join in reverse order relative to address sort; same ledger timestamp.
+    for user in [ordered[2].clone(), ordered[0].clone(), ordered[1].clone()] {
+        client.join_event(&user, &invite_code);
+        client.submit_prediction(&user, &match_ids.get(0).unwrap(), &1u32, &0u32);
+    }
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 300);
+    submit_match_result(
+        &env,
+        &client,
+        &ai_agent,
+        *match_ids.get(0).unwrap(),
+        MatchResult::TeamA,
+    );
+
+    let lb = client.get_event_leaderboard(&event_id);
+    assert_eq!(lb.len(), 3);
+    assert_eq!(lb.get(0).unwrap().user, ordered[0]);
+    assert_eq!(lb.get(0).unwrap().rank, 1);
+    assert_eq!(lb.get(1).unwrap().user, ordered[1]);
+    assert_eq!(lb.get(1).unwrap().rank, 2);
+    assert_eq!(lb.get(2).unwrap().user, ordered[2]);
+    assert_eq!(lb.get(2).unwrap().rank, 3);
+}
+
+// ===========================================================================
+// Tie-handling and reward boundaries (#1270)
+// ===========================================================================
+
+/// Three participants finish with identical point totals and two finish
+/// below them. The three tied participants must occupy the top positions,
+/// ordered deterministically by their earliest prediction time.
+#[test]
+fn test_leaderboard_tie_handling_three_tied_two_below() {
+    let (env, client, contract_id, creator, ai_agent, xlm_token) = setup();
+    let user1 = Address::generate(&env); // Will predict first
+    let user2 = Address::generate(&env); // Will predict second
+    let user3 = Address::generate(&env); // Will predict third
+    let user4 = Address::generate(&env); // Will predict wrong
+    let user5 = Address::generate(&env); // Will predict wrong
+
+    let (event_id, invite_code, match_ids) =
+        create_event_with_matches(&env, &contract_id, &client, &creator, &xlm_token, 1);
+    let match_id = match_ids.get(0).unwrap();
+
+    // Tied group (all correct, 4 points, staggered prediction times)
+    client.join_event(&user1, &invite_code);
+    client.submit_prediction(&user1, match_id, &1u32, &0u32);
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 10);
+    client.join_event(&user2, &invite_code);
+    client.submit_prediction(&user2, match_id, &1u32, &0u32);
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 10);
+    client.join_event(&user3, &invite_code);
+    client.submit_prediction(&user3, match_id, &1u32, &0u32);
+
+    // Below group (wrong prediction, 0 points)
+    client.join_event(&user4, &invite_code);
+    client.submit_prediction(&user4, match_id, &0u32, &1u32);
+
+    client.join_event(&user5, &invite_code);
+    client.submit_prediction(&user5, match_id, &0u32, &1u32);
+
+    // Advance time and submit result (TeamA wins)
+    env.ledger().set_timestamp(env.ledger().timestamp() + 300);
+    submit_match_result(&env, &client, &ai_agent, *match_id, MatchResult::TeamA);
+
+    let lb1 = client.get_event_leaderboard(&event_id);
+    let lb2 = client.get_event_leaderboard(&event_id);
+
+    // Verify nondeterminism: two consecutive reads must be identical
+    assert_eq!(lb1, lb2);
+
+    // Verify all 5 participants are returned
+    assert_eq!(lb1.len(), 5);
+
+    // Verify the 3 tied participants occupy the top positions
+    assert_eq!(lb1.get(0).unwrap().user, user1);
+    assert_eq!(lb1.get(0).unwrap().rank, 1);
+    assert_eq!(lb1.get(0).unwrap().total_points, 4);
+
+    assert_eq!(lb1.get(1).unwrap().user, user2);
+    assert_eq!(lb1.get(1).unwrap().rank, 2);
+    assert_eq!(lb1.get(1).unwrap().total_points, 4);
+
+    assert_eq!(lb1.get(2).unwrap().user, user3);
+    assert_eq!(lb1.get(2).unwrap().rank, 3);
+    assert_eq!(lb1.get(2).unwrap().total_points, 4);
+
+    // Verify the 2 below participants are ranked lower
+    assert_eq!(lb1.get(3).unwrap().user, user4);
+    assert_eq!(lb1.get(3).unwrap().rank, 4);
+    assert_eq!(lb1.get(3).unwrap().total_points, 0);
+
+    assert_eq!(lb1.get(4).unwrap().user, user5);
+    assert_eq!(lb1.get(4).unwrap().rank, 5);
+    assert_eq!(lb1.get(4).unwrap().total_points, 0);
+}
+
+/// Test a leaderboard reward boundary where three participants tie for the
+/// top spot even though only the top two would receive a prize.
+#[test]
+fn test_leaderboard_reward_boundary_tie() {
+    let (env, client, contract_id, creator, ai_agent, xlm_token) = setup();
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+    let user3 = Address::generate(&env);
+    let user4 = Address::generate(&env);
+    let user5 = Address::generate(&env);
+
+    let (event_id, invite_code, match_ids) =
+        create_event_with_matches(&env, &contract_id, &client, &creator, &xlm_token, 1);
+    let match_id = match_ids.get(0).unwrap();
+
+    // Three participants tie at the top; two others are below them.
+    client.join_event(&user1, &invite_code);
+    client.submit_prediction(&user1, match_id, &1u32, &0u32);
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 10);
+    client.join_event(&user2, &invite_code);
+    client.submit_prediction(&user2, match_id, &1u32, &0u32);
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 10);
+    client.join_event(&user3, &invite_code);
+    client.submit_prediction(&user3, match_id, &1u32, &0u32);
+
+    client.join_event(&user4, &invite_code);
+    client.submit_prediction(&user4, match_id, &0u32, &1u32);
+
+    client.join_event(&user5, &invite_code);
+    client.submit_prediction(&user5, match_id, &0u32, &1u32);
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 300);
+    submit_match_result(&env, &client, &ai_agent, *match_id, MatchResult::TeamA);
+
+    let leaderboard = client.get_event_leaderboard(&event_id);
+    let leaderboard_again = client.get_event_leaderboard(&event_id);
+
+    assert_eq!(leaderboard, leaderboard_again);
+    assert_eq!(leaderboard.len(), 5);
+    assert_eq!(leaderboard.get(0).unwrap().user, user1);
+    assert_eq!(leaderboard.get(0).unwrap().rank, 1);
+    assert_eq!(leaderboard.get(1).unwrap().user, user2);
+    assert_eq!(leaderboard.get(1).unwrap().rank, 2);
+    assert_eq!(leaderboard.get(2).unwrap().user, user3);
+    assert_eq!(leaderboard.get(2).unwrap().rank, 3);
+    assert_eq!(leaderboard.get(3).unwrap().user, user4);
+    assert_eq!(leaderboard.get(3).unwrap().rank, 4);
+    assert_eq!(leaderboard.get(4).unwrap().user, user5);
+    assert_eq!(leaderboard.get(4).unwrap().rank, 5);
+}
+
+/// Test a leaderboard where all participants are tied at zero points.
+/// This can happen if all predictions are wrong, or matches are unresolved.
+#[test]
+fn test_leaderboard_all_zero_points() {
+    let (env, client, contract_id, creator, ai_agent, xlm_token) = setup();
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+    let user3 = Address::generate(&env);
+
+    let (event_id, invite_code, match_ids) =
+        create_event_with_matches(&env, &contract_id, &client, &creator, &xlm_token, 1);
+    let match_id = match_ids.get(0).unwrap();
+
+    // All users predict incorrectly (0 points)
+    client.join_event(&user1, &invite_code);
+    client.submit_prediction(&user1, match_id, &0u32, &1u32); // TeamB wins
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 10);
+    client.join_event(&user2, &invite_code);
+    client.submit_prediction(&user2, match_id, &0u32, &1u32); // TeamB wins
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 10);
+    client.join_event(&user3, &invite_code);
+    client.submit_prediction(&user3, match_id, &0u32, &1u32); // TeamB wins
+
+    // Advance time and submit result (TeamA wins, so all are wrong)
+    env.ledger().set_timestamp(env.ledger().timestamp() + 300);
+    submit_match_result(&env, &client, &ai_agent, *match_id, MatchResult::TeamA);
+
+    let lb = client.get_event_leaderboard(&event_id);
+
+    // Assert no panic and all participants are returned
+    assert_eq!(lb.len(), 3);
+
+    // All have 0 points, ordered by earliest prediction time
+    assert_eq!(lb.get(0).unwrap().user, user1);
+    assert_eq!(lb.get(0).unwrap().rank, 1);
+    assert_eq!(lb.get(0).unwrap().total_points, 0);
+
+    assert_eq!(lb.get(1).unwrap().user, user2);
+    assert_eq!(lb.get(1).unwrap().rank, 2);
+    assert_eq!(lb.get(1).unwrap().total_points, 0);
+
+    assert_eq!(lb.get(2).unwrap().user, user3);
+    assert_eq!(lb.get(2).unwrap().rank, 3);
+    assert_eq!(lb.get(2).unwrap().total_points, 0);
+
+    // Verify consecutive reads are identical
+    let lb2 = client.get_event_leaderboard(&event_id);
+    assert_eq!(lb, lb2);
 }

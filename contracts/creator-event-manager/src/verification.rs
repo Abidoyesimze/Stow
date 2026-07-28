@@ -33,6 +33,12 @@ pub enum VerificationError {
     NotVerified = 4,
     /// The list of addresses passed to batch verify is empty.
     EmptyList = 5,
+    /// The caller is not in the configured verifier signer set.
+    NotAVerifierSigner = 6,
+    /// This signer has already submitted verification for this event.
+    DuplicateSigner = 7,
+    /// No event exists for the given event_id.
+    EventNotFound = 8,
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +226,167 @@ pub fn is_verified(env: &Env, address: Address) -> bool {
         .persistent()
         .get::<DataKey, bool>(&DataKey::VerifiedAddresses(address))
         .unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------------
+// M-of-N event verification (#1358)
+// ---------------------------------------------------------------------------
+
+/// Submit a verifier signature for an event.
+///
+/// `signer` must be one of the addresses configured via
+/// `admin::set_verifier_config`. Each signer may submit at most once per
+/// event — a second submission from the same signer is rejected. Once `M`
+/// (the configured threshold) distinct signers have submitted, the event is
+/// considered verified; see [`is_event_verified`].
+///
+/// # Errors
+/// * [`VerificationError::EventNotFound`] — no event exists for `event_id`.
+/// * [`VerificationError::NotAVerifierSigner`] — `signer` is not in the
+///   configured verifier signer set.
+/// * [`VerificationError::DuplicateSigner`] — `signer` already submitted
+///   verification for this event.
+///
+/// # Returns
+/// The number of distinct signers who have now submitted for this event.
+///
+/// # Events
+/// Emits `(Symbol("verification"), Symbol("event_signed"))` with data
+/// `(event_id, signer, distinct_signer_count)`.
+pub fn submit_verification(
+    env: &Env,
+    event_id: u64,
+    signer: Address,
+) -> Result<u32, VerificationError> {
+    signer.require_auth();
+
+    if crate::storage::get_event(env, event_id).is_err() {
+        return Err(VerificationError::EventNotFound);
+    }
+
+    let configured_signers = crate::admin::get_verifier_signers(env);
+    if !configured_signers.iter().any(|addr| addr == signer) {
+        return Err(VerificationError::NotAVerifierSigner);
+    }
+
+    let mut submitted = crate::storage::get_event_verification_signers(env, event_id);
+    if submitted.iter().any(|addr| addr == signer) {
+        return Err(VerificationError::DuplicateSigner);
+    }
+
+    crate::storage::add_event_verification_signer(env, event_id, &signer);
+    submitted.push_back(signer.clone());
+    let distinct_count = submitted.len();
+
+    env.events().publish(
+        (
+            Symbol::new(env, "verification"),
+            Symbol::new(env, "event_signed"),
+        ),
+        (event_id, signer, distinct_count),
+    );
+
+    Ok(distinct_count)
+}
+
+/// Return `true` once at least `M` (the configured threshold) distinct
+/// verifier signers have submitted verification for this event via
+/// [`submit_verification`].
+///
+/// Returns `false` if no verifier config has ever been set (threshold
+/// defaults to `0`, which can never be "reached").
+pub fn is_event_verified(env: &Env, event_id: u64) -> bool {
+    let threshold = crate::admin::get_verifier_threshold(env);
+    if threshold == 0 {
+        return false;
+    }
+    crate::storage::get_event_verification_signers(env, event_id).len() >= threshold
+}
+
+/// Return the number of distinct verifier signers who have submitted
+/// verification for an event so far.
+pub fn get_event_verification_count(env: &Env, event_id: u64) -> u32 {
+    crate::storage::get_event_verification_signers(env, event_id).len()
+}
+
+// ---------------------------------------------------------------------------
+// Finalization challenge (#1344)
+// ---------------------------------------------------------------------------
+
+/// Challenge a recently finalized event result and slash the finalizer's bond.
+///
+/// **Documented slash rule:** on success, **100%** of the locked finalization
+/// bond is transferred to the contract treasury. The bond record is marked
+/// `challenged` and `settled` so it cannot be returned later.
+///
+/// Only the contract admin or a configured verifier signer may challenge,
+/// and only while the challenge window is still open.
+///
+/// # Errors
+/// Mapped onto [`crate::event::EventError`] by the contract entry point:
+/// * `UnauthorizedChallenge` — caller is neither admin nor a verifier signer.
+/// * `BondNotFound` — event was never finalized with a bond.
+/// * `BondAlreadySettled` — bond already challenged or returned.
+/// * `ChallengeWindowClosed` — the challenge window has elapsed.
+/// * `TransferFailed` — treasury transfer failed.
+pub fn challenge_finalization(
+    env: &Env,
+    challenger: Address,
+    event_id: u64,
+) -> Result<i128, crate::event::EventError> {
+    use crate::event::EventError;
+    use crate::storage_types::FINALIZATION_CHALLENGE_WINDOW_SECONDS;
+    use crate::token::TokenHelper;
+
+    challenger.require_auth();
+
+    let is_admin = env
+        .storage()
+        .persistent()
+        .get::<DataKey, Address>(&DataKey::Admin(challenger.clone()))
+        .is_some();
+    let is_verifier = crate::admin::get_verifier_signers(env)
+        .iter()
+        .any(|addr| addr == challenger);
+    if !is_admin && !is_verifier {
+        return Err(EventError::UnauthorizedChallenge);
+    }
+
+    let mut bond =
+        crate::storage::get_finalization_bond(env, event_id).ok_or(EventError::BondNotFound)?;
+
+    if bond.settled || bond.challenged {
+        return Err(EventError::BondAlreadySettled);
+    }
+
+    let now = env.ledger().timestamp();
+    let window_end = bond
+        .finalized_at
+        .saturating_add(FINALIZATION_CHALLENGE_WINDOW_SECONDS);
+    if now >= window_end {
+        return Err(EventError::ChallengeWindowClosed);
+    }
+
+    let treasury = crate::admin::get_treasury(env).unwrap_or_else(|| panic!("not_initialized"));
+    let xlm_token = crate::admin::get_xlm_token(env).unwrap_or_else(|| panic!("not_initialized"));
+
+    // Slash rule: 100% of the bond → treasury.
+    TokenHelper::distribute_winnings(env, &xlm_token, &treasury, bond.bond)
+        .map_err(|_| EventError::TransferFailed)?;
+
+    bond.challenged = true;
+    bond.settled = true;
+    crate::storage::set_finalization_bond(env, &bond);
+
+    env.events().publish(
+        (
+            Symbol::new(env, "verification"),
+            Symbol::new(env, "bond_slashed"),
+        ),
+        (event_id, challenger, bond.finalizer.clone(), bond.bond),
+    );
+
+    Ok(bond.bond)
 }
 
 // ---------------------------------------------------------------------------

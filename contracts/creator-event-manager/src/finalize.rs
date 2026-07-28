@@ -14,9 +14,13 @@ use soroban_sdk::{Address, Env, Symbol, Vec};
 
 use crate::admin;
 use crate::event::{self, EventError};
+use crate::fee;
 use crate::leaderboard;
 use crate::storage::{self, TTL_LEDGERS};
-use crate::storage_types::{DataKey, PrizeAllocation, CLAIM_PERIOD_SECONDS};
+use crate::storage_types::{
+    CreatorVestingSchedule, DataKey, FinalizationBond, PrizeAllocation, CLAIM_PERIOD_SECONDS,
+    FINALIZATION_BOND_STROOPS, FINALIZATION_CHALLENGE_WINDOW_SECONDS,
+};
 use crate::token::TokenHelper;
 
 // ---------------------------------------------------------------------------
@@ -26,7 +30,11 @@ use crate::token::TokenHelper;
 /// Rank participants, split the prize pool, and stage per-winner allocations.
 ///
 /// `caller.require_auth()` is enforced but the call is otherwise permissionless:
-/// anyone may finalize an event once its conditions are met.
+/// anyone may finalize an event once its conditions are met. The caller must
+/// lock [`FINALIZATION_BOND_STROOPS`]; the bond is held for
+/// [`FINALIZATION_CHALLENGE_WINDOW_SECONDS`] and is either returned via
+/// [`settle_finalization_bond`] or fully slashed to treasury via
+/// [`crate::verification::challenge_finalization`].
 ///
 /// # Checks (in order)
 /// 1. Contract not paused ([`EventError::Paused`]).
@@ -36,6 +44,7 @@ use crate::token::TokenHelper;
 /// 5. Event has ended — `now >= end_time` ([`EventError::EventNotEnded`]).
 /// 6. Every match resolved — each match's `result_submitted == true`
 ///    ([`EventError::MatchesNotComplete`]).
+/// 7. Caller can lock the required finalization bond ([`EventError::BondRequired`]).
 ///
 /// # Payout
 /// The leaderboard ([`leaderboard::get_event_leaderboard`]) is fully
@@ -111,6 +120,36 @@ pub fn finalize_event(
         }
     }
 
+    // 7. Lock the required finalization bond before any payout mutation.
+    let xlm_token = admin::get_xlm_token(env).unwrap_or_else(|| panic!("not_initialized"));
+    if !TokenHelper::has_sufficient_balance(env, &xlm_token, &caller, FINALIZATION_BOND_STROOPS) {
+        return Err(EventError::BondRequired);
+    }
+    // Direct transfer (caller already authorized above) — same pattern as
+    // create_event fee/prize escrow, so no separate allowance is required.
+    soroban_sdk::token::Client::new(env, &xlm_token).transfer(
+        &caller,
+        &env.current_contract_address(),
+        &FINALIZATION_BOND_STROOPS,
+    );
+
+    storage::set_finalization_bond(
+        env,
+        &FinalizationBond {
+            event_id,
+            finalizer: caller.clone(),
+            bond: FINALIZATION_BOND_STROOPS,
+            finalized_at: now,
+            challenged: false,
+            settled: false,
+        },
+    );
+
+    env.events().publish(
+        (Symbol::new(env, "event"), Symbol::new(env, "bond_locked")),
+        (event_id, caller.clone(), FINALIZATION_BOND_STROOPS),
+    );
+
     // Recompute and persist the final weighted standings snapshot (#1311).
     // Every match is resolved at this point, so this stores the definitive
     // end-of-event standings. Payouts below intentionally remain driven by the
@@ -122,8 +161,6 @@ pub fn finalize_event(
     // overflow; collapse it onto EventNotFound to stay within EventError.
     let leaderboard =
         leaderboard::get_event_leaderboard(env, event_id).map_err(|_| EventError::EventNotFound)?;
-
-    let xlm_token = admin::get_xlm_token(env).unwrap_or_else(|| panic!("not_initialized"));
 
     let prize_pool = event.prize_pool;
     let n = event.reward_distribution.len();
@@ -155,12 +192,49 @@ pub fn finalize_event(
         payouts.push_back((entry.user.clone(), amount));
     }
 
-    // Refund the unallocated percentage + integer-division dust to the creator
-    // in a single transfer. With zero participants this is the full prize pool.
+    // The unallocated percentage + integer-division dust goes to the creator
+    // (the full prize pool with zero participants). Per the configured
+    // creator-vesting share, a portion is paid immediately and the rest is
+    // staged into a linear vesting schedule instead of transferred outright,
+    // giving the creator an ongoing stake in the event's dispute outcome.
     let refund_to_creator = prize_pool - total_distributed;
     if refund_to_creator > 0 {
-        TokenHelper::distribute_winnings(env, &xlm_token, &event.creator, refund_to_creator)
-            .map_err(|_| EventError::TransferFailed)?;
+        let vest_share_bps = fee::get_creator_vest_share_bps(env) as i128;
+        let vested_amount = refund_to_creator * vest_share_bps / 10_000;
+        let immediate_amount = refund_to_creator - vested_amount;
+
+        if immediate_amount > 0 {
+            TokenHelper::distribute_winnings(env, &xlm_token, &event.creator, immediate_amount)
+                .map_err(|_| EventError::TransferFailed)?;
+        }
+
+        if vested_amount > 0 {
+            let vesting_period = fee::get_creator_vesting_period_seconds(env);
+            let schedule = CreatorVestingSchedule {
+                creator: event.creator.clone(),
+                event_id,
+                total_amount: vested_amount,
+                claimed_amount: 0,
+                forfeited_amount: 0,
+                start_time: now,
+                unlock_time: now.saturating_add(vesting_period),
+                settled: false,
+            };
+            storage::set_creator_vesting(env, &schedule);
+
+            env.events().publish(
+                (
+                    Symbol::new(env, "creator"),
+                    Symbol::new(env, "vesting_scheduled"),
+                ),
+                (
+                    event_id,
+                    event.creator.clone(),
+                    vested_amount,
+                    schedule.unlock_time,
+                ),
+            );
+        }
     }
 
     // Mark finalized and persist.
@@ -340,4 +414,60 @@ pub fn get_event_payouts(env: &Env, event_id: u64) -> Vec<(Address, i128)> {
         }
         None => Vec::new(env),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Finalization bond settlement (#1344)
+// ---------------------------------------------------------------------------
+
+/// Return the finalizer's bond after the challenge window closes unchallenged.
+///
+/// Permissionless once the window has elapsed: anyone may trigger settlement,
+/// but the bond is always returned to the recorded `finalizer`.
+///
+/// # Checks
+/// 1. Bond record exists ([`EventError::BondNotFound`]).
+/// 2. Bond not already settled / challenged ([`EventError::BondAlreadySettled`]).
+/// 3. Challenge window has closed ([`EventError::ChallengeWindowOpen`]).
+///
+/// Returns the returned bond amount.
+pub fn settle_finalization_bond(
+    env: &Env,
+    caller: Address,
+    event_id: u64,
+) -> Result<i128, EventError> {
+    caller.require_auth();
+
+    let mut bond = storage::get_finalization_bond(env, event_id).ok_or(EventError::BondNotFound)?;
+
+    if bond.settled || bond.challenged {
+        return Err(EventError::BondAlreadySettled);
+    }
+
+    let now = env.ledger().timestamp();
+    let window_end = bond
+        .finalized_at
+        .saturating_add(FINALIZATION_CHALLENGE_WINDOW_SECONDS);
+    if now < window_end {
+        return Err(EventError::ChallengeWindowOpen);
+    }
+
+    let xlm_token = admin::get_xlm_token(env).unwrap_or_else(|| panic!("not_initialized"));
+    TokenHelper::distribute_winnings(env, &xlm_token, &bond.finalizer, bond.bond)
+        .map_err(|_| EventError::TransferFailed)?;
+
+    bond.settled = true;
+    storage::set_finalization_bond(env, &bond);
+
+    env.events().publish(
+        (Symbol::new(env, "event"), Symbol::new(env, "bond_returned")),
+        (event_id, bond.finalizer.clone(), bond.bond),
+    );
+
+    Ok(bond.bond)
+}
+
+/// Read the finalization bond record for an event, if present.
+pub fn get_finalization_bond(env: &Env, event_id: u64) -> Option<FinalizationBond> {
+    storage::get_finalization_bond(env, event_id)
 }

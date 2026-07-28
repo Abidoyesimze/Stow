@@ -3,7 +3,7 @@ use insightarena_contract::{
 };
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol};
+use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, BytesN};
 
 fn register_token(env: &Env) -> Address {
     let token_admin = Address::generate(env);
@@ -40,6 +40,7 @@ fn market_params_with_window(env: &Env, dispute_window: u64) -> CreateMarketPara
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: true,
+        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
     }
 }
 
@@ -144,10 +145,19 @@ fn resolve_dispute_reject_forfeits_bond_to_treasury_balance() {
     TokenClient::new(&env, &xlm_token).approve(&disputer, &client.address, &bond, &9999);
     client.raise_dispute(&disputer, &id, &bond);
 
+    // A rejected dispute's bond is slashed: the configured insurance-pool
+    // share (default 10%, see #1352) is reserved, and the remainder goes to
+    // treasury — it no longer forfeits 100% to treasury.
     let treasury_before = client.get_treasury_balance();
+    let insurance_before = client.get_insurance_pool_balance();
     client.resolve_dispute(&admin, &id, &false);
     let treasury_after = client.get_treasury_balance();
-    assert_eq!(treasury_after, treasury_before + bond);
+    let insurance_after = client.get_insurance_pool_balance();
+
+    let insurance_share = bond * 1000 / 10_000;
+    let treasury_share = bond - insurance_share;
+    assert_eq!(treasury_after, treasury_before + treasury_share);
+    assert_eq!(insurance_after, insurance_before + insurance_share);
 }
 
 #[test]
@@ -575,5 +585,182 @@ fn test_get_open_dispute_count_never_goes_below_zero() {
     env.mock_all_auths();
     let (client, _admin, _oracle, _xlm_token) = deploy(&env);
     // Verify count starts at zero and remains non-negative
+    assert_eq!(client.get_open_dispute_count(), 0);
+}
+
+// ── Timing boundary tests (#1268) ─────────────────────────────────────────────
+
+/// Raising a dispute at the exact ledger timestamp of resolution (elapsed = 0)
+/// is within the window — must be accepted.
+#[test]
+fn test_dispute_raise_at_exact_resolution_timestamp() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, oracle, xlm_token) = deploy(&env);
+    let creator = Address::generate(&env);
+    let disputer = Address::generate(&env);
+
+    let id = client.create_market(&creator, &market_params_with_window(&env, 100));
+    env.ledger().set_timestamp(env.ledger().timestamp() + 20);
+    client.resolve_market(&oracle, &id, &symbol_short!("yes"));
+    let resolved_at = env.ledger().timestamp();
+
+    let bond = 15_000_000_i128;
+    StellarAssetClient::new(&env, &xlm_token).mint(&disputer, &bond);
+    TokenClient::new(&env, &xlm_token).approve(&disputer, &client.address, &bond, &9999);
+
+    // now == resolved_at: 0 seconds elapsed, well inside the window
+    env.ledger().set_timestamp(resolved_at);
+    let result = client.try_raise_dispute(&disputer, &id, &bond);
+    assert!(result.is_ok(), "dispute at resolution timestamp must be accepted");
+}
+
+/// One second before the deadline (resolved_at + window - 1) must be accepted.
+#[test]
+fn test_dispute_raise_one_second_before_expiry() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, oracle, xlm_token) = deploy(&env);
+    let creator = Address::generate(&env);
+    let disputer = Address::generate(&env);
+
+    let window = 100_u64;
+    let id = client.create_market(&creator, &market_params_with_window(&env, window));
+    env.ledger().set_timestamp(env.ledger().timestamp() + 20);
+    client.resolve_market(&oracle, &id, &symbol_short!("yes"));
+    let resolved_at = env.ledger().timestamp();
+
+    let bond = 15_000_000_i128;
+    StellarAssetClient::new(&env, &xlm_token).mint(&disputer, &bond);
+    TokenClient::new(&env, &xlm_token).approve(&disputer, &client.address, &bond, &9999);
+
+    // deadline = resolved_at + window; one second before → resolved_at + window - 1
+    env.ledger().set_timestamp(resolved_at + window - 1);
+    let result = client.try_raise_dispute(&disputer, &id, &bond);
+    assert!(result.is_ok(), "dispute one second before expiry must be accepted");
+}
+
+/// Raising a second dispute while one is already active must be rejected with
+/// `DisputeAlreadyFiled`. `list_active_disputes` and `get_open_dispute_count`
+/// must stay in sync throughout.
+#[test]
+fn test_raise_duplicate_dispute_on_active_dispute_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, oracle, xlm_token) = deploy(&env);
+    let creator = Address::generate(&env);
+    let disputer = Address::generate(&env);
+
+    let id = client.create_market(&creator, &market_params(&env));
+    env.ledger().set_timestamp(env.ledger().timestamp() + 20);
+    client.resolve_market(&oracle, &id, &symbol_short!("yes"));
+
+    let bond = 15_000_000_i128;
+    StellarAssetClient::new(&env, &xlm_token).mint(&disputer, &(bond * 2));
+    TokenClient::new(&env, &xlm_token).approve(&disputer, &client.address, &(bond * 2), &9999);
+
+    // First dispute succeeds
+    client.raise_dispute(&disputer, &id, &bond);
+    assert_eq!(client.get_open_dispute_count(), 1);
+    assert_eq!(client.list_active_disputes().len(), 1);
+
+    // Second dispute on the same market (active dispute present) must be rejected
+    let result = client.try_raise_dispute(&disputer, &id, &bond);
+    assert!(matches!(
+        result,
+        Err(Ok(InsightArenaError::DisputeAlreadyFiled))
+    ));
+
+    // Counters must be unchanged after the rejected attempt
+    assert_eq!(client.get_open_dispute_count(), 1);
+    assert_eq!(client.list_active_disputes().len(), 1);
+}
+
+/// After a dispute is *rejected* (bond forfeited), the market remains resolved
+/// and still within the dispute window. Raising a new dispute on the same market
+/// must be allowed (the old dispute entry was removed on rejection).
+#[test]
+fn test_reraise_dispute_after_rejection_within_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, oracle, xlm_token) = deploy(&env);
+    let creator = Address::generate(&env);
+    let disputer = Address::generate(&env);
+
+    // Use a large window so it does not expire mid-test
+    let id = client.create_market(&creator, &market_params_with_window(&env, 86_400));
+    env.ledger().set_timestamp(env.ledger().timestamp() + 20);
+    client.resolve_market(&oracle, &id, &symbol_short!("yes"));
+
+    let bond = 15_000_000_i128;
+    StellarAssetClient::new(&env, &xlm_token).mint(&disputer, &(bond * 2));
+    TokenClient::new(&env, &xlm_token).approve(&disputer, &client.address, &(bond * 2), &9999);
+
+    // First dispute, then admin rejects it (bond forfeited, market still resolved)
+    client.raise_dispute(&disputer, &id, &bond);
+    assert_eq!(client.list_active_disputes().len(), 1);
+    assert_eq!(client.get_open_dispute_count(), 1);
+
+    client.resolve_dispute(&admin, &id, &false);
+    assert_eq!(client.list_active_disputes().len(), 0);
+    assert_eq!(client.get_open_dispute_count(), 0);
+
+    // The dispute entry is gone; a new dispute on the same market must succeed
+    let result = client.try_raise_dispute(&disputer, &id, &bond);
+    assert!(result.is_ok(), "re-raising after rejection must be allowed within window");
+    assert_eq!(client.list_active_disputes().len(), 1);
+    assert_eq!(client.get_open_dispute_count(), 1);
+}
+
+/// `list_active_disputes` and `get_open_dispute_count` must agree after every
+/// raise and resolve step, across multiple markets.
+#[test]
+fn test_list_active_disputes_and_count_stay_consistent_through_all_steps() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, oracle, xlm_token) = deploy(&env);
+    let creator = Address::generate(&env);
+    let disputer = Address::generate(&env);
+
+    // Initial state: both counters at zero
+    assert_eq!(client.list_active_disputes().len() as u32, client.get_open_dispute_count());
+    assert_eq!(client.get_open_dispute_count(), 0);
+
+    let id1 = client.create_market(&creator, &market_params(&env));
+    let id2 = client.create_market(&creator, &market_params(&env));
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 20);
+    client.resolve_market(&oracle, &id1, &symbol_short!("yes"));
+    client.resolve_market(&oracle, &id2, &symbol_short!("yes"));
+
+    let bond = 15_000_000_i128;
+    StellarAssetClient::new(&env, &xlm_token).mint(&disputer, &(bond * 2));
+    TokenClient::new(&env, &xlm_token).approve(&disputer, &client.address, &(bond * 2), &9999);
+
+    // After raising on id1: list.len() == count == 1
+    client.raise_dispute(&disputer, &id1, &bond);
+    let active = client.list_active_disputes();
+    assert_eq!(active.len() as u32, client.get_open_dispute_count());
+    assert!(active.contains(&id1));
+
+    // After raising on id2: list.len() == count == 2
+    client.raise_dispute(&disputer, &id2, &bond);
+    let active = client.list_active_disputes();
+    assert_eq!(active.len() as u32, client.get_open_dispute_count());
+    assert!(active.contains(&id1));
+    assert!(active.contains(&id2));
+
+    // After resolving id1 (upheld): list.len() == count == 1, id1 gone
+    client.resolve_dispute(&admin, &id1, &true);
+    let active = client.list_active_disputes();
+    assert_eq!(active.len() as u32, client.get_open_dispute_count());
+    assert!(!active.contains(&id1));
+    assert!(active.contains(&id2));
+
+    // After resolving id2 (rejected): list empty, count == 0
+    client.resolve_dispute(&admin, &id2, &false);
+    let active = client.list_active_disputes();
+    assert_eq!(active.len() as u32, client.get_open_dispute_count());
+    assert_eq!(active.len(), 0);
     assert_eq!(client.get_open_dispute_count(), 0);
 }

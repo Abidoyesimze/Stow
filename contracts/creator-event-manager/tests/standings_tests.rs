@@ -11,7 +11,7 @@
 
 use creator_event_manager::storage_types::{
     weighted_contribution, StandingEntry, EARLY_PREDICTION_BONUS_BPS,
-    EARLY_PREDICTION_LEAD_SECONDS, UNDERDOG_BONUS_BPS, WEIGHT_BASE_BPS,
+    EARLY_PREDICTION_LEAD_SECONDS, FINALIZATION_BOND_STROOPS, UNDERDOG_BONUS_BPS, WEIGHT_BASE_BPS,
 };
 use creator_event_manager::CreatorEventManagerContractClient;
 use soroban_sdk::testutils::Address as _;
@@ -270,7 +270,10 @@ fn test_early_prediction_outranks_late_with_equal_correct_counts() {
     // Equal correct counts — ordering is purely the weighted score.
     assert_eq!(first.correct_count, 1);
     assert_eq!(second.correct_count, 1);
-    assert_eq!(first.weighted_score, 4 * (WEIGHT_BASE_BPS + EARLY_PREDICTION_BONUS_BPS));
+    assert_eq!(
+        first.weighted_score,
+        4 * (WEIGHT_BASE_BPS + EARLY_PREDICTION_BONUS_BPS)
+    );
     assert_eq!(second.weighted_score, 4 * WEIGHT_BASE_BPS);
     assert!(first.weighted_score > second.weighted_score);
 
@@ -334,7 +337,10 @@ fn test_against_crowd_pick_outranks_consensus_pick() {
 
     // Same points (4) and same correct count (1) — the minority pick wins.
     assert_eq!(first.user, underdog);
-    assert_eq!(first.weighted_score, 4 * (WEIGHT_BASE_BPS + UNDERDOG_BONUS_BPS));
+    assert_eq!(
+        first.weighted_score,
+        4 * (WEIGHT_BASE_BPS + UNDERDOG_BONUS_BPS)
+    );
     assert_eq!(first.correct_count, 1);
 
     assert_eq!(second.user, consensus);
@@ -482,7 +488,10 @@ fn test_lifecycle_standings_idempotent_through_finalize() {
     );
     // user2: match 2 late exact, base only.
     assert_eq!(after_results.get(1).unwrap().user, user2);
-    assert_eq!(after_results.get(1).unwrap().weighted_score, 4 * WEIGHT_BASE_BPS);
+    assert_eq!(
+        after_results.get(1).unwrap().weighted_score,
+        4 * WEIGHT_BASE_BPS
+    );
     // Idle participant still appears, with a zero score and last rank.
     assert_eq!(after_results.get(2).unwrap().user, idle);
     assert_eq!(after_results.get(2).unwrap().weighted_score, 0);
@@ -494,6 +503,7 @@ fn test_lifecycle_standings_idempotent_through_finalize() {
     // Finalize (recomputes standings again) — snapshot must be unchanged.
     env.ledger().set_timestamp(t0 + 200_000);
     let caller = Address::generate(&env);
+    fund(&env, &xlm_token, &caller, FINALIZATION_BOND_STROOPS);
     client.finalize_event(&caller, &event_id);
     assert!(client.is_event_finalized(&event_id));
 

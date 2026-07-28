@@ -7,6 +7,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
@@ -17,6 +18,7 @@ import { CACHE_WARMING_KEYS } from '../cache/cache-warming.keys';
 import { SorobanService } from '../soroban/soroban.service';
 import { User } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
+import { MarketSettlementScheduler } from './market-settlement.scheduler';
 import { ChallengeResolutionDto } from './dto/challenge-resolution.dto';
 import { CreateCommentDto } from './dto/create-comment.dto';
 import { CreateMarketDto } from './dto/create-market.dto';
@@ -38,8 +40,10 @@ import { Comment } from './entities/comment.entity';
 import { MarketTemplate } from './entities/market-template.entity';
 import { Market, MarketSettlementState } from './entities/market.entity';
 import { UserBookmark } from './entities/user-bookmark.entity';
+import { MarketPriceSnapshot } from './entities/market-price-snapshot.entity';
 import { Prediction } from '../predictions/entities/prediction.entity';
 import { WebhookDispatcherService } from '../webhooks/services/webhook-dispatcher.service';
+import { PriceHistoryQueryDto, TimeRange, Interval } from './dto/price-history-query.dto';
 
 @Injectable()
 export class MarketsService {
@@ -67,11 +71,15 @@ export class MarketsService {
     private readonly userBookmarksRepository: Repository<UserBookmark>,
     @InjectRepository(Prediction)
     private readonly predictionsRepository: Repository<Prediction>,
+    @InjectRepository(MarketPriceSnapshot)
+    private readonly priceSnapshotRepository: Repository<MarketPriceSnapshot>,
     private readonly usersService: UsersService,
     private readonly sorobanService: SorobanService,
     private readonly dataSource: DataSource,
     private readonly webhookDispatcher: WebhookDispatcherService,
     @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
+    @Inject(forwardRef(() => MarketSettlementScheduler))
+    private readonly settlementScheduler: MarketSettlementScheduler,
   ) {}
 
   /**
@@ -146,6 +154,64 @@ export class MarketsService {
     );
 
     return stats;
+  }
+
+  /**
+   * Retrieves the bucketted price history for a given market.
+   * Leverages PostgreSQL's date_trunc to downsample price points.
+   */
+  async getPriceHistory(
+    marketId: string,
+    query: PriceHistoryQueryDto,
+  ): Promise<any[]> {
+    const { timeRange, interval } = query;
+    const market = await this.findByIdOrOnChainId(marketId);
+
+    const qb = this.priceSnapshotRepository.createQueryBuilder('snapshot')
+      .where('snapshot.market_id = :marketId', { marketId: market.id });
+
+    if (timeRange !== TimeRange.ALL) {
+      let intervalStr = '';
+      if (timeRange === TimeRange.ONE_HOUR) intervalStr = '1 hour';
+      if (timeRange === TimeRange.ONE_DAY) intervalStr = '1 day';
+      if (timeRange === TimeRange.SEVEN_DAYS) intervalStr = '7 days';
+      if (timeRange === TimeRange.THIRTY_DAYS) intervalStr = '30 days';
+      
+      qb.andWhere(`snapshot.created_at >= NOW() - INTERVAL '${intervalStr}'`);
+    }
+
+    let pgInterval = 'hour';
+    if (interval === Interval.ONE_MINUTE) pgInterval = 'minute';
+    if (interval === Interval.ONE_HOUR) pgInterval = 'hour';
+    if (interval === Interval.ONE_DAY) pgInterval = 'day';
+
+    qb.select(`date_trunc('${pgInterval}', snapshot.created_at)`, 'timestamp')
+      .addSelect('snapshot.outcome_index', 'outcome_index')
+      .addSelect('AVG(snapshot.price)', 'price')
+      .groupBy(`date_trunc('${pgInterval}', snapshot.created_at)`)
+      .addGroupBy('snapshot.outcome_index')
+      .orderBy('timestamp', 'ASC')
+      .addOrderBy('snapshot.outcome_index', 'ASC');
+
+    const results = await qb.getRawMany();
+    
+    return results.map(row => ({
+      timestamp: row.timestamp,
+      outcome_index: row.outcome_index,
+      price: Number(row.price),
+    }));
+  }
+
+  /**
+   * Internal helper to record a new price point for an outcome
+   */
+  async snapshotPrice(marketId: string, outcomeIndex: number, price: number): Promise<void> {
+    const snapshot = this.priceSnapshotRepository.create({
+      market_id: marketId,
+      outcome_index: outcomeIndex,
+      price,
+    });
+    await this.priceSnapshotRepository.save(snapshot);
   }
 
   /**
@@ -230,6 +296,64 @@ export class MarketsService {
     }
   }
 
+  /**
+   * Creates a single market with its own dedicated transaction. Used by the
+   * admin CSV bulk-import path so each row commits or rolls back
+   * independently, without aborting other valid rows in the same import.
+   */
+  async createMarketRowTransactional(
+    dto: CreateMarketDto,
+    user: User,
+  ): Promise<Market> {
+    const endTime = new Date(dto.end_time);
+    if (endTime <= new Date()) {
+      throw new BadRequestException('end_time must be in the future');
+    }
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+    try {
+      let onChainMarketId: string;
+      try {
+        const result = await this.sorobanService.createMarket(
+          dto.title,
+          dto.description,
+          dto.category,
+          dto.outcome_options,
+          dto.end_time,
+          dto.resolution_time,
+        );
+        onChainMarketId = result.market_id;
+      } catch (err) {
+        this.logger.error('Soroban createMarket failed (CSV row)', err);
+        throw new BadGatewayException('Failed to create market on Soroban');
+      }
+      const market = queryRunner.manager.create(Market, {
+        on_chain_market_id: onChainMarketId,
+        creator: user,
+        title: dto.title,
+        description: dto.description,
+        category: dto.category,
+        outcome_options: dto.outcome_options,
+        end_time: new Date(dto.end_time),
+        resolution_time: new Date(dto.resolution_time),
+        is_public: dto.is_public,
+        is_resolved: false,
+        is_cancelled: false,
+        total_pool_stroops: '0',
+        participant_count: 0,
+      });
+      const saved = await queryRunner.manager.save(market);
+      await queryRunner.commitTransaction();
+      return saved;
+    } catch (err) {
+      await queryRunner.rollbackTransaction();
+      throw err;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
   async createMarket(dto: CreateMarketDto, user: User): Promise<Market> {
     const endTime = new Date(dto.end_time);
     if (endTime <= new Date()) {
@@ -249,7 +373,7 @@ export class MarketsService {
       );
       onChainMarketId = result.market_id;
       this.logger.log(
-        `Soroban createMarket called for "${dto.title}" — on_chain_id: ${onChainMarketId}`,
+        `Soroban createMarket called for "${dto.title}" â€” on_chain_id: ${onChainMarketId}`,
       );
     } catch (err) {
       this.logger.error('Soroban createMarket failed', err);
@@ -392,7 +516,7 @@ export class MarketsService {
 
   /**
    * Propose a resolution outcome for an ended market. Starts the
-   * configurable grace/challenge window instead of resolving immediately —
+   * configurable grace/challenge window instead of resolving immediately â€”
    * the market only reaches SETTLED once MarketSettlementScheduler sweeps it
    * (or an admin resolves a challenge) after the window elapses.
    */
@@ -503,7 +627,7 @@ export class MarketsService {
 
   /**
    * Admin adjudication of a challenged market. Settles immediately on-chain
-   * and in the DB — a challenged market has already lost its grace window,
+   * and in the DB â€” a challenged market has already lost its grace window,
    * so there's nothing left for the scheduler to wait on.
    */
   async resolveChallenge(
@@ -1038,5 +1162,19 @@ export class MarketsService {
       user: { id: user.id },
       market: { id: market.id },
     });
+  }
+
+  /**
+   * Get failed settlement items from dead-letter queue (admin only)
+   */
+  async getSettlementFailures() {
+    return this.settlementScheduler.getDeadLetterQueue();
+  }
+
+  /**
+   * Manually retry a failed settlement (admin only)
+   */
+  async retrySettlement(marketId: string): Promise<boolean> {
+    return this.settlementScheduler.retrySettlement(marketId);
   }
 }

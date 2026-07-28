@@ -1,5 +1,5 @@
 use soroban_sdk::testutils::{Address as _, Ledger as _};
-use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol};
+use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, BytesN};
 
 use insightarena_contract::market::CreateMarketParams;
 use insightarena_contract::{InsightArenaContract, InsightArenaContractClient, InsightArenaError};
@@ -35,6 +35,7 @@ fn default_params(env: &Env) -> CreateMarketParams {
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: true,
+        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
     }
 }
 
@@ -56,6 +57,22 @@ fn resolve_market_success() {
     assert!(market.is_resolved);
     assert_eq!(market.resolved_outcome, Some(symbol_short!("yes")));
     assert_eq!(market.resolved_at, Some(env.ledger().timestamp()));
+}
+
+#[test]
+fn resolve_market_fails_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, oracle) = deploy(&env);
+    let creator = Address::generate(&env);
+
+    let id = client.create_market(&creator, &default_params(&env));
+    env.ledger().set_timestamp(env.ledger().timestamp() + 2000);
+
+    client.set_paused(&true, &1u32);
+
+    let result = client.try_resolve_market(&oracle, &id, &symbol_short!("yes"));
+    assert!(matches!(result, Err(Ok(InsightArenaError::Paused))));
 }
 
 #[test]

@@ -21,6 +21,13 @@ pub const MAX_EVENT_DURATION_SECONDS: u64 = 7_776_000;
 /// their allocation before it becomes eligible for `clawback_unclaimed` to
 /// treasury (#1312).
 pub const CLAIM_PERIOD_SECONDS: u64 = 2_592_000; // 30 days
+/// XLM bond (in stroops) that must be locked to call `finalize_event` (#1344).
+/// Held during the challenge window; returned if unchallenged, or fully
+/// slashed to treasury if a challenge succeeds.
+pub const FINALIZATION_BOND_STROOPS: i128 = 10_000_000; // 1 XLM
+/// Challenge window (seconds) after finalization during which the result may
+/// be disputed via `challenge_finalization` (#1344).
+pub const FINALIZATION_CHALLENGE_WINDOW_SECONDS: u64 = 86_400; // 1 day
 /// Valid predicted outcome symbols
 pub const OUTCOME_TEAM_A: &str = "TEAM_A";
 pub const OUTCOME_TEAM_B: &str = "TEAM_B";
@@ -276,6 +283,69 @@ pub enum DataKey {
     /// treasury via `clawback_unclaimed`  (event_id). Written once by
     /// `finalize_event`.
     ClaimDeadline(u64),
+
+    // ── M-of-N event verification (#1358) ────────────────────────────────────
+    /// Vec<Address> of the configured verifier signer set (the "N"). Written
+    /// by `admin::set_verifier_config`.
+    VerifierSigners,
+
+    /// Number of distinct signers required before an event is considered
+    /// verified (the "M"). Written by `admin::set_verifier_config`.
+    VerifierThreshold,
+
+    /// Vec<Address> of distinct verifier signers who have submitted
+    /// verification for an event so far  (event_id). Written by
+    /// `verification::submit_verification`.
+    EventVerificationSigners(u64),
+
+    // ── Multi-source oracle aggregation (#1347) ──────────────────────────────
+    /// Vec<Address> of addresses authorized to submit numeric oracle values.
+    /// Written by `oracle::configure_oracle_sources`.
+    OracleSources,
+
+    /// Minimum number of distinct oracle sources required before their
+    /// submissions can be aggregated into a median. Written by
+    /// `oracle::configure_oracle_sources`.
+    OracleMinSources,
+
+    /// Vec<OracleSubmission> of numeric values submitted by authorized
+    /// oracle sources for a match  (match_id). Written by
+    /// `oracle::submit_oracle_value`.
+    OracleSubmissions(u64),
+
+    // ── Finalization challenge bond (#1344) ──────────────────────────────────
+    /// Bond locked by the caller of `finalize_event` for an event  (event_id).
+    /// Settled either by `challenge_finalization` (slash to treasury) or by
+    /// `settle_finalization_bond` (return to finalizer after the window).
+    FinalizationBond(u64),
+
+    // ── Two-step admin handover (#1356) ──────────────────────────────────────
+    /// Pending admin nominee awaiting acceptance. Absent when no nomination
+    /// is outstanding. Written by `nominate_admin`, cleared by `accept_admin`
+    /// or `cancel_admin_nomination`.
+    PendingAdmin,
+
+    // ── Creator revenue share vesting ────────────────────────────────────────
+    /// A creator's staged vesting schedule for an event's leftover prize-pool
+    /// revenue  (creator, event_id). Written once by `finalize::finalize_event`,
+    /// settled via `fee::claim_vested_revenue` or `fee::forfeit_creator_vesting`.
+    CreatorVesting(Address, u64),
+
+    /// Share (bps, 0-10000) of a creator's event revenue that is locked into
+    /// a vesting schedule instead of paid immediately. `0` (default) means no
+    /// vesting — fully immediate payout. Written by
+    /// `fee::set_creator_vesting_config`.
+    CreatorVestShareBps,
+
+    /// Lock period (seconds) over which a creator's vested revenue linearly
+    /// unlocks. Written by `fee::set_creator_vesting_config`.
+    CreatorVestingPeriodSeconds,
+
+    // ── Event match lock windows ──────────────────────────────────────────────
+    /// Lock lead-time (seconds before `match_time`) before which predictions
+    /// must be placed. `0` (default) means predictions lock exactly at
+    /// `match_time`. Written by `admin::set_prediction_lock_lead_seconds`.
+    PredictionLockLeadSeconds,
 }
 
 // ---------------------------------------------------------------------------
@@ -520,10 +590,23 @@ pub struct Match {
     /// Must be in the range 1..=MAX_POINTS_MULTIPLIER. Grading multiplies the
     /// base points by this value so a 2× final can award 0 / 2 / 8 points.
     pub points_multiplier: u32,
+
+    /// Unix timestamp after which predictions are no longer accepted for
+    /// this match. Computed at creation as
+    /// `match_time.saturating_sub(lock_lead_seconds)`, using the
+    /// contract-wide `DataKey::PredictionLockLeadSeconds` in effect at that
+    /// time. Enforced by `prediction::submit_prediction`.
+    pub prediction_lock_time: u64,
 }
 
 impl Match {
     /// Create a new pending match.
+    ///
+    /// `lock_lead_seconds` is the configured lock lead-time
+    /// (`admin::get_prediction_lock_lead_seconds`); `prediction_lock_time` is
+    /// computed as `match_time.saturating_sub(lock_lead_seconds)` and stored
+    /// so it can be read back without re-deriving it from a config value that
+    /// may change later.
     pub fn new(
         match_id: u64,
         event_id: u64,
@@ -531,6 +614,7 @@ impl Match {
         team_b: String,
         match_time: u64,
         points_multiplier: u32,
+        lock_lead_seconds: u64,
     ) -> Self {
         Self {
             match_id,
@@ -545,6 +629,7 @@ impl Match {
             home_score: None,
             away_score: None,
             points_multiplier,
+            prediction_lock_time: match_time.saturating_sub(lock_lead_seconds),
         }
     }
 
@@ -823,6 +908,14 @@ impl Prediction {
 /// and deterministic tie-breaking. This replaces the binary Winner model to
 /// support top-N prize splits and flexible reward distributions.
 ///
+/// ## Documented tie-break order (#1343)
+/// Applied consistently by [`LeaderboardEntry::outranks`] and every ranking
+/// path that builds the leaderboard:
+/// 1. Higher `total_points` (descending)
+/// 2. Higher `exact_scores` (descending)
+/// 3. Lower `tie_break_key` — earliest qualifying prediction timestamp (ascending)
+/// 4. Smaller `user` address (ascending, final deterministic key)
+///
 /// Stored in Vec<LeaderboardEntry> (typically temporary, computed on-demand).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -845,9 +938,14 @@ pub struct LeaderboardEntry {
     /// Total number of predictions this user submitted for the event
     pub matches_played: u32,
 
-    /// Unix timestamp of this user's most recent prediction
-    /// (used as tiebreaker — earlier submission = higher rank)
+    /// Unix timestamp of this user's most recent prediction (informational).
     pub last_prediction_time: u64,
+
+    /// Deterministic tie-break key: the earliest prediction timestamp for
+    /// this participant in the event (`u64::MAX` when they have none).
+    /// Stored alongside the entry so clients can audit ranking without
+    /// recomputing (#1343).
+    pub tie_break_key: u64,
 
     /// 1-based rank after sorting (1 is the top-ranked participant).
     /// Set by `get_event_leaderboard` after sorting all entries.
@@ -864,6 +962,7 @@ impl LeaderboardEntry {
         exact_scores: u32,
         matches_played: u32,
         last_prediction_time: u64,
+        tie_break_key: u64,
     ) -> Self {
         Self {
             user,
@@ -873,35 +972,27 @@ impl LeaderboardEntry {
             exact_scores,
             matches_played,
             last_prediction_time,
+            tie_break_key,
             rank: 0, // Will be assigned during leaderboard finalization
         }
     }
 
-    /// Returns `true` if this entry outranks `other` according to the tiebreaker rules.
-    ///
-    /// Sort order (all descending except last_prediction_time):
-    /// 1. Higher `total_points` wins
-    /// 2. On tie: Higher `exact_scores` wins
-    /// 3. On tie: Earlier `last_prediction_time` wins (lower timestamp = better rank)
-    /// 4. On tie: Compare addresses (deterministic final tiebreaker)
+    /// Returns `true` if this entry outranks `other` according to the
+    /// documented tie-break order (#1343):
+    /// 1. Higher `total_points`
+    /// 2. Higher `exact_scores`
+    /// 3. Earlier `tie_break_key` (lower timestamp = better rank)
+    /// 4. Smaller address (final deterministic tiebreaker)
     pub fn outranks(&self, other: &LeaderboardEntry) -> bool {
-        // Primary: higher total_points
         if self.total_points != other.total_points {
             return self.total_points > other.total_points;
         }
-
-        // Secondary: higher exact_scores
         if self.exact_scores != other.exact_scores {
             return self.exact_scores > other.exact_scores;
         }
-
-        // Tertiary: earlier last_prediction_time (lower = better)
-        if self.last_prediction_time != other.last_prediction_time {
-            return self.last_prediction_time < other.last_prediction_time;
+        if self.tie_break_key != other.tie_break_key {
+            return self.tie_break_key < other.tie_break_key;
         }
-
-        // Final tiebreaker: address comparison (deterministic)
-        // Compare the addresses directly; Soroban Address implements Ord
         self.user < other.user
     }
 }
@@ -1053,4 +1144,113 @@ impl StandingEntry {
         }
         self.user < other.user
     }
+}
+
+// ---------------------------------------------------------------------------
+// OracleSubmission (#1347)
+// ---------------------------------------------------------------------------
+
+/// A single numeric value submitted by an authorized oracle source for a
+/// match, contributing to the median aggregation computed by
+/// `oracle::compute_oracle_median`.
+///
+/// Stored in `Vec<OracleSubmission>` under `DataKey::OracleSubmissions(match_id)`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleSubmission {
+    /// Address of the authorized oracle source that submitted this value.
+    pub source: Address,
+
+    /// Match this submission contributes a resolution value for.
+    pub match_id: u64,
+
+    /// The submitted numeric value.
+    pub value: i128,
+
+    /// Unix timestamp when the value was submitted.
+    pub submitted_at: u64,
+}
+
+// ---------------------------------------------------------------------------
+// FinalizationBond (#1344)
+// ---------------------------------------------------------------------------
+
+/// Bond locked by a finalizer when calling `finalize_event`.
+///
+/// Documented slash rule: on a successful challenge, **100%** of `bond` is
+/// transferred to the contract treasury. If the challenge window closes
+/// without a successful challenge, the full `bond` is returned to
+/// `finalizer`.
+///
+/// Stored under `DataKey::FinalizationBond(event_id)`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FinalizationBond {
+    /// Event this bond secures.
+    pub event_id: u64,
+
+    /// Address that called `finalize_event` and locked the bond.
+    pub finalizer: Address,
+
+    /// Bond amount in stroops (always [`FINALIZATION_BOND_STROOPS`] at lock).
+    pub bond: i128,
+
+    /// Ledger timestamp when finalization (and bond lock) occurred.
+    pub finalized_at: u64,
+
+    /// `true` once a successful `challenge_finalization` has slashed the bond.
+    pub challenged: bool,
+
+    /// `true` once the bond has been returned or slashed (terminal state).
+    pub settled: bool,
+}
+
+// ---------------------------------------------------------------------------
+// CreatorVestingSchedule (creator revenue share vesting)
+// ---------------------------------------------------------------------------
+
+/// A creator's staged vesting schedule for their share of an event's leftover
+/// prize-pool revenue, recorded by `finalize::finalize_event` in place of
+/// paying the vested portion out immediately.
+///
+/// The vested amount unlocks linearly between `start_time` and `unlock_time`;
+/// `fee::claim_vested_revenue` transfers whatever portion has unlocked but not
+/// yet been claimed. `fee::forfeit_creator_vesting` settles the schedule
+/// early — e.g. when the event's finalization is later invalidated — sweeping
+/// whatever remains unclaimed to treasury. Either path sets `settled = true`,
+/// a terminal state after which no further claims or forfeitures apply.
+///
+/// Invariant: `claimed_amount + forfeited_amount <= total_amount`, and once
+/// `settled` is true, `claimed_amount + forfeited_amount == total_amount`.
+///
+/// Stored under `DataKey::CreatorVesting(creator, event_id)`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreatorVestingSchedule {
+    /// Address of the creator this schedule pays out to.
+    pub creator: Address,
+
+    /// Event this vesting schedule was staged from.
+    pub event_id: u64,
+
+    /// Total amount (stroops) originally scheduled to vest.
+    pub total_amount: i128,
+
+    /// Cumulative amount (stroops) claimed so far via `claim_vested_revenue`.
+    pub claimed_amount: i128,
+
+    /// Amount (stroops) forfeited via `forfeit_creator_vesting`, if the event
+    /// was invalidated before the schedule fully settled.
+    pub forfeited_amount: i128,
+
+    /// Unix timestamp the schedule was created (finalization time); the
+    /// start of the linear unlock curve.
+    pub start_time: u64,
+
+    /// Unix timestamp at which `total_amount` is fully unlocked.
+    pub unlock_time: u64,
+
+    /// `true` once the schedule reaches a terminal state (fully claimed or
+    /// forfeited). No further claims or forfeitures apply after this.
+    pub settled: bool,
 }

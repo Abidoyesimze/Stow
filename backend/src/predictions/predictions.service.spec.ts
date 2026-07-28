@@ -1,21 +1,39 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken, getDataSourceToken } from '@nestjs/typeorm';
+import { ConfigService } from '@nestjs/config';
 import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
   NotFoundException,
+  HttpStatus,
 } from '@nestjs/common';
 import { Repository, ObjectLiteral } from 'typeorm';
 import { PredictionsService } from './predictions.service';
 import { Prediction } from './entities/prediction.entity';
+import {
+  FraudFlagStatus,
+  FraudSignalType,
+  PredictionFraudFlag,
+} from './entities/prediction-fraud-flag.entity';
 import { Market } from '../markets/entities/market.entity';
 import { PredictionStatus } from './dto/list-my-predictions.dto';
 import { User } from '../users/entities/user.entity';
+import { UsersService } from '../users/users.service';
 import { SorobanService } from '../soroban/soroban.service';
+import { SlippageCheckerService } from './services/slippage-checker.service';
+import { SlippageExceededException } from './exceptions/slippage-exceeded.exception';
 
 type MockRepo<T extends ObjectLiteral> = jest.Mocked<
-  Pick<Repository<T>, 'findOne' | 'create' | 'save' | 'findAndCount' | 'find'>
+  Pick<
+    Repository<T>,
+    | 'findOne'
+    | 'create'
+    | 'save'
+    | 'findAndCount'
+    | 'find'
+    | 'createQueryBuilder'
+  >
 >;
 
 const makeUser = (overrides: Partial<User> = {}): User =>
@@ -61,7 +79,10 @@ describe('PredictionsService', () => {
   let service: PredictionsService;
   let mockPredictionsRepo: MockRepo<Prediction>;
   let mockMarketsRepo: MockRepo<Market>;
+  let mockFraudFlagsRepo: MockRepo<PredictionFraudFlag>;
+  let mockConfigService: jest.Mocked<ConfigService>;
   let mockSoroban: jest.Mocked<SorobanService>;
+  let mockSlippageChecker: jest.Mocked<SlippageCheckerService>;
   let submitPrediction: jest.SpyInstance;
   let qbMock: {
     update: jest.Mock;
@@ -82,13 +103,22 @@ describe('PredictionsService', () => {
       execute: jest.fn().mockResolvedValue(undefined),
     };
 
+    const fraudQbMock = {
+      select: jest.fn().mockReturnThis(),
+      addSelect: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      getRawMany: jest.fn().mockResolvedValue([]),
+    };
+
     mockPredictionsRepo = {
       findOne: jest.fn(),
       create: jest.fn(),
       save: jest.fn(),
       findAndCount: jest.fn(),
-      find: jest.fn(),
-    };
+      find: jest.fn().mockResolvedValue([]),
+      createQueryBuilder: jest.fn().mockReturnValue(fraudQbMock),
+    } as unknown as MockRepo<Prediction>;
 
     mockMarketsRepo = {
       findOne: jest.fn(),
@@ -99,11 +129,19 @@ describe('PredictionsService', () => {
     };
 
     mockSoroban = {
-      submitPrediction: jest.fn().mockResolvedValue({ tx_hash: 'abc123' }),
+      submitPrediction: jest.fn().mockResolvedValue({
+        tx_hash: 'abc123',
+        realized_price: '5000000',
+        shares_received: '2000000',
+      }),
       claimPayout: jest.fn(),
       getEvents: jest.fn(),
     } as unknown as jest.Mocked<SorobanService>;
     submitPrediction = jest.spyOn(mockSoroban, 'submitPrediction');
+
+    mockSlippageChecker = {
+      checkSlippage: jest.fn(),
+    } as unknown as jest.Mocked<SlippageCheckerService>;
 
     const mockDataSource = {
       transaction: jest.fn((cb: (manager: unknown) => Promise<Prediction>) => {
@@ -119,6 +157,26 @@ describe('PredictionsService', () => {
       }),
     };
 
+    mockFraudFlagsRepo = {
+      findOne: jest.fn(),
+      create: jest.fn((data: Partial<PredictionFraudFlag>) => data),
+      save: jest.fn((entity: Partial<PredictionFraudFlag>) =>
+        Promise.resolve({ id: 'flag-uuid-1', ...entity }),
+      ),
+      createQueryBuilder: jest.fn().mockReturnValue({
+        leftJoinAndSelect: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        skip: jest.fn().mockReturnThis(),
+        take: jest.fn().mockReturnThis(),
+        getManyAndCount: jest.fn().mockResolvedValue([[], 0]),
+      }),
+    } as unknown as MockRepo<PredictionFraudFlag>;
+
+    mockConfigService = {
+      get: jest.fn().mockReturnValue(undefined),
+    } as unknown as jest.Mocked<ConfigService>;
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PredictionsService,
@@ -128,8 +186,20 @@ describe('PredictionsService', () => {
         },
         { provide: getRepositoryToken(Market), useValue: mockMarketsRepo },
         { provide: getRepositoryToken(User), useValue: {} },
+        {
+          provide: getRepositoryToken(PredictionFraudFlag),
+          useValue: mockFraudFlagsRepo,
+        },
         { provide: SorobanService, useValue: mockSoroban },
+        { provide: SlippageCheckerService, useValue: mockSlippageChecker },
+        {
+          provide: UsersService,
+          useValue: {
+            recordQualifyingAction: jest.fn().mockResolvedValue(undefined),
+          },
+        },
         { provide: getDataSourceToken(), useValue: mockDataSource },
+        { provide: ConfigService, useValue: mockConfigService },
       ],
     }).compile();
 
@@ -137,7 +207,7 @@ describe('PredictionsService', () => {
   });
 
   describe('submit', () => {
-    it('returns prediction on happy path', async () => {
+    it('returns prediction with realized price and shares on happy path', async () => {
       const user = makeUser();
       const market = makeMarket();
       mockMarketsRepo.findOne.mockResolvedValue(market);
@@ -152,10 +222,14 @@ describe('PredictionsService', () => {
         user,
       );
 
-      // tx_hash 'abc123' in the result proves SorobanService.submitPrediction was called.
+      // Check response structure includes realized_price and shares_received
       expect(result).toMatchObject({
-        tx_hash: 'abc123',
-        chosen_outcome: 'Yes',
+        prediction: {
+          tx_hash: 'abc123',
+          chosen_outcome: 'Yes',
+        },
+        realized_price: '5000000',
+        shares_received: '2000000',
       });
       expect(qbMock.setParameter).toHaveBeenCalledWith(
         'stakeAmount',
@@ -271,6 +345,168 @@ describe('PredictionsService', () => {
         ),
       ).rejects.toThrow(ConflictException);
       expect(mockSoroban.submitPrediction).not.toHaveBeenCalled();
+    });
+
+    it('accepts prediction when slippage is within maxPrice tolerance', async () => {
+      const user = makeUser();
+      const market = makeMarket();
+      mockMarketsRepo.findOne.mockResolvedValue(market);
+      mockPredictionsRepo.findOne.mockResolvedValue(null);
+
+      const result = await service.submit(
+        {
+          market_id: market.id,
+          chosen_outcome: 'Yes',
+          stake_amount_stroops: '10000000',
+          maxPrice: '6000000', // realized_price (5000000) is under this
+        },
+        user,
+      );
+
+      expect(result.realized_price).toBe('5000000');
+      expect(mockSlippageChecker.checkSlippage).toHaveBeenCalledWith(
+        '6000000',
+        undefined,
+        '5000000',
+        '2000000',
+      );
+    });
+
+    it('accepts prediction when slippage is within minSharesOut tolerance', async () => {
+      const user = makeUser();
+      const market = makeMarket();
+      mockMarketsRepo.findOne.mockResolvedValue(market);
+      mockPredictionsRepo.findOne.mockResolvedValue(null);
+
+      const result = await service.submit(
+        {
+          market_id: market.id,
+          chosen_outcome: 'Yes',
+          stake_amount_stroops: '10000000',
+          minSharesOut: '1500000', // shares_received (2000000) is above this
+        },
+        user,
+      );
+
+      expect(result.shares_received).toBe('2000000');
+      expect(mockSlippageChecker.checkSlippage).toHaveBeenCalledWith(
+        undefined,
+        '1500000',
+        '5000000',
+        '2000000',
+      );
+    });
+
+    it('rejects prediction when price exceeds maxPrice', async () => {
+      const user = makeUser();
+      const market = makeMarket();
+      mockMarketsRepo.findOne.mockResolvedValue(market);
+      mockPredictionsRepo.findOne.mockResolvedValue(null);
+      mockSlippageChecker.checkSlippage.mockImplementation(() => {
+        throw new SlippageExceededException('4000000', '5000000', '0', '2000000');
+      });
+
+      await expect(
+        service.submit(
+          {
+            market_id: market.id,
+            chosen_outcome: 'Yes',
+            stake_amount_stroops: '10000000',
+            maxPrice: '4000000',
+          },
+          user,
+        ),
+      ).rejects.toThrow(SlippageExceededException);
+      expect(mockSlippageChecker.checkSlippage).toHaveBeenCalled();
+    });
+
+    it('rejects prediction when shares fall below minSharesOut', async () => {
+      const user = makeUser();
+      const market = makeMarket();
+      mockMarketsRepo.findOne.mockResolvedValue(market);
+      mockPredictionsRepo.findOne.mockResolvedValue(null);
+      mockSlippageChecker.checkSlippage.mockImplementation(() => {
+        throw new SlippageExceededException('0', '5000000', '3000000', '2000000');
+      });
+
+      await expect(
+        service.submit(
+          {
+            market_id: market.id,
+            chosen_outcome: 'Yes',
+            stake_amount_stroops: '10000000',
+            minSharesOut: '3000000',
+          },
+          user,
+        ),
+      ).rejects.toThrow(SlippageExceededException);
+      expect(mockSlippageChecker.checkSlippage).toHaveBeenCalled();
+    });
+
+    it('checks both maxPrice and minSharesOut slippage bounds', async () => {
+      const user = makeUser();
+      const market = makeMarket();
+      mockMarketsRepo.findOne.mockResolvedValue(market);
+      mockPredictionsRepo.findOne.mockResolvedValue(null);
+
+      await service.submit(
+        {
+          market_id: market.id,
+          chosen_outcome: 'Yes',
+          stake_amount_stroops: '10000000',
+          maxPrice: '6000000',
+          minSharesOut: '1500000',
+        },
+        user,
+      );
+
+      expect(mockSlippageChecker.checkSlippage).toHaveBeenCalledWith(
+        '6000000',
+        '1500000',
+        '5000000',
+        '2000000',
+      );
+    });
+
+    it('does not check slippage when bounds are not provided', async () => {
+      const user = makeUser();
+      const market = makeMarket();
+      mockMarketsRepo.findOne.mockResolvedValue(market);
+      mockPredictionsRepo.findOne.mockResolvedValue(null);
+
+      await service.submit(
+        {
+          market_id: market.id,
+          chosen_outcome: 'Yes',
+          stake_amount_stroops: '10000000',
+        },
+        user,
+      );
+
+      expect(mockSlippageChecker.checkSlippage).not.toHaveBeenCalled();
+    });
+
+    it('returns default zeros when contract returns undefined price/shares', async () => {
+      const user = makeUser();
+      const market = makeMarket();
+      mockMarketsRepo.findOne.mockResolvedValue(market);
+      mockPredictionsRepo.findOne.mockResolvedValue(null);
+      mockSoroban.submitPrediction.mockResolvedValue({
+        tx_hash: 'abc123',
+        // No realized_price or shares_received
+      });
+
+      const result = await service.submit(
+        {
+          market_id: market.id,
+          chosen_outcome: 'Yes',
+          stake_amount_stroops: '10000000',
+        },
+        user,
+      );
+
+      expect(result.realized_price).toBe('0');
+      expect(result.shares_received).toBe('0');
     });
   });
 
@@ -999,6 +1235,245 @@ describe('PredictionsService', () => {
       });
       expect(stream).toBeDefined();
       expect(csvQbMock.andWhere).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('evaluateFraudSignalsForUser', () => {
+    const makePrediction = (submittedAt: Date) =>
+      ({ submitted_at: submittedAt }) as Prediction;
+
+    beforeEach(() => {
+      mockConfigService.get.mockImplementation((key: string) => {
+        const values: Record<string, string> = {
+          FRAUD_TIMING_MIN_SAMPLE: '3',
+          FRAUD_TIMING_CLUSTER_WINDOW_SECONDS: '30',
+          FRAUD_TIMING_CLUSTER_MIN_RATIO: '0.6',
+          FRAUD_COUNTERPARTY_MIN_MARKETS: '3',
+          FRAUD_COUNTERPARTY_HHI_THRESHOLD: '0.5',
+        };
+        return values[key];
+      });
+    });
+
+    describe('timing clustering signal', () => {
+      it('flags a user whose predictions cluster tightly in time', async () => {
+        const base = Date.now();
+        mockPredictionsRepo.find.mockResolvedValue([
+          makePrediction(new Date(base)),
+          makePrediction(new Date(base + 5_000)),
+          makePrediction(new Date(base + 10_000)),
+          makePrediction(new Date(base + 15_000)),
+        ]);
+
+        await service.evaluateFraudSignalsForUser('user-1');
+
+        expect(mockFraudFlagsRepo.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            user_id: 'user-1',
+            signal_type: FraudSignalType.TIMING_CLUSTERING,
+            status: FraudFlagStatus.OPEN,
+          }),
+        );
+      });
+
+      it('does not flag a user with widely-spaced predictions', async () => {
+        const base = Date.now();
+        mockPredictionsRepo.find.mockResolvedValue([
+          makePrediction(new Date(base)),
+          makePrediction(new Date(base + 6 * 60 * 60 * 1000)),
+          makePrediction(new Date(base + 12 * 60 * 60 * 1000)),
+          makePrediction(new Date(base + 18 * 60 * 60 * 1000)),
+        ]);
+
+        await service.evaluateFraudSignalsForUser('user-1');
+
+        expect(mockFraudFlagsRepo.save).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            signal_type: FraudSignalType.TIMING_CLUSTERING,
+          }),
+        );
+      });
+
+      it('does not evaluate below the minimum sample size', async () => {
+        const base = Date.now();
+        mockPredictionsRepo.find.mockResolvedValue([
+          makePrediction(new Date(base)),
+          makePrediction(new Date(base + 1_000)),
+        ]);
+
+        await service.evaluateFraudSignalsForUser('user-1');
+
+        expect(mockFraudFlagsRepo.save).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            signal_type: FraudSignalType.TIMING_CLUSTERING,
+          }),
+        );
+      });
+
+      it('refreshes an existing open flag instead of duplicating it', async () => {
+        const base = Date.now();
+        mockPredictionsRepo.find.mockResolvedValue([
+          makePrediction(new Date(base)),
+          makePrediction(new Date(base + 5_000)),
+          makePrediction(new Date(base + 10_000)),
+        ]);
+        const existingFlag = {
+          id: 'existing-flag',
+          user_id: 'user-1',
+          signal_type: FraudSignalType.TIMING_CLUSTERING,
+          status: FraudFlagStatus.OPEN,
+          score: 0,
+          threshold: 0.6,
+          details: {},
+        } as PredictionFraudFlag;
+        mockFraudFlagsRepo.findOne.mockResolvedValue(existingFlag);
+
+        await service.evaluateFraudSignalsForUser('user-1');
+
+        expect(mockFraudFlagsRepo.create).not.toHaveBeenCalled();
+        expect(mockFraudFlagsRepo.save).toHaveBeenCalledWith(
+          expect.objectContaining({ id: 'existing-flag' }),
+        );
+      });
+    });
+
+    describe('counterparty concentration signal', () => {
+      it('flags a user concentrated on a small clique of counterparties', async () => {
+        mockPredictionsRepo.find.mockResolvedValue([]); // no timing signal
+
+        const qb = mockPredictionsRepo.createQueryBuilder(
+          'prediction',
+        ) as unknown as {
+          getRawMany: jest.Mock;
+        };
+
+        // First call: distinct markets the user participated in.
+        // Second call: co-participants across those markets.
+        qb.getRawMany
+          .mockResolvedValueOnce([
+            { marketId: 'm1' },
+            { marketId: 'm2' },
+            { marketId: 'm3' },
+          ])
+          .mockResolvedValueOnce([
+            { counterpartyId: 'clique-user', marketId: 'm1' },
+            { counterpartyId: 'clique-user', marketId: 'm2' },
+            { counterpartyId: 'clique-user', marketId: 'm3' },
+          ]);
+
+        await service.evaluateFraudSignalsForUser('user-1');
+
+        expect(mockFraudFlagsRepo.save).toHaveBeenCalledWith(
+          expect.objectContaining({
+            user_id: 'user-1',
+            signal_type: FraudSignalType.COUNTERPARTY_CONCENTRATION,
+            status: FraudFlagStatus.OPEN,
+          }),
+        );
+      });
+
+      it('does not flag a user with diverse counterparties', async () => {
+        mockPredictionsRepo.find.mockResolvedValue([]);
+
+        const qb = mockPredictionsRepo.createQueryBuilder(
+          'prediction',
+        ) as unknown as {
+          getRawMany: jest.Mock;
+        };
+
+        qb.getRawMany
+          .mockResolvedValueOnce([
+            { marketId: 'm1' },
+            { marketId: 'm2' },
+            { marketId: 'm3' },
+          ])
+          .mockResolvedValueOnce([
+            { counterpartyId: 'a', marketId: 'm1' },
+            { counterpartyId: 'b', marketId: 'm2' },
+            { counterpartyId: 'c', marketId: 'm3' },
+          ]);
+
+        await service.evaluateFraudSignalsForUser('user-1');
+
+        expect(mockFraudFlagsRepo.save).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            signal_type: FraudSignalType.COUNTERPARTY_CONCENTRATION,
+          }),
+        );
+      });
+
+      it('does not evaluate below the minimum market sample size', async () => {
+        mockPredictionsRepo.find.mockResolvedValue([]);
+
+        const qb = mockPredictionsRepo.createQueryBuilder(
+          'prediction',
+        ) as unknown as {
+          getRawMany: jest.Mock;
+        };
+
+        qb.getRawMany.mockResolvedValueOnce([{ marketId: 'm1' }]);
+
+        await service.evaluateFraudSignalsForUser('user-1');
+
+        expect(mockFraudFlagsRepo.save).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            signal_type: FraudSignalType.COUNTERPARTY_CONCENTRATION,
+          }),
+        );
+      });
+    });
+
+    it('returns the created flags without throwing or banning the user', async () => {
+      const base = Date.now();
+      mockPredictionsRepo.find.mockResolvedValue([
+        makePrediction(new Date(base)),
+        makePrediction(new Date(base + 1_000)),
+        makePrediction(new Date(base + 2_000)),
+      ]);
+
+      const result = await service.evaluateFraudSignalsForUser('user-1');
+
+      expect(Array.isArray(result)).toBe(true);
+      expect(
+        result.every((flag) => flag.status === FraudFlagStatus.OPEN),
+      ).toBe(true);
+    });
+  });
+
+  describe('listFraudFlags', () => {
+    it('returns a paginated list scoped by status, signal type, and user', async () => {
+      const flags = [{ id: 'flag-1' } as PredictionFraudFlag];
+      const qb = mockFraudFlagsRepo.createQueryBuilder('flag') as unknown as {
+        andWhere: jest.Mock;
+        getManyAndCount: jest.Mock;
+      };
+      qb.getManyAndCount.mockResolvedValue([flags, 1]);
+
+      const result = await service.listFraudFlags({
+        status: FraudFlagStatus.OPEN,
+        signal_type: FraudSignalType.TIMING_CLUSTERING,
+        user_id: 'user-1',
+        page: 1,
+        limit: 20,
+      });
+
+      expect(qb.andWhere).toHaveBeenCalledWith('flag.status = :status', {
+        status: FraudFlagStatus.OPEN,
+      });
+      expect(qb.andWhere).toHaveBeenCalledWith(
+        'flag.signal_type = :signalType',
+        { signalType: FraudSignalType.TIMING_CLUSTERING },
+      );
+      expect(qb.andWhere).toHaveBeenCalledWith('flag.user_id = :userId', {
+        userId: 'user-1',
+      });
+      expect(result).toEqual({
+        data: flags,
+        total: 1,
+        page: 1,
+        limit: 20,
+        totalPages: 1,
+      });
     });
   });
 });

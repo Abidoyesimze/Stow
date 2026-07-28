@@ -42,6 +42,12 @@ import { TieredThrottlerGuard } from './common/guards/tiered-throttler.guard';
 
 @Module({
   imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      validate,
+      envFilePath: '.env',
+    }),
+
     ThrottlerModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -82,12 +88,6 @@ import { TieredThrottlerGuard } from './common/guards/tiered-throttler.guard';
       },
     }),
     ScheduleModule.forRoot(),
-
-    ConfigModule.forRoot({
-      isGlobal: true,
-      validate,
-      envFilePath: '.env',
-    }),
 
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],

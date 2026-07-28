@@ -1,28 +1,38 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { ConfigService } from '@nestjs/config';
 import {
   NotFoundException,
   ConflictException,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { DisputesService } from './disputes.service';
 import {
   Dispute,
   DisputeStatus,
   DisputeResolution,
+  DisputeSlaStage,
 } from './entities/dispute.entity';
+import { DisputeEvidence } from './entities/dispute-evidence.entity';
 import { Market } from '../markets/entities/market.entity';
 import { User } from '../users/entities/user.entity';
 import { SorobanService } from '../soroban/soroban.service';
+import { NotificationGeneratorService } from '../notifications/notification-generator.service';
 import { Repository } from 'typeorm';
 import { CreateDisputeDto } from './dto/create-dispute.dto';
 import { ResolveDisputeDto } from './dto/resolve-dispute.dto';
+import { AttachEvidenceDto } from './dto/attach-evidence.dto';
 
 describe('DisputesService', () => {
   let service: DisputesService;
   let disputesRepository: Repository<Dispute>;
   let marketsRepository: Repository<Market>;
+  let evidenceRepository: Repository<DisputeEvidence>;
+  let usersRepository: Repository<User>;
   let sorobanService: SorobanService;
+  let notificationGenerator: jest.Mocked<NotificationGeneratorService>;
+  let mockConfigGet: jest.Mock;
 
   const mockUser: User = {
     id: 'user-123',
@@ -33,11 +43,21 @@ describe('DisputesService', () => {
     updated_at: new Date(),
   } as User;
 
+  const mockMarketCreator: User = {
+    id: 'creator-456',
+    email: 'creator@example.com',
+    username: 'creatoruser',
+    role: 'user',
+    created_at: new Date(),
+    updated_at: new Date(),
+  } as User;
+
   const mockMarket: Market = {
     id: 'market-123',
     on_chain_market_id: 'chain-market-123',
     is_resolved: true,
     resolved_at: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000), // resolved 5 days ago
+    creator: mockMarketCreator,
   } as Market;
 
   const mockDispute: Dispute = {
@@ -52,6 +72,8 @@ describe('DisputesService', () => {
   } as Dispute;
 
   beforeEach(async () => {
+    mockConfigGet = jest.fn().mockReturnValue(undefined);
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         DisputesService,
@@ -73,10 +95,38 @@ describe('DisputesService', () => {
           },
         },
         {
+          provide: getRepositoryToken(DisputeEvidence),
+          useValue: {
+            create: jest.fn(),
+            save: jest.fn(),
+            find: jest.fn(),
+          },
+        },
+        {
+          provide: getRepositoryToken(User),
+          useValue: {
+            findOne: jest.fn(),
+            find: jest.fn().mockResolvedValue([]),
+          },
+        },
+        {
           provide: SorobanService,
           useValue: {
             raiseDispute: jest.fn(),
             resolveDispute: jest.fn(),
+          },
+        },
+        {
+          provide: ConfigService,
+          useValue: {
+            get: mockConfigGet,
+          },
+        },
+        {
+          provide: NotificationGeneratorService,
+          useValue: {
+            notifyDisputeSlaApproaching: jest.fn().mockResolvedValue(undefined),
+            notifyDisputeSlaBreached: jest.fn().mockResolvedValue(undefined),
           },
         },
       ],
@@ -89,7 +139,12 @@ describe('DisputesService', () => {
     marketsRepository = module.get<Repository<Market>>(
       getRepositoryToken(Market),
     );
+    evidenceRepository = module.get<Repository<DisputeEvidence>>(
+      getRepositoryToken(DisputeEvidence),
+    );
+    usersRepository = module.get<Repository<User>>(getRepositoryToken(User));
     sorobanService = module.get<SorobanService>(SorobanService);
+    notificationGenerator = module.get(NotificationGeneratorService);
   });
 
   it('should be defined', () => {
@@ -119,12 +174,16 @@ describe('DisputesService', () => {
       expect(marketsRepository.findOne).toHaveBeenCalledWith({
         where: { id: 'market-123' },
       });
-      expect(disputesRepository.create).toHaveBeenCalledWith({
-        marketId: 'market-123',
-        disputantId: 'user-123',
-        reason: 'Test dispute reason',
-        status: DisputeStatus.PENDING,
-      });
+      expect(disputesRepository.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          marketId: 'market-123',
+          disputantId: 'user-123',
+          reason: 'Test dispute reason',
+          status: DisputeStatus.PENDING,
+          slaStage: DisputeSlaStage.INITIAL_REVIEW,
+          slaDeadline: expect.any(Date),
+        }),
+      );
       expect(sorobanService.raiseDispute).toHaveBeenCalledWith(
         'chain-market-123',
         'Test dispute reason',
@@ -224,7 +283,7 @@ describe('DisputesService', () => {
     const mockAdminUser: User = {
       ...mockUser,
       role: 'admin',
-    } as User;
+    };
 
     it('should resolve a dispute successfully', async () => {
       const findOneSpy = jest.spyOn(service, 'findOne');
@@ -426,6 +485,385 @@ describe('DisputesService', () => {
       const result = await service.checkDisputeWindow('market-123');
 
       expect(result).toBe(false);
+    });
+  });
+
+  describe('attachEvidence', () => {
+    // Cloned rather than reusing the shared mockDispute: the 'resolve'
+    // describe block above mutates mockDispute.status in place via the
+    // service, so relying on the shared reference here is order-dependent.
+    const pendingDispute: Dispute = {
+      ...mockDispute,
+      status: DisputeStatus.PENDING,
+    };
+
+    const attachEvidenceDto: AttachEvidenceDto = {
+      fileUrl: 'https://storage.example.com/evidence/screenshot.png',
+      fileName: 'screenshot.png',
+      mimeType: 'image/png',
+      sizeBytes: 204800,
+    };
+
+    const mockEvidence: DisputeEvidence = {
+      id: 'evidence-123',
+      disputeId: 'dispute-123',
+      uploadedById: 'user-123',
+      fileUrl: attachEvidenceDto.fileUrl,
+      fileName: attachEvidenceDto.fileName,
+      mimeType: attachEvidenceDto.mimeType,
+      sizeBytes: attachEvidenceDto.sizeBytes,
+      description: null,
+      createdAt: new Date(),
+    } as DisputeEvidence;
+
+    it('should attach evidence as the disputant', async () => {
+      jest.spyOn(service, 'findOne').mockResolvedValue(pendingDispute);
+      jest.spyOn(evidenceRepository, 'create').mockReturnValue(mockEvidence);
+      jest.spyOn(evidenceRepository, 'save').mockResolvedValue(mockEvidence);
+
+      const result = await service.attachEvidence(
+        'dispute-123',
+        attachEvidenceDto,
+        mockUser,
+      );
+
+      expect(result).toEqual(mockEvidence);
+      expect(evidenceRepository.create).toHaveBeenCalledWith({
+        disputeId: 'dispute-123',
+        uploadedById: 'user-123',
+        fileUrl: attachEvidenceDto.fileUrl,
+        fileName: attachEvidenceDto.fileName,
+        mimeType: attachEvidenceDto.mimeType,
+        sizeBytes: attachEvidenceDto.sizeBytes,
+        description: null,
+      });
+    });
+
+    it('should attach evidence as the market creator', async () => {
+      jest.spyOn(service, 'findOne').mockResolvedValue(pendingDispute);
+      jest.spyOn(evidenceRepository, 'create').mockReturnValue(mockEvidence);
+      jest.spyOn(evidenceRepository, 'save').mockResolvedValue(mockEvidence);
+
+      const result = await service.attachEvidence(
+        'dispute-123',
+        attachEvidenceDto,
+        mockMarketCreator,
+      );
+
+      expect(result).toEqual(mockEvidence);
+    });
+
+    it('should throw ForbiddenException for a non-participant', async () => {
+      const outsider = { ...mockUser, id: 'outsider-789' };
+      jest.spyOn(service, 'findOne').mockResolvedValue(mockDispute);
+
+      await expect(
+        service.attachEvidence('dispute-123', attachEvidenceDto, outsider),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it('should throw BadRequestException if the dispute is resolved', async () => {
+      const resolvedDispute = {
+        ...mockDispute,
+        status: DisputeStatus.RESOLVED,
+      };
+      jest.spyOn(service, 'findOne').mockResolvedValue(resolvedDispute);
+
+      await expect(
+        service.attachEvidence('dispute-123', attachEvidenceDto, mockUser),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('should throw BadRequestException for a disallowed mime type', async () => {
+      jest.spyOn(service, 'findOne').mockResolvedValue(pendingDispute);
+      const dto = {
+        ...attachEvidenceDto,
+        mimeType: 'application/x-msdownload',
+      };
+
+      await expect(
+        service.attachEvidence('dispute-123', dto, mockUser),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('should throw BadRequestException for a file exceeding the size cap', async () => {
+      jest.spyOn(service, 'findOne').mockResolvedValue(pendingDispute);
+      const dto = { ...attachEvidenceDto, sizeBytes: 999_999_999 };
+
+      await expect(
+        service.attachEvidence('dispute-123', dto, mockUser),
+      ).rejects.toThrow(BadRequestException);
+    });
+  });
+
+  describe('listEvidence', () => {
+    const mockEvidenceList: DisputeEvidence[] = [
+      {
+        id: 'evidence-123',
+        disputeId: 'dispute-123',
+        uploadedById: 'user-123',
+        fileUrl: 'https://storage.example.com/evidence/screenshot.png',
+        fileName: 'screenshot.png',
+        mimeType: 'image/png',
+        sizeBytes: 204800,
+        description: null,
+        createdAt: new Date(),
+      } as DisputeEvidence,
+    ];
+
+    it('should list evidence as the disputant', async () => {
+      jest.spyOn(service, 'findOne').mockResolvedValue(mockDispute);
+      jest
+        .spyOn(evidenceRepository, 'find')
+        .mockResolvedValue(mockEvidenceList);
+
+      const result = await service.listEvidence('dispute-123', mockUser);
+
+      expect(result).toEqual(mockEvidenceList);
+      expect(evidenceRepository.find).toHaveBeenCalledWith({
+        where: { disputeId: 'dispute-123' },
+        relations: ['uploadedBy'],
+        order: { createdAt: 'ASC' },
+      });
+    });
+
+    it('should list evidence as the market creator', async () => {
+      jest.spyOn(service, 'findOne').mockResolvedValue(mockDispute);
+      jest
+        .spyOn(evidenceRepository, 'find')
+        .mockResolvedValue(mockEvidenceList);
+
+      const result = await service.listEvidence(
+        'dispute-123',
+        mockMarketCreator,
+      );
+
+      expect(result).toEqual(mockEvidenceList);
+    });
+
+    it('should throw ForbiddenException for a non-participant', async () => {
+      const outsider = { ...mockUser, id: 'outsider-789' };
+      jest.spyOn(service, 'findOne').mockResolvedValue(mockDispute);
+
+      await expect(
+        service.listEvidence('dispute-123', outsider),
+      ).rejects.toThrow(ForbiddenException);
+    });
+  });
+
+  describe('assignArbiter', () => {
+    const mockAdmin: User = {
+      id: 'admin-1',
+      role: 'admin',
+      stellar_address: 'GADMIN',
+    } as User;
+
+    it('assigns an admin as the arbiter for a pending dispute', async () => {
+      const pendingDispute = { ...mockDispute, status: DisputeStatus.PENDING };
+      jest
+        .spyOn(service, 'findOne')
+        .mockResolvedValueOnce(pendingDispute)
+        .mockResolvedValueOnce({
+          ...pendingDispute,
+          assignedArbiterId: 'admin-1',
+        });
+      jest.spyOn(usersRepository, 'findOne').mockResolvedValue(mockAdmin);
+      jest.spyOn(disputesRepository, 'save').mockResolvedValue(pendingDispute);
+
+      const result = await service.assignArbiter(
+        'dispute-123',
+        'admin-1',
+        'requesting-admin',
+      );
+
+      expect(disputesRepository.save).toHaveBeenCalledWith(
+        expect.objectContaining({ assignedArbiterId: 'admin-1' }),
+      );
+      expect(result.assignedArbiterId).toBe('admin-1');
+    });
+
+    it('throws BadRequestException when the dispute is not pending', async () => {
+      jest.spyOn(service, 'findOne').mockResolvedValue({
+        ...mockDispute,
+        status: DisputeStatus.RESOLVED,
+      });
+
+      await expect(
+        service.assignArbiter('dispute-123', 'admin-1', 'requesting-admin'),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws NotFoundException when the arbiter user does not exist', async () => {
+      // Cloned rather than reusing the shared mockDispute: earlier describe
+      // blocks (e.g. 'resolve') mutate mockDispute.status in place via the
+      // service, so relying on the shared reference here is order-dependent.
+      jest.spyOn(service, 'findOne').mockResolvedValue({
+        ...mockDispute,
+        status: DisputeStatus.PENDING,
+      });
+      jest.spyOn(usersRepository, 'findOne').mockResolvedValue(null);
+
+      await expect(
+        service.assignArbiter('dispute-123', 'missing-user', 'requesting-admin'),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('throws BadRequestException when the target user is not admin/moderator', async () => {
+      jest.spyOn(service, 'findOne').mockResolvedValue({
+        ...mockDispute,
+        status: DisputeStatus.PENDING,
+      });
+      jest.spyOn(usersRepository, 'findOne').mockResolvedValue({
+        ...mockUser,
+        role: 'user',
+      });
+
+      await expect(
+        service.assignArbiter('dispute-123', 'user-123', 'requesting-admin'),
+      ).rejects.toThrow(BadRequestException);
+    });
+  });
+
+  describe('runSlaCheck', () => {
+    const makePendingDispute = (overrides: Partial<Dispute> = {}): Dispute =>
+      ({
+        id: 'dispute-sla-1',
+        marketId: 'market-123',
+        status: DisputeStatus.PENDING,
+        slaStage: DisputeSlaStage.INITIAL_REVIEW,
+        slaDeadline: new Date(Date.now() + 48 * 60 * 60 * 1000),
+        slaBreachedAt: null,
+        slaApproachingNotifiedAt: null,
+        slaBreachedNotifiedAt: null,
+        assignedArbiter: null,
+        market: { title: 'Test Market' } as any,
+        ...overrides,
+      }) as Dispute;
+
+    it('does nothing when DISPUTE_SLA_ENABLED is false', async () => {
+      mockConfigGet.mockReturnValue('false');
+      const findSpy = jest.spyOn(disputesRepository, 'find');
+
+      const result = await service.runSlaCheck();
+
+      expect(result).toEqual({ approaching: 0, breached: 0, escalated: 0 });
+      expect(findSpy).not.toHaveBeenCalled();
+    });
+
+    it('notifies once when a dispute enters its approaching window', async () => {
+      mockConfigGet.mockReturnValue(undefined);
+      const dispute = makePendingDispute({
+        slaDeadline: new Date(Date.now() + 2 * 60 * 60 * 1000), // 2h away, default window is 6h
+      });
+      jest.spyOn(disputesRepository, 'find').mockResolvedValue([dispute]);
+      jest.spyOn(disputesRepository, 'save').mockResolvedValue(dispute);
+
+      const result = await service.runSlaCheck();
+
+      expect(result.approaching).toBe(1);
+      expect(dispute.slaApproachingNotifiedAt).toBeInstanceOf(Date);
+      expect(
+        notificationGenerator.notifyDisputeSlaApproaching,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({ disputeId: 'dispute-sla-1' }),
+      );
+    });
+
+    it('does not re-notify approaching once already notified', async () => {
+      mockConfigGet.mockReturnValue(undefined);
+      const dispute = makePendingDispute({
+        slaDeadline: new Date(Date.now() + 2 * 60 * 60 * 1000),
+        slaApproachingNotifiedAt: new Date(),
+      });
+      jest.spyOn(disputesRepository, 'find').mockResolvedValue([dispute]);
+
+      const result = await service.runSlaCheck();
+
+      expect(result.approaching).toBe(0);
+      expect(
+        notificationGenerator.notifyDisputeSlaApproaching,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('escalates and notifies on first SLA breach', async () => {
+      mockConfigGet.mockReturnValue(undefined);
+      const dispute = makePendingDispute({
+        slaDeadline: new Date(Date.now() - 60 * 1000), // just passed
+      });
+      jest.spyOn(disputesRepository, 'find').mockResolvedValue([dispute]);
+      jest.spyOn(disputesRepository, 'save').mockResolvedValue(dispute);
+
+      const result = await service.runSlaCheck();
+
+      expect(result.breached).toBe(1);
+      expect(result.escalated).toBe(1);
+      expect(dispute.slaStage).toBe(DisputeSlaStage.ESCALATED);
+      expect(dispute.slaBreachedAt).toBeInstanceOf(Date);
+      expect(dispute.slaDeadline.getTime()).toBeGreaterThan(Date.now());
+      expect(
+        notificationGenerator.notifyDisputeSlaBreached,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          disputeId: 'dispute-sla-1',
+          escalated: true,
+        }),
+      );
+    });
+
+    it('does not re-escalate an already-escalated dispute still within the re-notification window', async () => {
+      mockConfigGet.mockReturnValue(undefined);
+      const dispute = makePendingDispute({
+        slaStage: DisputeSlaStage.ESCALATED,
+        slaDeadline: new Date(Date.now() - 60 * 1000),
+        slaBreachedAt: new Date(Date.now() - 60 * 1000),
+        slaBreachedNotifiedAt: new Date(), // just notified
+      });
+      jest.spyOn(disputesRepository, 'find').mockResolvedValue([dispute]);
+
+      const result = await service.runSlaCheck();
+
+      expect(result.breached).toBe(0);
+      expect(result.escalated).toBe(0);
+      expect(
+        notificationGenerator.notifyDisputeSlaBreached,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('re-notifies a still-breached escalated dispute past the re-escalation interval', async () => {
+      mockConfigGet.mockReturnValue(undefined);
+      const dispute = makePendingDispute({
+        slaStage: DisputeSlaStage.ESCALATED,
+        slaDeadline: new Date(Date.now() - 60 * 60 * 1000),
+        slaBreachedAt: new Date(Date.now() - 48 * 60 * 60 * 1000),
+        slaBreachedNotifiedAt: new Date(Date.now() - 25 * 60 * 60 * 1000), // >24h ago
+      });
+      jest.spyOn(disputesRepository, 'find').mockResolvedValue([dispute]);
+      jest.spyOn(disputesRepository, 'save').mockResolvedValue(dispute);
+
+      const result = await service.runSlaCheck();
+
+      expect(result.breached).toBe(1);
+      expect(result.escalated).toBe(0);
+      // Stage does not change again - it's already at the terminal stage.
+      expect(dispute.slaStage).toBe(DisputeSlaStage.ESCALATED);
+      expect(
+        notificationGenerator.notifyDisputeSlaBreached,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({ escalated: false }),
+      );
+    });
+
+    it('never changes dispute status - SLA tracking is advisory only', async () => {
+      mockConfigGet.mockReturnValue(undefined);
+      const dispute = makePendingDispute({
+        slaDeadline: new Date(Date.now() - 60 * 1000),
+      });
+      jest.spyOn(disputesRepository, 'find').mockResolvedValue([dispute]);
+      jest.spyOn(disputesRepository, 'save').mockResolvedValue(dispute);
+
+      await service.runSlaCheck();
+
+      expect(dispute.status).toBe(DisputeStatus.PENDING);
     });
   });
 });

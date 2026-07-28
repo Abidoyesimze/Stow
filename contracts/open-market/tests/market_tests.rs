@@ -3,7 +3,7 @@ use insightarena_contract::storage_types::{DataKey, Market, Prediction};
 use insightarena_contract::{InsightArenaContract, InsightArenaContractClient, InsightArenaError};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, Vec, BytesN};
 
 #[test]
 fn test_calculate_price_equal_reserves() {
@@ -78,6 +78,7 @@ fn default_params(env: &Env) -> CreateMarketParams {
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: true,
+        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
     }
 }
 
@@ -282,7 +283,7 @@ fn create_market_fails_when_paused() {
     let client = deploy(&env);
     let creator = Address::generate(&env);
 
-    client.set_paused(&true);
+    client.set_paused(&true, &1u32);
 
     let result = client.try_create_market(&creator, &default_params(&env));
     assert!(matches!(result, Err(Ok(InsightArenaError::Paused))));
@@ -316,17 +317,37 @@ fn test_create_market_unauthorised() {
 }
 
 #[test]
-fn create_market_fails_stake_too_low() {
+fn create_market_fails_when_resolved_min_exceeds_max() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    // Override min above override max — rejected at create time.
+    let mut params = default_params(&env);
+    params.min_stake = 100_000_000;
+    params.max_stake = 10_000_000;
+
+    let result = client.try_create_market(&creator, &params);
+    assert!(matches!(result, Err(Ok(InsightArenaError::InvalidInput))));
+}
+
+#[test]
+fn create_market_inherits_global_bounds_when_zero() {
     let env = Env::default();
     env.mock_all_auths();
     let client = deploy(&env);
     let creator = Address::generate(&env);
 
     let mut params = default_params(&env);
-    params.min_stake = 1;
+    // 0 = inherit global Config bounds at prediction time.
+    params.min_stake = 0;
+    params.max_stake = 0;
 
-    let result = client.try_create_market(&creator, &params);
-    assert!(matches!(result, Err(Ok(InsightArenaError::StakeTooLow))));
+    let market_id = client.create_market(&creator, &params);
+    let market = client.get_market(&market_id);
+    assert_eq!(market.min_stake, 0);
+    assert_eq!(market.max_stake, 0);
 }
 
 #[test]
@@ -370,6 +391,63 @@ fn list_categories_returns_seeded_defaults() {
     assert!(categories.contains(Symbol::new(&env, "Entertainment")));
     assert!(categories.contains(Symbol::new(&env, "Science")));
     assert!(categories.contains(Symbol::new(&env, "Other")));
+}
+
+#[test]
+fn add_category_fails_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _oracle) = deploy_with_actors(&env);
+
+    client.set_paused(&true, &1u32);
+
+    let result = client.try_add_category(&admin, &Symbol::new(&env, "Weather"));
+    assert!(matches!(result, Err(Ok(InsightArenaError::Paused))));
+}
+
+#[test]
+fn remove_category_fails_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _oracle) = deploy_with_actors(&env);
+    let category = Symbol::new(&env, "Weather");
+    client.add_category(&admin, &category);
+
+    client.set_paused(&true, &1u32);
+
+    let result = client.try_remove_category(&admin, &category);
+    assert!(matches!(result, Err(Ok(InsightArenaError::Paused))));
+}
+
+#[test]
+fn close_market_fails_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _oracle) = deploy_with_actors(&env);
+    let creator = Address::generate(&env);
+
+    let id = client.create_market(&creator, &default_params(&env));
+    env.ledger().set_timestamp(env.ledger().timestamp() + 1001);
+
+    client.set_paused(&true, &1u32);
+
+    let result = client.try_close_market(&admin, &id);
+    assert!(matches!(result, Err(Ok(InsightArenaError::Paused))));
+}
+
+#[test]
+fn cancel_market_fails_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _oracle) = deploy_with_actors(&env);
+    let creator = Address::generate(&env);
+
+    let id = client.create_market(&creator, &default_params(&env));
+
+    client.set_paused(&true, &1u32);
+
+    let result = client.try_cancel_market(&admin, &id);
+    assert!(matches!(result, Err(Ok(InsightArenaError::Paused))));
 }
 
 #[test]
@@ -879,11 +957,21 @@ fn cancel_market_refunds_all_predictors() {
     StellarAssetClient::new(&env, &xlm_token).mint(&contract_id, &(stake_a + stake_b));
 
     let token_client = TokenClient::new(&env, &xlm_token);
+
+    // Cancel — funds stay in escrow until each participant pulls them.
     client.cancel_market(&admin, &id);
+    assert!(client.get_market(&id).is_cancelled);
+
+    // Funds are still in contract escrow — not pushed.
+    assert_eq!(token_client.balance(&client.address), stake_a + stake_b);
+
+    // Each participant pulls their refund.
+    client.claim_cancel_refund(&predictor_a, &id);
+    client.claim_cancel_refund(&predictor_b, &id);
 
     assert_eq!(token_client.balance(&predictor_a), stake_a);
     assert_eq!(token_client.balance(&predictor_b), stake_b);
-    assert!(client.get_market(&id).is_cancelled);
+    assert_eq!(token_client.balance(&client.address), 0);
 }
 
 #[test]
@@ -950,16 +1038,19 @@ fn cancel_market_refunds_exact_stake_amounts() {
 
     let token_client = TokenClient::new(&env, &xlm_token);
 
-    // Admin cancels the market
+    // Admin cancels the market (pull pattern — no funds move yet).
     client.cancel_market(&admin, &id);
+    assert!(client.get_market(&id).is_cancelled);
 
-    // Assert each user's balance is restored exactly
+    // Each participant pulls their own refund.
+    client.claim_cancel_refund(&user1, &id);
+    client.claim_cancel_refund(&user2, &id);
+    client.claim_cancel_refund(&user3, &id);
+
+    // Assert each user's balance is restored exactly.
     assert_eq!(token_client.balance(&user1), stake1);
     assert_eq!(token_client.balance(&user2), stake2);
     assert_eq!(token_client.balance(&user3), stake3);
-
-    // Assert market is cancelled
-    assert!(client.get_market(&id).is_cancelled);
 
     // Assert further predictions fail with MarketAlreadyCancelled
     let result = client.try_submit_prediction(&user1, &id, &symbol_short!("yes"), &stake1);
@@ -969,15 +1060,14 @@ fn cancel_market_refunds_exact_stake_amounts() {
     ));
 }
 
-// ── cancel_market multi-predictor refund flow (#1265) ────────────────────────
+// ── cancel_market multi-predictor refund flow (#1265 / #1341) ────────────────
 //
-// Unlike the storage-injection tests above, these run the full end-to-end
-// flow: predictors are funded, stake real tokens through submit_prediction,
-// and are refunded by cancel_market. Refunds in this contract are push-based —
-// cancel_market transfers every stake back in the same call, so "claiming a
-// refund" is the cancellation itself and the double-claim / non-participant
-// requirements are pinned against every post-cancellation extraction path
-// (second cancel, resolve-after-cancel, claim_payout, batch payouts).
+// These tests run the full end-to-end flow: predictors are funded, stake real
+// tokens through submit_prediction, and retrieve their funds by calling
+// claim_cancel_refund after cancellation. Refunds in this contract are
+// pull-based — cancel_market only marks the market cancelled; each participant
+// calls claim_cancel_refund independently. Double-claim prevention and
+// non-participant exclusion are exercised against every extraction path.
 
 /// Five distinct stakes within default_params' min/max bounds (10M..=100M).
 const FLOW_STAKES: [i128; 5] = [12_000_000, 25_000_000, 40_000_000, 60_000_000, 100_000_000];
@@ -1024,8 +1114,8 @@ fn setup_five_predictor_market(
 }
 
 /// Requirements 1–4 & 7: five predictors with five different stakes across
-/// both outcomes are each made exactly whole by cancellation, and the contract
-/// retains zero tokens from the cancelled market.
+/// both outcomes are each made exactly whole after claiming their refund, and
+/// the contract retains zero tokens once all claims are complete.
 #[test]
 fn cancel_market_five_predictors_restores_exact_pre_stake_balances() {
     let env = Env::default();
@@ -1046,8 +1136,17 @@ fn cancel_market_five_predictors_restores_exact_pre_stake_balances() {
         assert_eq!(token.balance(predictor), balances_before[i] - FLOW_STAKES[i]);
     }
 
+    // Cancel marks the market; funds stay in escrow.
     client.cancel_market(&admin, &id);
     assert!(client.get_market(&id).is_cancelled);
+
+    // Funds are still in escrow — not pushed.
+    assert_eq!(token.balance(&client.address), contract_before + total_staked);
+
+    // Each predictor pulls their own refund.
+    for predictor in predictors.iter() {
+        client.claim_cancel_refund(predictor, &id);
+    }
 
     // Every predictor's balance is restored exactly, regardless of stake size
     // or which outcome they chose.
@@ -1061,10 +1160,9 @@ fn cancel_market_five_predictors_restores_exact_pre_stake_balances() {
 }
 
 /// Requirement 5 & acceptance: a second refund for the same predictor is
-/// impossible. Refunds are pushed by cancel_market, so every path that could
-/// pay a second time is asserted closed: cancelling again, resolving the
-/// cancelled market (which would reopen claim_payout), claiming a payout
-/// directly, and batch-distributing payouts.
+/// impossible via claim_cancel_refund (RefundAlreadyClaimed), and all other
+/// extraction paths (resolve-after-cancel, claim_payout, batch payouts) are
+/// also closed.
 #[test]
 fn cancel_market_second_refund_is_impossible_via_any_path() {
     let env = Env::default();
@@ -1076,6 +1174,20 @@ fn cancel_market_second_refund_is_impossible_via_any_path() {
         setup_five_predictor_market(&env, &client, &xlm_token);
 
     client.cancel_market(&admin, &id);
+
+    // Each predictor claims once successfully.
+    for predictor in predictors.iter() {
+        client.claim_cancel_refund(predictor, &id);
+    }
+
+    // Path 0: a second claim_cancel_refund is rejected with RefundAlreadyClaimed.
+    for predictor in predictors.iter() {
+        let second_claim = client.try_claim_cancel_refund(predictor, &id);
+        assert!(matches!(
+            second_claim,
+            Err(Ok(InsightArenaError::RefundAlreadyClaimed))
+        ));
+    }
 
     // Path 1: cancelling again is rejected.
     let second_cancel = client.try_cancel_market(&admin, &id);
@@ -1110,7 +1222,7 @@ fn cancel_market_second_refund_is_impossible_via_any_path() {
         Err(Ok(InsightArenaError::MarketNotResolved))
     ));
 
-    // After all rejected attempts, balances are exactly the refunded ones and
+    // After all rejected attempts, balances equal the refunded amounts and
     // the contract kept nothing.
     for (i, predictor) in predictors.iter().enumerate() {
         assert_eq!(token.balance(predictor), balances_before[i]);
@@ -1118,8 +1230,8 @@ fn cancel_market_second_refund_is_impossible_via_any_path() {
     assert_eq!(token.balance(&client.address), 0);
 }
 
-/// Requirement 6: an address that never predicted receives nothing from the
-/// cancellation and cannot extract anything afterwards.
+/// Requirement 6: an address that never predicted receives nothing and cannot
+/// call claim_cancel_refund (NotAParticipant).
 #[test]
 fn cancel_market_non_participant_receives_nothing() {
     let env = Env::default();
@@ -1135,14 +1247,20 @@ fn cancel_market_non_participant_receives_nothing() {
 
     client.cancel_market(&admin, &id);
 
-    // The cancellation refunded only the five predictors.
-    assert_eq!(token.balance(&outsider), 0);
-    assert_eq!(token.balance(&client.address), 0);
-
-    // And the outsider has no post-cancellation claim path.
-    let claim = client.try_claim_payout(&outsider, &id);
+    // The outsider has no prediction record — claim is rejected.
+    let claim = client.try_claim_cancel_refund(&outsider, &id);
     assert!(matches!(
         claim,
+        Err(Ok(InsightArenaError::NotAParticipant))
+    ));
+
+    // The outsider received nothing.
+    assert_eq!(token.balance(&outsider), 0);
+
+    // The payout path is also closed.
+    let payout_claim = client.try_claim_payout(&outsider, &id);
+    assert!(matches!(
+        payout_claim,
         Err(Ok(InsightArenaError::MarketNotResolved))
     ));
 }
@@ -1521,4 +1639,256 @@ fn list_markets_ids_are_in_ascending_order() {
         let curr = result.get(i).unwrap().market_id;
         assert!(curr > prev, "market_id not ascending at index {}: {} >= {}", i, prev, curr);
     }
+}
+
+// ============================================================================
+// Category pagination boundary tests — issue #1261
+// ============================================================================
+
+/// Create 12 markets interleaved across two categories: 7 "Sports", 5
+/// "Crypto". Pattern: S C S C S C S C S C S S — mostly alternating, with an
+/// unavoidable trailing repeat since 7 > 12/2, so creation order is never
+/// grouped by category. Returns (sports_ids, crypto_ids) in creation order.
+fn create_interleaved_category_markets(
+    env: &Env,
+    client: &InsightArenaContractClient<'_>,
+    creator: &Address,
+) -> (Vec<u64>, Vec<u64>) {
+    let sports = Symbol::new(env, "Sports");
+    let crypto = Symbol::new(env, "Crypto");
+
+    let is_sports = [
+        true, false, true, false, true, false, true, false, true, false, true, true,
+    ];
+
+    let mut sports_ids: Vec<u64> = Vec::new(env);
+    let mut crypto_ids: Vec<u64> = Vec::new(env);
+
+    for &sport in is_sports.iter() {
+        let mut params = default_params(env);
+        params.category = if sport { sports.clone() } else { crypto.clone() };
+        let id = client.create_market(creator, &params);
+        if sport {
+            sports_ids.push_back(id);
+        } else {
+            crypto_ids.push_back(id);
+        }
+    }
+
+    (sports_ids, crypto_ids)
+}
+
+#[test]
+fn get_markets_by_category_interleaved_pages_tile_with_zero_overlap() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+    let sports = Symbol::new(&env, "Sports");
+
+    let (sports_ids, crypto_ids) = create_interleaved_category_markets(&env, &client, &creator);
+    assert_eq!(sports_ids.len(), 7);
+    assert_eq!(crypto_ids.len(), 5);
+
+    // Page 1: first 5 sports markets (zero-based offset into the category index).
+    let page1 = client.get_markets_by_category(&sports, &0_u64, &5_u32);
+    assert_eq!(page1.len(), 5);
+    for i in 0..5_u32 {
+        assert_eq!(page1.get(i).unwrap().market_id, sports_ids.get(i).unwrap());
+    }
+
+    // Page 2: the remaining 2 sports markets.
+    let page2 = client.get_markets_by_category(&sports, &5_u64, &5_u32);
+    assert_eq!(page2.len(), 2);
+    for i in 0..2_u32 {
+        assert_eq!(
+            page2.get(i).unwrap().market_id,
+            sports_ids.get(5 + i).unwrap()
+        );
+    }
+
+    // Union of both pages equals all 7 sports markets, with zero overlap.
+    let mut seen: Vec<u64> = Vec::new(&env);
+    for m in page1.iter() {
+        assert!(
+            !seen.contains(m.market_id),
+            "duplicate market_id {} across sports pages",
+            m.market_id
+        );
+        seen.push_back(m.market_id);
+    }
+    for m in page2.iter() {
+        assert!(
+            !seen.contains(m.market_id),
+            "duplicate market_id {} across sports pages",
+            m.market_id
+        );
+        seen.push_back(m.market_id);
+    }
+    assert_eq!(seen.len(), 7);
+    for id in sports_ids.iter() {
+        assert!(
+            seen.contains(id),
+            "sports market {} missing from paginated union",
+            id
+        );
+    }
+}
+
+#[test]
+fn get_markets_by_category_never_leaks_other_category() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+    let sports = Symbol::new(&env, "Sports");
+    let crypto = Symbol::new(&env, "Crypto");
+
+    let (sports_ids, crypto_ids) = create_interleaved_category_markets(&env, &client, &creator);
+
+    let sports_page1 = client.get_markets_by_category(&sports, &0_u64, &5_u32);
+    let sports_page2 = client.get_markets_by_category(&sports, &5_u64, &5_u32);
+    for m in sports_page1.iter().chain(sports_page2.iter()) {
+        assert!(
+            !crypto_ids.contains(m.market_id),
+            "crypto market {} leaked into sports results",
+            m.market_id
+        );
+    }
+
+    let crypto_page = client.get_markets_by_category(&crypto, &0_u64, &5_u32);
+    assert_eq!(crypto_page.len(), 5);
+    for m in crypto_page.iter() {
+        assert!(
+            !sports_ids.contains(m.market_id),
+            "sports market {} leaked into crypto results",
+            m.market_id
+        );
+    }
+}
+
+#[test]
+fn get_markets_by_category_out_of_range_page_returns_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+    let crypto = Symbol::new(&env, "Crypto");
+
+    let (_sports_ids, crypto_ids) = create_interleaved_category_markets(&env, &client, &creator);
+    assert_eq!(crypto_ids.len(), 5);
+
+    // Crypto has exactly 5 markets: start=5 is out of range for a zero-based
+    // offset, so this must return empty rather than panicking.
+    let result = client.get_markets_by_category(&crypto, &5_u64, &5_u32);
+    assert_eq!(result.len(), 0);
+}
+
+#[test]
+fn get_markets_by_category_zero_markets_returns_empty_without_panic() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    // Create markets only in Sports/Crypto; Politics has zero markets.
+    create_interleaved_category_markets(&env, &client, &creator);
+
+    let politics = Symbol::new(&env, "Politics");
+    let result = client.get_markets_by_category(&politics, &0_u64, &5_u32);
+    assert_eq!(result.len(), 0);
+}
+
+#[test]
+fn metadata_hash_stored_at_creation_and_retrievable() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    let mut hash_bytes = [0u8; 32];
+    hash_bytes[0] = 0xab;
+    hash_bytes[31] = 0xcd;
+    let metadata_hash = BytesN::from_array(&env, &hash_bytes);
+
+    let mut params = default_params(&env);
+    params.metadata_hash = metadata_hash.clone();
+
+    let id = client.create_market(&creator, &params);
+    let stored = client.get_metadata_hash(&id);
+    assert_eq!(stored, metadata_hash);
+}
+
+#[test]
+fn metadata_hash_is_immutable_after_creation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    let original = BytesN::from_array(&env, &[1u8; 32]);
+    let mut params = default_params(&env);
+    params.metadata_hash = original.clone();
+    let id = client.create_market(&creator, &params);
+
+    // There is no contract mutator for metadata hash. Attempting a direct
+    // storage overwrite via a second create for a different market must not
+    // affect the first market's anchored hash.
+    let other = BytesN::from_array(&env, &[2u8; 32]);
+    let mut params2 = default_params(&env);
+    params2.metadata_hash = other;
+    let id2 = client.create_market(&creator, &params2);
+
+    assert_eq!(client.get_metadata_hash(&id), original);
+    assert_ne!(client.get_metadata_hash(&id2), original);
+    assert_eq!(client.get_metadata_hash(&id), original);
+}
+
+#[test]
+fn get_metadata_hash_fails_for_unknown_market() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+
+    let result = client.try_get_metadata_hash(&999_u64);
+    assert_eq!(result, Err(Ok(InsightArenaError::MarketNotFound)));
+}
+
+#[test]
+fn market_created_event_includes_metadata_hash() {
+    use soroban_sdk::testutils::Events;
+    use soroban_sdk::TryFromVal;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    let metadata_hash = BytesN::from_array(&env, &[9u8; 32]);
+    let mut params = default_params(&env);
+    params.metadata_hash = metadata_hash.clone();
+    let end_time = params.end_time;
+
+    let id = client.create_market(&creator, &params);
+
+    let contract_id = client.address.clone();
+    let events = env.events().all();
+    let mut found = false;
+    for event in events.iter() {
+        if event.0 == contract_id && event.1.len() == 2 {
+            let topic0 = Symbol::try_from_val(&env, &event.1.get(0).unwrap()).unwrap();
+            let topic1 = Symbol::try_from_val(&env, &event.1.get(1).unwrap()).unwrap();
+            if topic0 == symbol_short!("mkt") && topic1 == symbol_short!("created") {
+                let data: (u64, Address, u64, BytesN<32>) =
+                    TryFromVal::try_from_val(&env, &event.2).unwrap();
+                assert_eq!(data.0, id);
+                assert_eq!(data.1, creator);
+                assert_eq!(data.2, end_time);
+                assert_eq!(data.3, metadata_hash);
+                found = true;
+            }
+        }
+    }
+    assert!(found, "market created event must include metadata_hash");
+    assert_eq!(client.get_metadata_hash(&id), metadata_hash);
 }

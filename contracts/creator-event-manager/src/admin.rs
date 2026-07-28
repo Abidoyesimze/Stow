@@ -3,7 +3,7 @@
 /// The `initialize` function is the single entry point that must be called
 /// exactly once after deployment.  It stores every piece of global config in
 /// persistent storage and sets the counters to zero.
-use soroban_sdk::{Address, Env, Symbol};
+use soroban_sdk::{Address, Env, Symbol, Vec};
 
 use crate::storage::TTL_LEDGERS;
 use crate::storage_types::DataKey;
@@ -30,6 +30,68 @@ pub enum AdminError {
     AlreadyPaused = 5,
     /// `unpause` was called but the contract is not paused.
     NotPaused = 6,
+    /// The verifier threshold (M) is `0`, or exceeds the number of configured
+    /// signers (N), when calling `set_verifier_config`.
+    InvalidThreshold = 7,
+    /// The `signers` list passed to `set_verifier_config` contains the same
+    /// address more than once.
+    DuplicateSigner = 8,
+    /// No pending admin nomination exists to accept or cancel (#1356).
+    NoPendingNomination = 9,
+    /// Caller tried to accept an admin nomination that is not addressed to them (#1356).
+    NotNominee = 10,
+    /// A nomination already exists; cancel it before nominating another (#1356).
+    NominationPending = 11,
+}
+
+// ---------------------------------------------------------------------------
+// Prediction lock lead-time (#1355)
+// ---------------------------------------------------------------------------
+
+/// Configure the lock lead-time (seconds before `match_time`) before which
+/// predictions must be placed on newly created matches. Only the admin may
+/// call this. Existing matches keep the `prediction_lock_time` computed at
+/// their own creation time — this only affects matches created afterward.
+///
+/// # Errors
+/// * [`AdminError::Unauthorized`] — caller is not the admin.
+///
+/// # Events
+/// Emits `(Symbol("admin"), Symbol("lock_lead_updated"))` with data
+/// `lock_lead_seconds`.
+pub fn set_prediction_lock_lead_seconds(
+    env: &Env,
+    caller: Address,
+    lock_lead_seconds: u64,
+) -> Result<(), AdminError> {
+    require_is_admin(env, &caller)?;
+
+    let storage = env.storage().persistent();
+    storage.set(&DataKey::PredictionLockLeadSeconds, &lock_lead_seconds);
+    storage.extend_ttl(
+        &DataKey::PredictionLockLeadSeconds,
+        TTL_LEDGERS,
+        TTL_LEDGERS,
+    );
+
+    env.events().publish(
+        (
+            Symbol::new(env, "admin"),
+            Symbol::new(env, "lock_lead_updated"),
+        ),
+        lock_lead_seconds,
+    );
+
+    Ok(())
+}
+
+/// Return the configured prediction lock lead-time (seconds), or `0`
+/// (predictions lock exactly at `match_time`) if never configured.
+pub fn get_prediction_lock_lead_seconds(env: &Env) -> u64 {
+    env.storage()
+        .persistent()
+        .get::<DataKey, u64>(&DataKey::PredictionLockLeadSeconds)
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -389,6 +451,209 @@ pub fn ensure_not_paused(env: &Env) {
     if is_paused(env) {
         panic!("contract_paused");
     }
+}
+
+// ---------------------------------------------------------------------------
+// M-of-N verifier configuration (#1358)
+// ---------------------------------------------------------------------------
+
+/// Configure the M-of-N verifier signer set used for event verification.
+///
+/// Replaces any previously configured signer set and threshold atomically,
+/// so the two values are never observed out of sync (e.g. a stale M greater
+/// than a newly-shrunk N).
+///
+/// # Parameters
+/// * `signers` — the full set of N authorised verifier addresses.
+/// * `threshold` — M, the number of distinct signers required before an
+///   event is considered verified via `verification::submit_verification`.
+///
+/// # Errors
+/// * [`AdminError::Unauthorized`] — caller is not the admin.
+/// * [`AdminError::InvalidThreshold`] — `threshold == 0` or `threshold > signers.len()`.
+/// * [`AdminError::DuplicateSigner`] — `signers` contains the same address twice.
+///
+/// # Events
+/// Emits `(Symbol("admin"), Symbol("verifier_config_updated"))` with data
+/// `(signer_count, threshold)`.
+pub fn set_verifier_config(
+    env: &Env,
+    caller: Address,
+    signers: Vec<Address>,
+    threshold: u32,
+) -> Result<(), AdminError> {
+    require_is_admin(env, &caller)?;
+
+    let signer_count = signers.len();
+    if threshold == 0 || threshold > signer_count {
+        return Err(AdminError::InvalidThreshold);
+    }
+
+    for i in 0..signers.len() {
+        for j in (i + 1)..signers.len() {
+            if signers.get(i) == signers.get(j) {
+                return Err(AdminError::DuplicateSigner);
+            }
+        }
+    }
+
+    let storage = env.storage().persistent();
+    storage.set(&DataKey::VerifierSigners, &signers);
+    storage.extend_ttl(&DataKey::VerifierSigners, TTL_LEDGERS, TTL_LEDGERS);
+    storage.set(&DataKey::VerifierThreshold, &threshold);
+    storage.extend_ttl(&DataKey::VerifierThreshold, TTL_LEDGERS, TTL_LEDGERS);
+
+    env.events().publish(
+        (
+            Symbol::new(env, "admin"),
+            Symbol::new(env, "verifier_config_updated"),
+        ),
+        (signer_count, threshold),
+    );
+
+    Ok(())
+}
+
+/// Return the configured verifier signer set, or an empty `Vec` if
+/// `set_verifier_config` has never been called.
+pub fn get_verifier_signers(env: &Env) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get::<DataKey, Vec<Address>>(&DataKey::VerifierSigners)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Return the configured verifier threshold (M), or `0` if
+/// `set_verifier_config` has never been called.
+pub fn get_verifier_threshold(env: &Env) -> u32 {
+    env.storage()
+        .persistent()
+        .get::<DataKey, u32>(&DataKey::VerifierThreshold)
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Two-step admin handover (#1356)
+// ---------------------------------------------------------------------------
+
+/// Nominate a new admin. The current admin remains in force until the nominee
+/// explicitly accepts via [`accept_admin`].
+///
+/// # Errors
+/// * [`AdminError::Unauthorized`] — caller is not the admin.
+/// * [`AdminError::InvalidAddress`] — nominee equals the contract address.
+/// * [`AdminError::NominationPending`] — a nomination is already outstanding.
+///
+/// # Events
+/// Emits `(Symbol("admin"), Symbol("nominated"))` with data
+/// `(current_admin, nominee)`.
+pub fn nominate_admin(env: &Env, caller: Address, nominee: Address) -> Result<(), AdminError> {
+    require_is_admin(env, &caller)?;
+
+    if nominee == env.current_contract_address() {
+        return Err(AdminError::InvalidAddress);
+    }
+
+    let storage = env.storage().persistent();
+    if storage.has(&DataKey::PendingAdmin) {
+        return Err(AdminError::NominationPending);
+    }
+
+    storage.set(&DataKey::PendingAdmin, &nominee);
+    storage.extend_ttl(&DataKey::PendingAdmin, TTL_LEDGERS, TTL_LEDGERS);
+
+    env.events().publish(
+        (Symbol::new(env, "admin"), Symbol::new(env, "nominated")),
+        (caller, nominee),
+    );
+
+    Ok(())
+}
+
+/// Accept a pending admin nomination. Only the nominated address may accept.
+/// On success the previous admin loses privileges and the nominee becomes the
+/// sole admin.
+///
+/// # Errors
+/// * [`AdminError::NoPendingNomination`] — no nomination is outstanding.
+/// * [`AdminError::NotNominee`] — caller is not the pending nominee.
+///
+/// # Events
+/// Emits `(Symbol("admin"), Symbol("accepted"))` with data
+/// `(old_admin, new_admin)`.
+pub fn accept_admin(env: &Env, caller: Address) -> Result<(), AdminError> {
+    caller.require_auth();
+
+    let storage = env.storage().persistent();
+    let nominee: Address = storage
+        .get(&DataKey::PendingAdmin)
+        .ok_or(AdminError::NoPendingNomination)?;
+
+    if caller != nominee {
+        return Err(AdminError::NotNominee);
+    }
+
+    let old_admin: Address = storage
+        .get::<DataKey, Address>(&DataKey::CurrentAdmin)
+        .unwrap_or_else(|| panic!("not_initialized"));
+
+    // Revoke old admin key and install the new one.
+    storage.remove(&DataKey::Admin(old_admin.clone()));
+    storage.set(&DataKey::Admin(caller.clone()), &caller);
+    storage.extend_ttl(&DataKey::Admin(caller.clone()), TTL_LEDGERS, TTL_LEDGERS);
+
+    storage.set(&DataKey::CurrentAdmin, &caller);
+    storage.extend_ttl(&DataKey::CurrentAdmin, TTL_LEDGERS, TTL_LEDGERS);
+
+    storage.remove(&DataKey::PendingAdmin);
+
+    env.events().publish(
+        (Symbol::new(env, "admin"), Symbol::new(env, "accepted")),
+        (old_admin, caller),
+    );
+
+    Ok(())
+}
+
+/// Cancel a pending admin nomination. Only the current admin may cancel.
+///
+/// # Errors
+/// * [`AdminError::Unauthorized`] — caller is not the admin.
+/// * [`AdminError::NoPendingNomination`] — no nomination is outstanding.
+///
+/// # Events
+/// Emits `(Symbol("admin"), Symbol("cancelled"))` with data
+/// `(admin, cancelled_nominee)`.
+pub fn cancel_admin_nomination(env: &Env, caller: Address) -> Result<(), AdminError> {
+    require_is_admin(env, &caller)?;
+
+    let storage = env.storage().persistent();
+    let nominee: Address = storage
+        .get(&DataKey::PendingAdmin)
+        .ok_or(AdminError::NoPendingNomination)?;
+
+    storage.remove(&DataKey::PendingAdmin);
+
+    env.events().publish(
+        (Symbol::new(env, "admin"), Symbol::new(env, "cancelled")),
+        (caller, nominee),
+    );
+
+    Ok(())
+}
+
+/// Return the pending admin nominee, if any.
+pub fn get_pending_admin(env: &Env) -> Option<Address> {
+    env.storage()
+        .persistent()
+        .get::<DataKey, Address>(&DataKey::PendingAdmin)
+}
+
+/// Return the current admin address, or `None` if not initialised.
+pub fn get_admin(env: &Env) -> Option<Address> {
+    env.storage()
+        .persistent()
+        .get::<DataKey, Address>(&DataKey::CurrentAdmin)
 }
 
 // ---------------------------------------------------------------------------

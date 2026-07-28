@@ -8,15 +8,37 @@ import { Match } from './entities/match.entity';
 import { MatchPrediction } from './entities/match-prediction.entity';
 import { CreatorEvent } from './entities/creator-event.entity';
 import { SorobanModule } from '../soroban/soroban.module';
+import { HttpModule } from '@nestjs/axios';
+import { ExternalMatchResult } from './entities/external-match-result.entity';
+import { ExternalResultIngestionService } from './external-result-ingestion.service';
+import {
+  EXTERNAL_RESULT_FEED_CLIENT,
+  HttpExternalResultFeedClient,
+} from './external-result-feed.client';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Match, MatchPrediction, CreatorEvent]),
+    TypeOrmModule.forFeature([
+      Match,
+      MatchPrediction,
+      CreatorEvent,
+      ExternalMatchResult,
+    ]),
+    HttpModule,
     ScheduleModule.forRoot(),
     SorobanModule,
   ],
   controllers: [MatchesController],
-  providers: [MatchesService, CreatorEventFinalizerService],
+  providers: [
+    MatchesService,
+    CreatorEventFinalizerService,
+    ExternalResultIngestionService,
+    HttpExternalResultFeedClient,
+    {
+      provide: EXTERNAL_RESULT_FEED_CLIENT,
+      useExisting: HttpExternalResultFeedClient,
+    },
+  ],
   exports: [MatchesService, TypeOrmModule],
 })
 export class MatchesModule {}

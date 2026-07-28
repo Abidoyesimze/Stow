@@ -22,6 +22,14 @@ export interface NotificationBatch {
   }>;
 }
 
+export interface DisputeSlaNotificationInput {
+  disputeId: string;
+  marketId: string;
+  marketTitle: string;
+  slaDeadline: Date;
+  recipientAddresses: string[];
+}
+
 @Injectable()
 export class NotificationGeneratorService implements OnModuleDestroy {
   private readonly logger = new Logger(NotificationGeneratorService.name);
@@ -304,6 +312,62 @@ export class NotificationGeneratorService implements OnModuleDestroy {
       title: 'Event Cancelled',
       message: `The event "${event.title}" has been cancelled.`,
       data: { event_id: eventId, event_title: event.title },
+    }));
+
+    await this.queueBatchNotifications(notifications);
+  }
+
+  /**
+   * Advisory reminder that a pending dispute's current SLA stage is close
+   * to its deadline. Sent to the assigned arbiter (if any) and admins.
+   */
+  async notifyDisputeSlaApproaching(
+    input: DisputeSlaNotificationInput,
+  ): Promise<void> {
+    if (input.recipientAddresses.length === 0) return;
+
+    const notifications = input.recipientAddresses.map((address) => ({
+      userAddress: address,
+      type: NotificationType.DisputeSlaApproaching,
+      title: 'Dispute SLA Approaching',
+      message: `Dispute for market "${input.marketTitle}" must be reviewed before ${input.slaDeadline.toISOString()}.`,
+      data: {
+        dispute_id: input.disputeId,
+        market_id: input.marketId,
+        sla_deadline: input.slaDeadline.toISOString(),
+      },
+    }));
+
+    await this.queueBatchNotifications(notifications);
+  }
+
+  /**
+   * Sent when a pending dispute's SLA deadline has passed. `escalated`
+   * indicates the dispute was moved into the next SLA stage as a result.
+   */
+  async notifyDisputeSlaBreached(
+    input: DisputeSlaNotificationInput & { escalated: boolean },
+  ): Promise<void> {
+    if (input.recipientAddresses.length === 0) return;
+
+    const title = input.escalated
+      ? 'Dispute SLA Breached — Escalated'
+      : 'Dispute SLA Breached';
+    const message = `Dispute for market "${input.marketTitle}" missed its SLA deadline (${input.slaDeadline.toISOString()})${
+      input.escalated ? ' and has been escalated' : ''
+    }.`;
+
+    const notifications = input.recipientAddresses.map((address) => ({
+      userAddress: address,
+      type: NotificationType.DisputeSlaBreached,
+      title,
+      message,
+      data: {
+        dispute_id: input.disputeId,
+        market_id: input.marketId,
+        sla_deadline: input.slaDeadline.toISOString(),
+        escalated: input.escalated,
+      },
     }));
 
     await this.queueBatchNotifications(notifications);

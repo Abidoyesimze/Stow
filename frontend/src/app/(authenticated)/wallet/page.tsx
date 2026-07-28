@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useWallet } from "@/context/WalletContext";
+import { useToast } from "@/hooks/useToast";
 
 type TxType = "Stake" | "Payout" | "Refund" | "Season Reward";
 type TxStatus = "Confirmed" | "Pending";
@@ -84,8 +85,10 @@ function truncateAddress(addr: string) {
 
 export default function WalletPage() {
   const { logout } = useWallet();
+  const toast = useToast();
   const [copied, setCopied] = useState(false);
   const [typeFilter, setTypeFilter] = useState<TxFilter>("All");
+  const [isExporting, setIsExporting] = useState(false);
 
   // Dynamically calculate individual card summary strings based on the wallet seed
   const dynamicAvailable = `${(1000 + (baseSeed % 850) + 0.5).toLocaleString(undefined, { minimumFractionDigits: 2 })} XLM`;
@@ -102,6 +105,52 @@ export default function WalletPage() {
     typeFilter === "All"
       ? TRANSACTIONS
       : TRANSACTIONS.filter((t) => t.type === typeFilter);
+
+  const buildCsv = () => {
+    const escapeValue = (value: string) => `"${value.replaceAll('"', '""')}"`;
+    const rows = [
+      ["Date", "Type", "Market / Description", "Amount", "Status"],
+      ...filteredTx.map((transaction) => [
+        transaction.date,
+        transaction.type,
+        transaction.description,
+        transaction.amount,
+        transaction.status,
+      ]),
+    ];
+
+    return rows.map((row) => row.map(escapeValue).join(",")).join("\r\n");
+  };
+
+  const handleExport = async () => {
+    if (filteredTx.length === 0) {
+      toast.info("There are no transactions in the current filter to export.");
+      return;
+    }
+
+    setIsExporting(true);
+    try {
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+
+      const blob = new Blob([buildCsv()], {
+        type: "text/csv;charset=utf-8;",
+      });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+
+      link.href = url;
+      link.download = `insightarena-transactions-${typeFilter.toLowerCase()}-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success("Transaction history exported successfully.");
+    } catch {
+      toast.error("Failed to export transaction history.");
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
   return (
     <div className="space-y-6 p-4 sm:p-6">
@@ -169,10 +218,11 @@ export default function WalletPage() {
           View on Stellar Explorer ↗
         </Link>
         <button
-          className="rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-gray-400 cursor-not-allowed"
-          disabled
+          onClick={handleExport}
+          disabled={isExporting}
+          className="rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-sm font-medium text-gray-300 hover:bg-white/10 disabled:cursor-not-allowed disabled:text-gray-500 transition-colors"
         >
-          Export Transaction History
+          {isExporting ? "Exporting..." : "Export Transaction History"}
         </button>
       </div>
 

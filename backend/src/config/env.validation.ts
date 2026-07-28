@@ -127,6 +127,54 @@ class EnvironmentVariables {
   @IsOptional()
   @IsNumber()
   RATE_LIMIT_WRITE_LIMIT?: number;
+
+  // Dispute evidence attachments (#1363)
+  @IsOptional()
+  @IsNumber()
+  DISPUTE_EVIDENCE_MAX_SIZE_BYTES?: number;
+
+  @IsOptional()
+  @IsString()
+  DISPUTE_EVIDENCE_ALLOWED_MIME_TYPES?: string;
+
+  // Incoming webhook signature verification & replay protection (#1376)
+  @IsOptional()
+  @IsString()
+  WEBHOOK_HMAC_SECRET?: string;
+
+  @IsOptional()
+  @IsNumber()
+  WEBHOOK_REPLAY_WINDOW_SECONDS?: number;
+
+  // Auth endpoint rate limiting (#1272)
+  @IsOptional()
+  @IsNumber()
+  AUTH_THROTTLE_LIMIT?: number;
+
+  @IsOptional()
+  @IsNumber()
+  AUTH_THROTTLE_TTL_MS?: number;
+
+  // Public API key tier rate limiting (#1393)
+  @IsOptional()
+  @IsNumber()
+  PUBLIC_API_THROTTLE_LIMIT?: number;
+
+  @IsOptional()
+  @IsNumber()
+  PUBLIC_API_THROTTLE_TTL_MS?: number;
+
+  @IsOptional()
+  @IsString()
+  MATCH_RESULTS_FEED_URL?: string;
+
+  @IsOptional()
+  @IsString()
+  MATCH_RESULTS_FEED_CREDENTIAL?: string;
+
+  @IsOptional()
+  @IsNumber()
+  MATCH_RESULTS_POLL_INTERVAL_MS?: number;
 }
 
 export function validate(config: Record<string, unknown>) {

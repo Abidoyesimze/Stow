@@ -1,10 +1,10 @@
 use soroban_sdk::testutils::{storage::Persistent as _, Address as _, Ledger};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol, Vec, BytesN};
 
 use insightarena_contract::config::LEDGER_BUMP_MARKET;
 use insightarena_contract::market::CreateMarketParams;
-use insightarena_contract::storage_types::DataKey;
+use insightarena_contract::storage_types::{DataKey, BatchPredictionRequest};
 use insightarena_contract::{InsightArenaContract, InsightArenaContractClient, InsightArenaError};
 
 // ── Test helpers ──────────────────────────────────────────────────────────
@@ -41,6 +41,7 @@ fn default_params(env: &Env) -> CreateMarketParams {
         min_stake: 10_000_000,
         max_stake: 100_000_000,
         is_public: true,
+        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
     }
 }
 
@@ -138,6 +139,69 @@ fn test_submit_prediction_stake_too_high() {
 }
 
 #[test]
+fn test_submit_prediction_uses_global_bounds_when_market_inherits() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, xlm_token, admin, _) = deploy(&env);
+    let predictor = Address::generate(&env);
+
+    // Tighten the global window, then create a market that inherits both bounds.
+    client.set_stake_bounds(&admin, &20_000_000_i128, &40_000_000_i128);
+
+    let mut params = default_params(&env);
+    params.min_stake = 0;
+    params.max_stake = 0;
+    let market_id = client.create_market(&Address::generate(&env), &params);
+
+    // Below global min → StakeTooLow
+    fund(&env, &xlm_token, &predictor, 20_000_000);
+    let too_low =
+        client.try_submit_prediction(&predictor, &market_id, &symbol_short!("yes"), &19_999_999_i128);
+    assert!(matches!(too_low, Err(Ok(InsightArenaError::StakeTooLow))));
+
+    // Above global max → StakeTooHigh
+    fund(&env, &xlm_token, &predictor, 50_000_000);
+    let too_high =
+        client.try_submit_prediction(&predictor, &market_id, &symbol_short!("yes"), &40_000_001_i128);
+    assert!(matches!(too_high, Err(Ok(InsightArenaError::StakeTooHigh))));
+
+    // Exact boundary succeeds.
+    client.submit_prediction(&predictor, &market_id, &symbol_short!("yes"), &20_000_000_i128);
+    assert!(client.has_predicted(&market_id, &predictor));
+}
+
+#[test]
+fn test_submit_prediction_market_override_takes_precedence() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, xlm_token, admin, _) = deploy(&env);
+    let predictor = Address::generate(&env);
+
+    // Global window is wide; market overrides to a tighter band.
+    client.set_stake_bounds(&admin, &1_000_000_i128, &1_000_000_000_i128);
+
+    let mut params = default_params(&env);
+    params.min_stake = 25_000_000;
+    params.max_stake = 30_000_000;
+    let market_id = client.create_market(&Address::generate(&env), &params);
+
+    // Allowed by global but below market override → StakeTooLow
+    fund(&env, &xlm_token, &predictor, 30_000_000);
+    let too_low =
+        client.try_submit_prediction(&predictor, &market_id, &symbol_short!("yes"), &24_999_999_i128);
+    assert!(matches!(too_low, Err(Ok(InsightArenaError::StakeTooLow))));
+
+    // Allowed by global but above market override → StakeTooHigh
+    let too_high =
+        client.try_submit_prediction(&predictor, &market_id, &symbol_short!("yes"), &30_000_001_i128);
+    assert!(matches!(too_high, Err(Ok(InsightArenaError::StakeTooHigh))));
+
+    // Inside the market override window succeeds.
+    client.submit_prediction(&predictor, &market_id, &symbol_short!("yes"), &25_000_000_i128);
+    assert!(client.has_predicted(&market_id, &predictor));
+}
+
+#[test]
 fn test_submit_prediction_already_predicted() {
     let env = Env::default();
     env.mock_all_auths();
@@ -154,6 +218,97 @@ fn test_submit_prediction_already_predicted() {
         result,
         Err(Ok(InsightArenaError::AlreadyPredicted))
     ));
+}
+
+// ── submit_predictions_batch tests ────────────────────────────────────────
+
+#[test]
+fn test_submit_predictions_batch_success() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+    let (client, xlm_token, _, _) = deploy(&env);
+    let predictor = Address::generate(&env);
+    let stake = 20_000_000_i128;
+
+    let market_id_1 = client.create_market(&Address::generate(&env), &default_params(&env));
+    let market_id_2 = client.create_market(&Address::generate(&env), &default_params(&env));
+    fund(&env, &xlm_token, &predictor, stake * 2);
+
+    let requests = vec![
+        &env,
+        BatchPredictionRequest {
+            market_id: market_id_1,
+            chosen_outcome: symbol_short!("yes"),
+            stake_amount: stake,
+        },
+        BatchPredictionRequest {
+            market_id: market_id_2,
+            chosen_outcome: symbol_short!("no"),
+            stake_amount: stake,
+        },
+    ];
+
+    let result = client.submit_predictions_batch(&predictor, &requests);
+    assert_eq!(result.len(), 2);
+    
+    assert!(client.has_predicted(&market_id_1, &predictor));
+    assert!(client.has_predicted(&market_id_2, &predictor));
+}
+
+#[test]
+fn test_submit_predictions_batch_oversize() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _) = deploy(&env);
+    let predictor = Address::generate(&env);
+    let stake = 20_000_000_i128;
+
+    let mut requests_vec = std::vec::Vec::new();
+    for _ in 0..11 {
+        requests_vec.push(BatchPredictionRequest {
+            market_id: 1,
+            chosen_outcome: symbol_short!("yes"),
+            stake_amount: stake,
+        });
+    }
+    
+    let requests = soroban_sdk::Vec::from_slice(&env, &requests_vec);
+    let result = client.try_submit_predictions_batch(&predictor, &requests);
+    assert!(matches!(result, Err(Ok(InsightArenaError::BatchSizeExceeded))));
+}
+
+#[test]
+fn test_submit_predictions_batch_partial_failure_reverts_all() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, xlm_token, _, _) = deploy(&env);
+    let predictor = Address::generate(&env);
+    let stake = 20_000_000_i128;
+
+    let market_id_1 = client.create_market(&Address::generate(&env), &default_params(&env));
+    let market_id_2 = client.create_market(&Address::generate(&env), &default_params(&env));
+    fund(&env, &xlm_token, &predictor, stake * 2);
+
+    let requests = vec![
+        &env,
+        BatchPredictionRequest {
+            market_id: market_id_1,
+            chosen_outcome: symbol_short!("yes"),
+            stake_amount: stake, // valid
+        },
+        BatchPredictionRequest {
+            market_id: market_id_2,
+            chosen_outcome: symbol_short!("maybe"), // invalid outcome
+            stake_amount: stake,
+        },
+    ];
+
+    let result = client.try_submit_predictions_batch(&predictor, &requests);
+    assert!(matches!(result, Err(Ok(InsightArenaError::InvalidOutcome))));
+    
+    // Check that neither prediction was recorded due to atomic rollback
+    assert!(!client.has_predicted(&market_id_1, &predictor));
+    assert!(!client.has_predicted(&market_id_2, &predictor));
 }
 
 // ── claim_payout tests ────────────────────────────────────────────────────

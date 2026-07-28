@@ -1,4 +1,12 @@
-use soroban_sdk::{contracttype, Address, Map, String, Symbol, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, Env, Map, String, Symbol, Vec};
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchPredictionRequest {
+    pub market_id: u64,
+    pub chosen_outcome: Symbol,
+    pub stake_amount: i128,
+}
 
 #[contracttype]
 #[derive(Clone)]
@@ -102,8 +110,13 @@ pub enum DataKey {
     VerifiedAddress(Address),
     /// Keyed by event_id. Vec of Winner records for the event.
     Winners(u64),
-    /// Singleton. Treasury balance separate from protocol fees.
-    TreasuryBalance,
+
+    // ── Commit-Reveal Predictions ─────────────────────────────────────────────
+    // NOTE: `#[contracttype]` union enums are hard-capped at 50 XDR cases
+    // (`ScSpecUdtUnionV0::cases<50>`). The previously-declared-but-unused
+    // `TreasuryBalance` singleton was removed here to make room for this key.
+    /// Keyed by (market_id, predictor). Stores a committed prediction (hash + amount, awaiting reveal).
+    CommitmentPrediction(u64, Address),
 }
 
 /// Lifecycle state of a governance proposal, derived from its stored flags and
@@ -133,16 +146,79 @@ pub struct Dispute {
     pub disputer: Address,
     pub bond: i128,
     pub filed_at: u64,
+    pub appeal_tier: u32,
+    pub appealer: Option<Address>,
+    pub appeal_bond: i128,
+    /// Arbiters assigned to weigh in on this dispute via
+    /// `dispute::assign_arbiters`, with per-arbiter weight snapshotted at
+    /// assignment time. Empty until a panel is assigned; the dispute can
+    /// still be settled directly by admin via `resolve_dispute` if no panel
+    /// is ever assigned.
+    pub arbiters: Vec<ArbiterAssignment>,
+    /// Fraction (bps, of total assigned weight) of weight that must have
+    /// voted before `dispute::finalize_arbiter_vote` will settle the panel.
+    /// Snapshotted from `Config::arbiter_quorum_bps` when the panel is
+    /// assigned, so a later config change never retroactively affects an
+    /// in-flight vote.
+    pub quorum_bps: u32,
+    /// Ledger timestamp after which `dispute::finalize_arbiter_vote`
+    /// becomes callable. Set when the panel is assigned.
+    pub voting_deadline: u64,
+    /// True once `dispute::finalize_arbiter_vote` has settled this
+    /// dispute's arbiter panel.
+    pub arbiters_finalized: bool,
 }
 
 impl Dispute {
-    pub fn new(disputer: Address, bond: i128, filed_at: u64) -> Self {
+    pub fn new(env: &Env, disputer: Address, bond: i128, filed_at: u64) -> Self {
         Self {
             disputer,
             bond,
             filed_at,
+            appeal_tier: 0,
+            appealer: None,
+            appeal_bond: 0,
+            arbiters: Vec::new(env),
+            quorum_bps: 0,
+            voting_deadline: 0,
+            arbiters_finalized: false,
         }
     }
+}
+
+/// A single arbiter's assignment to a dispute's panel. `weight` is a
+/// snapshot (stake at assignment time scaled by a reputation multiplier)
+/// and never changes afterward, even if the arbiter's live stake or
+/// reputation later changes. See `dispute::assign_arbiters`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArbiterAssignment {
+    pub arbiter: Address,
+    pub weight: i128,
+    pub voted: bool,
+    /// Meaningful only when `voted` is true. `true` = uphold the dispute
+    /// (the disputer was right, market gets reopened); `false` = reject it
+    /// (the original resolution stands).
+    pub vote_uphold: bool,
+}
+
+/// Read-only tally for a dispute's arbiter panel, returned by
+/// `dispute::get_arbiter_tally`. Recomputed on every call from the stored
+/// `Dispute.arbiters` list rather than cached, so it always reflects the
+/// latest votes.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArbiterTally {
+    pub market_id: u64,
+    pub total_weight: i128,
+    pub voted_weight: i128,
+    pub uphold_weight: i128,
+    pub reject_weight: i128,
+    pub quorum_bps: u32,
+    pub quorum_met: bool,
+    pub voting_deadline: u64,
+    pub finalized: bool,
+    pub arbiters: Vec<ArbiterAssignment>,
 }
 
 #[contracttype]
@@ -171,6 +247,7 @@ pub struct CreatorStats {
     pub average_participant_count: u32,
     pub dispute_count: u32,
     pub reputation_score: u32,
+    pub last_updated: u64, // ledger timestamp (unix seconds) at last mutating call
 }
 
 #[contracttype]
@@ -197,6 +274,8 @@ pub struct Prediction {
     pub payout_claimed: bool,
     /// The final portion of XLM the user won, populated after resolution. Defaults to 0.
     pub payout_amount: i128,
+    /// Payment method: true if via allowance (transfer_from), false if direct transfer. Defaults to false.
+    pub via_allowance: bool,
 }
 
 impl Prediction {
@@ -216,6 +295,27 @@ impl Prediction {
             submitted_at,
             payout_claimed: false,
             payout_amount: 0,
+            via_allowance: false,
+        }
+    }
+
+    /// Create a prediction via allowance-based payment.
+    pub fn new_via_allowance(
+        market_id: u64,
+        predictor: Address,
+        chosen_outcome: Symbol,
+        stake_amount: i128,
+        submitted_at: u64,
+    ) -> Self {
+        Self {
+            market_id,
+            predictor,
+            chosen_outcome,
+            stake_amount,
+            submitted_at,
+            payout_claimed: false,
+            payout_amount: 0,
+            via_allowance: true,
         }
     }
 }
@@ -266,6 +366,15 @@ pub struct Market {
     pub participant_count: u32,
     /// Dispute window duration in seconds after resolution.
     pub dispute_window: u64,
+    /// Per-market override (stroops) for the maximum liquidity a single
+    /// outcome's AMM reserve may hold. `0` means "inherit the global
+    /// `Config::max_liquidity_per_outcome` cap". Set via
+    /// `market::set_market_liquidity_cap`; takes precedence over the global
+    /// cap whenever non-zero. See `liquidity::add_liquidity`.
+    pub outcome_liquidity_cap: i128,
+    /// SHA-256 content hash of off-chain market metadata. Set once at creation
+    /// and never mutated by any subsequent market operation.
+    pub metadata_hash: BytesN<32>,
 }
 
 impl Market {
@@ -286,6 +395,7 @@ impl Market {
         min_stake: i128,
         max_stake: i128,
         dispute_window: u64,
+        metadata_hash: BytesN<32>,
     ) -> Self {
         Self {
             market_id,
@@ -309,6 +419,8 @@ impl Market {
             max_stake,
             participant_count: 0,
             dispute_window,
+            outcome_liquidity_cap: 0,
+            metadata_hash,
         }
     }
 }
@@ -322,10 +434,15 @@ pub struct LiquidityPool {
     pub lp_token_supply: i128,
     pub fee_bps: u32,
     pub created_at: u64,
+    /// Per-outcome TWAP price accumulators. Kept on the pool itself (rather than
+    /// a separate storage key) so a single `save_pool` persists both the reserve
+    /// update and its price observation atomically. See [`PriceAccumulator`].
+    pub price_accumulators: Map<Symbol, PriceAccumulator>,
 }
 
 impl LiquidityPool {
     pub fn new(
+        env: &Env,
         market_id: u64,
         initial_reserves: Map<Symbol, i128>,
         fee_bps: u32,
@@ -340,6 +457,7 @@ impl LiquidityPool {
             lp_token_supply: 0,
             fee_bps,
             created_at,
+            price_accumulators: Map::new(env),
         }
     }
 }
@@ -353,15 +471,37 @@ pub struct LPPosition {
     pub initial_deposit: i128,
     pub fees_earned: i128,
     pub created_at: u64,
+    /// Reserve of the pool's first IL-tracked outcome (`Market::outcome_options[0]`)
+    /// at the moment this position was opened. An immutable entry-price snapshot:
+    /// set once in `LPPosition::new` / `liquidity::add_liquidity` and never
+    /// mutated afterward, even when the same provider tops up their position with
+    /// additional deposits. Used as the impermanent-loss baseline — see
+    /// `liquidity::calculate_impermanent_loss_bps`.
+    pub entry_reserve_a: i128,
+    /// Reserve of the pool's second IL-tracked outcome (`Market::outcome_options[1]`)
+    /// at the moment this position was opened. Immutable; see `entry_reserve_a`.
+    /// For single-outcome markets this mirrors `entry_reserve_a`, which yields a
+    /// price ratio of 1 (i.e. impermanent loss is always zero in that case).
+    pub entry_reserve_b: i128,
+    /// Impermanent loss, in basis points (always `<= 0`), computed relative to
+    /// `entry_reserve_a` / `entry_reserve_b` the last time this position was
+    /// withdrawn from via `liquidity::remove_liquidity`. Zero until the first
+    /// withdrawal. For the always-current figure, use `liquidity::get_position_il`,
+    /// which recomputes live against the pool's current reserves instead of
+    /// relying on this cached, withdrawal-time value.
+    pub cumulative_il_bps: i128,
 }
 
 impl LPPosition {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider: Address,
         market_id: u64,
         lp_tokens: i128,
         initial_deposit: i128,
         created_at: u64,
+        entry_reserve_a: i128,
+        entry_reserve_b: i128,
     ) -> Self {
         Self {
             provider,
@@ -370,6 +510,9 @@ impl LPPosition {
             initial_deposit,
             fees_earned: 0,
             created_at,
+            entry_reserve_a,
+            entry_reserve_b,
+            cumulative_il_bps: 0,
         }
     }
 }
@@ -498,6 +641,70 @@ pub struct MarketFeeInfo {
     pub tier: FeeTier,
     pub effective_fee_bps: u32,
     pub volatility_ema_bps: u32,
+}
+
+// ── TWAP Price Oracle Types ───────────────────────────────────────────────────
+
+/// A single recorded price sample for one outcome, kept in the [`PriceAccumulator`]
+/// ring buffer.
+///
+/// `price_cumulative` is the value of the running price integral (sum of
+/// `price * elapsed_seconds` over the outcome's whole history) *as of*
+/// `timestamp`, i.e. immediately before `price` itself takes effect. This lets
+/// `get_twap` reconstruct the integral at any timestamp `t >= observations[0].timestamp`
+/// by locating the latest observation at or before `t` and extrapolating with
+/// its `price` for the remaining `t - timestamp` seconds.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceObservation {
+    /// Ledger timestamp this observation was recorded at.
+    pub timestamp: u64,
+    /// Instantaneous outcome price (pool reserve) that became active at `timestamp`.
+    pub price: i128,
+    /// Cumulative price integral as of `timestamp`, not yet including `price` itself.
+    pub price_cumulative: i128,
+}
+
+/// Per-(market, outcome) TWAP state: a cumulative price accumulator plus a
+/// fixed-capacity ring buffer of historical observations used to answer
+/// windowed `get_twap` queries. Updated on every operation that changes the
+/// outcome's reserve (pool creation, swaps).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PriceAccumulator {
+    pub market_id: u64,
+    pub outcome: Symbol,
+    /// Fixed-capacity ring buffer of the most recent observations. Once full,
+    /// new observations overwrite the oldest slot (see `next_index`).
+    pub observations: Vec<PriceObservation>,
+    /// Index in `observations` that the next write will occupy (wraps modulo capacity).
+    pub next_index: u32,
+    /// Total number of observations ever recorded for this outcome (monotonic;
+    /// may exceed `observations.len()` once the buffer has wrapped).
+    pub total_count: u64,
+    /// The price active since `last_timestamp`, used to extrapolate the
+    /// cumulative integral forward to "now" without a storage write.
+    pub last_price: i128,
+    /// Ledger timestamp of the most recent observation.
+    pub last_timestamp: u64,
+    /// Cumulative price integral as of `last_timestamp` (mirrors the most
+    /// recent observation's `price_cumulative`).
+    pub cumulative: i128,
+}
+
+impl PriceAccumulator {
+    pub fn empty(env: &Env, market_id: u64, outcome: Symbol) -> Self {
+        Self {
+            market_id,
+            outcome,
+            observations: Vec::new(env),
+            next_index: 0,
+            total_count: 0,
+            last_price: 0,
+            last_timestamp: 0,
+            cumulative: 0,
+        }
+    }
 }
 
 #[contracttype]
@@ -717,6 +924,23 @@ pub struct ConditionalChain {
     pub depth: u32,
 }
 
+/// Read-only view of a market's conditional-dependency status, returned by
+/// `get_dependency_status`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DependencyStatus {
+    pub market_id: u64,
+    /// True if this market has a `ConditionalParent` entry (i.e. it was
+    /// created via `create_conditional_market`).
+    pub is_conditional: bool,
+    /// The immediate parent's market_id, if any.
+    pub parent_market_id: Option<u64>,
+    /// True when there is no parent, or when the parent has resolved.
+    /// `resolve_market` on this market is blocked with `ParentNotResolved`
+    /// while this is false.
+    pub parent_resolved: bool,
+}
+
 // ── Creator Event Types ───────────────────────────────────────────────────────
 
 /// Represents a sports prediction event created by a user.
@@ -879,6 +1103,28 @@ impl EventPrediction {
     /// Returns true if the predicted_winner value is valid (must be 0, 1, or 2).
     pub fn is_valid_outcome(predicted_winner: u32) -> bool {
         predicted_winner <= 2
+    }
+}
+
+/// Represents a committed prediction awaiting reveal phase.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommitmentPrediction {
+    /// Hash of (chosen_outcome, amount, salt).
+    pub commitment_hash: soroban_sdk::BytesN<32>,
+    /// Ledger timestamp when the commit was recorded.
+    pub committed_at: u64,
+    /// Whether the commitment has been revealed yet.
+    pub revealed: bool,
+}
+
+impl CommitmentPrediction {
+    pub fn new(commitment_hash: soroban_sdk::BytesN<32>, committed_at: u64) -> Self {
+        Self {
+            commitment_hash,
+            committed_at,
+            revealed: false,
+        }
     }
 }
 

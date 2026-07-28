@@ -171,6 +171,15 @@ pub fn get_user_joined_events_count(env: &Env, user: Address) -> u32 {
     get_user_events(env, user).len()
 }
 
+/// Return the resolved 1-based leaderboard rank for `user` in `event_id`.
+///
+/// Delegates to [`crate::leaderboard::get_user_rank`] so the rank exposed by
+/// this view is identical to the rank embedded on each [`LeaderboardEntry`]
+/// (#1343). Returns `0` when the user is not a participant.
+pub fn get_user_rank(env: &Env, event_id: u64, user: Address) -> Result<u32, EventError> {
+    crate::leaderboard::get_user_rank(env, event_id, user).map_err(|_| EventError::EventNotFound)
+}
+
 /// Platform-wide statistics aggregated across all events.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]

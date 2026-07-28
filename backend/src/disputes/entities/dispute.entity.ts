@@ -20,6 +20,17 @@ export enum DisputeResolution {
   OVERTURNED = 'overturned',
 }
 
+/**
+ * Tracks which SLA clock is currently running for a pending dispute.
+ * INITIAL_REVIEW is the first window after creation; a breach of that
+ * window escalates the dispute into ESCALATED, which carries its own
+ * (shorter) deadline. RESOLVED disputes stop tracking SLA entirely.
+ */
+export enum DisputeSlaStage {
+  INITIAL_REVIEW = 'initial_review',
+  ESCALATED = 'escalated',
+}
+
 @Entity('disputes')
 @Index(['marketId'])
 @Index(['disputantId'])
@@ -81,6 +92,39 @@ export class Dispute {
   })
   onChainResolutionTx: string | null;
 
+  @Column({
+    name: 'sla_stage',
+    type: 'enum',
+    enum: DisputeSlaStage,
+    default: DisputeSlaStage.INITIAL_REVIEW,
+  })
+  @Index()
+  slaStage: DisputeSlaStage;
+
+  @Column({ name: 'sla_deadline', type: 'timestamptz' })
+  slaDeadline: Date;
+
+  @Column({ name: 'sla_breached_at', type: 'timestamptz', nullable: true })
+  slaBreachedAt: Date | null;
+
+  @Column({
+    name: 'sla_approaching_notified_at',
+    type: 'timestamptz',
+    nullable: true,
+  })
+  slaApproachingNotifiedAt: Date | null;
+
+  @Column({
+    name: 'sla_breached_notified_at',
+    type: 'timestamptz',
+    nullable: true,
+  })
+  slaBreachedNotifiedAt: Date | null;
+
+  @Column({ name: 'assigned_arbiter_id', nullable: true })
+  @Index()
+  assignedArbiterId: string | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 
@@ -96,4 +140,8 @@ export class Dispute {
   @ManyToOne(() => User, { eager: true, nullable: true })
   @JoinColumn({ name: 'resolved_by_id', referencedColumnName: 'id' })
   resolvedBy: User | null;
+
+  @ManyToOne(() => User, { eager: true, nullable: true })
+  @JoinColumn({ name: 'assigned_arbiter_id', referencedColumnName: 'id' })
+  assignedArbiter: User | null;
 }

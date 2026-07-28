@@ -41,6 +41,7 @@ import {
   ListMarketsDto,
   PaginatedMarketsResponse,
 } from './dto/list-markets.dto';
+import { PriceHistoryQueryDto } from './dto/price-history-query.dto';
 import { PredictionStatsDto } from './dto/prediction-stats.dto';
 import {
   PaginatedTrendingMarketsResponse,
@@ -103,6 +104,20 @@ export class MarketsController {
     @Param('id') id: string,
   ): Promise<PredictionStatsDto[]> {
     return this.marketsService.getPredictionStats(id);
+  }
+
+  @Get(':id/price-history')
+  @Public()
+  @ApiOperation({ summary: 'Get price history time-series for a market' })
+  @ApiResponse({
+    status: 200,
+    description: 'Bucketed price history points over time',
+  })
+  async getPriceHistory(
+    @Param('id') id: string,
+    @Query() query: PriceHistoryQueryDto,
+  ): Promise<any[]> {
+    return this.marketsService.getPriceHistory(id, query);
   }
 
   @Get(':id/analytics')
@@ -546,5 +561,35 @@ export class MarketsController {
       reason: createDisputeDto.reason,
     };
     return this.disputesService.create(disputeDto, user);
+  }
+
+  @Get('admin/settlement-failures')
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get failed settlement items in dead-letter queue (admin only)',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'List of markets in the dead-letter queue with retry information',
+  })
+  @ApiResponse({ status: 403, description: 'Not authorized' })
+  async getSettlementFailures() {
+    // Assuming admin check is done via guards or service
+    return this.marketsService.getSettlementFailures();
+  }
+
+  @Post('admin/retry-settlement/:marketId')
+  @ApiBearerAuth()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Manually retry a failed settlement (admin only)' })
+  @ApiResponse({
+    status: 200,
+    description: 'Settlement retry initiated',
+  })
+  @ApiResponse({ status: 404, description: 'Market not found in retry queue' })
+  @ApiResponse({ status: 403, description: 'Not authorized' })
+  async retrySettlement(@Param('marketId') marketId: string) {
+    return this.marketsService.retrySettlement(marketId);
   }
 }

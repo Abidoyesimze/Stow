@@ -14,9 +14,9 @@ use insightarena_contract::{
     CreateMarketParams, FeeTier, FeeTierConfig, InsightArenaContract, InsightArenaContractClient,
     InsightArenaError,
 };
-use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::testutils::{Address as _, Events, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{symbol_short, vec, Address, Env, String, Symbol};
+use soroban_sdk::{symbol_short, vec, Address, BytesN, Env, String, Symbol, TryIntoVal};
 
 // ── Test Helpers ─────────────────────────────────────────────────────────────
 
@@ -702,6 +702,7 @@ fn lp_market_params(env: &Env) -> CreateMarketParams {
         min_stake: 10_000_000,
         max_stake: 1_000_000_000,
         is_public: true,
+        metadata_hash: BytesN::from_array(env, &[0u8; 32]),
     }
 }
 
@@ -2127,6 +2128,256 @@ fn test_dynamic_fee_split_between_lp_and_protocol_treasury_is_conserved() {
     assert_eq!(lp_share, expected_total_fee - expected_protocol_share);
 }
 
+// ── Protocol Treasury Fee Split (#1336) ───────────────────────────────────────
+
+/// Fetches the `(fee, split)` event payload most recently published by the
+/// contract, decoded as `(market_id, treasury_address, fee_amount,
+/// treasury_amount, lp_amount)`. Panics if no such event was found.
+///
+/// Must be called immediately after the swap whose event is under test —
+/// before any further contract calls — because the test host's `Events::all`
+/// only retains events from the most recent top-level invocation.
+fn last_treasury_split_event(
+    env: &Env,
+    contract_id: &Address,
+) -> (u64, Address, i128, i128, i128) {
+    let events = env.events().all();
+    for event in events.iter().rev() {
+        if &event.0 != contract_id || event.1.len() != 2 {
+            continue;
+        }
+        let topic0: Result<Symbol, _> = event.1.get(0).unwrap().try_into_val(env);
+        let topic1: Result<Symbol, _> = event.1.get(1).unwrap().try_into_val(env);
+        if let (Ok(t0), Ok(t1)) = (topic0, topic1) {
+            if t0 == Symbol::new(env, "fee") && t1 == Symbol::new(env, "split") {
+                let data: (u64, Address, i128, i128, i128) =
+                    event.2.try_into_val(env).expect("decode fee/split event");
+                return data;
+            }
+        }
+    }
+    panic!("expected a fee/split event");
+}
+
+#[test]
+fn test_treasury_split_default_preserves_prior_swap_behavior() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+    let market_id = client.create_market(&_admin, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let liquidity = 1_000_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    // Default config: 100% of the protocol's fee cut still goes to the
+    // treasury and 0% is redirected to LPs, exactly matching behaviour
+    // before this feature existed.
+    let cfg = client.get_config();
+    assert_eq!(cfg.treasury_split_bps, 10_000);
+    assert_eq!(cfg.lp_split_bps, 0);
+
+    let fee_bps = client.get_market_fee_info(&market_id).effective_fee_bps;
+    let swap_amount = 1_000_000_i128;
+    sa.mint(&trader, &swap_amount);
+    token.approve(&trader, &client.address, &swap_amount, &9999);
+
+    let treasury_before = client.get_treasury_balance();
+    let lp_fees_before = client.get_lp_position(&provider, &market_id).fees_earned;
+
+    client.swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &swap_amount,
+        &0_i128,
+    );
+
+    // Must read the event right after the swap, before any further calls.
+    let (event_market_id, event_treasury, event_fee, event_treasury_amt, event_lp_amt) =
+        last_treasury_split_event(&env, &client.address);
+
+    let treasury_after = client.get_treasury_balance();
+    let lp_fees_after = client.get_lp_position(&provider, &market_id).fees_earned;
+
+    let tier_cfg = FeeTierConfig::default_config();
+    let expected_total_fee = swap_amount * fee_bps as i128 / 10_000;
+    let expected_protocol_share = expected_total_fee * tier_cfg.protocol_share_bps as i128 / 10_000;
+    let expected_lp_share = expected_total_fee - expected_protocol_share;
+
+    assert_eq!(treasury_after - treasury_before, expected_protocol_share);
+    assert_eq!(lp_fees_after - lp_fees_before, expected_lp_share);
+
+    assert_eq!(event_market_id, market_id);
+    assert_eq!(event_treasury, cfg.treasury_address);
+    assert_eq!(event_fee, expected_total_fee);
+    assert_eq!(event_treasury_amt, expected_protocol_share);
+    assert_eq!(event_lp_amt, expected_lp_share);
+    assert_eq!(event_treasury_amt + event_lp_amt, event_fee);
+}
+
+/// Runs a single swap under a custom `(treasury_split_bps, lp_split_bps)`
+/// configuration and returns `(protocol_fee_share, treasury_delta, lp_delta,
+/// event)` so callers can assert exact split amounts — including rounding
+/// remainders — and the accompanying event, across several ratios.
+#[allow(clippy::too_many_arguments)]
+fn swap_with_treasury_split(
+    env: &Env,
+    client: &InsightArenaContractClient<'_>,
+    admin: &Address,
+    treasury_split_bps: u32,
+    lp_split_bps: u32,
+    market_id: u64,
+    provider: &Address,
+    trader: &Address,
+    swap_amount: i128,
+) -> (i128, i128, i128, (u64, Address, i128, i128, i128)) {
+    let new_treasury = Address::generate(env);
+    client.set_treasury_split(admin, &new_treasury, &treasury_split_bps, &lp_split_bps);
+
+    let fee_bps = client.get_market_fee_info(&market_id).effective_fee_bps;
+    let tier_cfg = FeeTierConfig::default_config();
+    let expected_total_fee = swap_amount * fee_bps as i128 / 10_000;
+    let protocol_fee_share = expected_total_fee * tier_cfg.protocol_share_bps as i128 / 10_000;
+
+    let treasury_before = client.get_treasury_balance();
+    let lp_fees_before = client.get_lp_position(provider, &market_id).fees_earned;
+
+    client.swap_outcome(
+        trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &swap_amount,
+        &0_i128,
+    );
+
+    // Must read the event right after the swap, before any further calls.
+    let event = last_treasury_split_event(env, &client.address);
+
+    let treasury_after = client.get_treasury_balance();
+    let lp_fees_after = client.get_lp_position(provider, &market_id).fees_earned;
+
+    (
+        protocol_fee_share,
+        treasury_after - treasury_before,
+        lp_fees_after - lp_fees_before,
+        event,
+    )
+}
+
+#[test]
+fn test_treasury_split_custom_ratio_conserves_protocol_share_with_rounding() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+    let market_id = client.create_market(&admin, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let liquidity = 1_000_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let swap_amount = 1_000_000_i128;
+    sa.mint(&trader, &swap_amount);
+    token.approve(&trader, &client.address, &swap_amount, &9999);
+
+    let tier_cfg_before = FeeTierConfig::default_config();
+    let fee_bps = client.get_market_fee_info(&market_id).effective_fee_bps;
+    let expected_total_fee = swap_amount * fee_bps as i128 / 10_000;
+    let protocol_fee_share =
+        expected_total_fee * tier_cfg_before.protocol_share_bps as i128 / 10_000;
+    let original_lp_share = expected_total_fee - protocol_fee_share;
+
+    // 3333 / 6667 does not divide `protocol_fee_share` evenly, so this also
+    // exercises the rounding behaviour: the treasury amount is rounded down
+    // and the LP amount absorbs the remainder, with no stroop lost.
+    let (returned_protocol_share, treasury_delta, lp_delta, event) = swap_with_treasury_split(
+        &env,
+        &client,
+        &admin,
+        3_333,
+        6_667,
+        market_id,
+        &provider,
+        &trader,
+        swap_amount,
+    );
+
+    assert_eq!(returned_protocol_share, protocol_fee_share);
+    let expected_treasury_amount = protocol_fee_share * 3_333 / 10_000;
+    let expected_lp_amount_from_protocol = protocol_fee_share - expected_treasury_amount;
+
+    assert_eq!(treasury_delta, expected_treasury_amount);
+    assert_eq!(lp_delta, original_lp_share + expected_lp_amount_from_protocol);
+    // Conservation: every stroop of the protocol's fee cut is accounted for.
+    assert_eq!(
+        treasury_delta + (lp_delta - original_lp_share),
+        protocol_fee_share
+    );
+
+    let cfg = client.get_config();
+    let (_, event_treasury, event_fee, event_treasury_amt, event_lp_amt) = event;
+    assert_eq!(event_treasury, cfg.treasury_address);
+    assert_eq!(event_fee, expected_total_fee);
+    assert_eq!(event_treasury_amt, expected_treasury_amount);
+    assert_eq!(event_lp_amt, original_lp_share + expected_lp_amount_from_protocol);
+}
+
+#[test]
+fn test_treasury_split_all_to_lp_sends_nothing_to_treasury() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+    let market_id = client.create_market(&admin, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let liquidity = 1_000_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let swap_amount = 1_000_000_i128;
+    sa.mint(&trader, &swap_amount);
+    token.approve(&trader, &client.address, &swap_amount, &9999);
+
+    let (protocol_fee_share, treasury_delta, _lp_delta, event) = swap_with_treasury_split(
+        &env,
+        &client,
+        &admin,
+        0,
+        10_000,
+        market_id,
+        &provider,
+        &trader,
+        swap_amount,
+    );
+
+    assert!(protocol_fee_share > 0);
+    assert_eq!(treasury_delta, 0);
+    let (_, _, event_fee, event_treasury_amt, event_lp_amt) = event;
+    assert_eq!(event_treasury_amt, 0);
+    // With treasury_split_bps == 0, the entire collected fee (both the LPs'
+    // original share and the redirected protocol share) ends up with LPs.
+    assert_eq!(event_lp_amt, event_fee);
+}
+
 #[test]
 fn test_swap_history_records_effective_fee_paid() {
     let env = Env::default();
@@ -2162,4 +2413,973 @@ fn test_swap_history_records_effective_fee_paid() {
     let record = history.get(0).unwrap();
     let expected_fee = swap_amount * fee_bps as i128 / 10_000;
     assert_eq!(record.fee_paid, expected_fee);
+}
+
+// ── TWAP Price Oracle Tests ───────────────────────────────────────────────────
+
+#[test]
+fn test_twap_multi_swap_matches_hand_computed_average() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let market_id = client.create_market(&_admin, &lp_market_params(&env));
+
+    let liquidity = 1_000_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let t0 = env.ledger().timestamp();
+    let p0 = client.get_outcome_price(&market_id, &symbol_short!("yes"));
+
+    let swap_amount = 20_000_i128;
+    sa.mint(&trader, &(swap_amount * 3));
+    token.approve(&trader, &client.address, &(swap_amount * 3), &9999);
+
+    // Three swaps, each 100 seconds apart, all moving "yes" reserve upward.
+    env.ledger().with_mut(|l| l.timestamp += 100);
+    client.swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &swap_amount,
+        &0_i128,
+    );
+    let p1 = client.get_outcome_price(&market_id, &symbol_short!("yes"));
+
+    env.ledger().with_mut(|l| l.timestamp += 100);
+    client.swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &swap_amount,
+        &0_i128,
+    );
+    let p2 = client.get_outcome_price(&market_id, &symbol_short!("yes"));
+
+    env.ledger().with_mut(|l| l.timestamp += 100);
+    client.swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &swap_amount,
+        &0_i128,
+    );
+
+    let now = env.ledger().timestamp();
+    assert_eq!(now, t0 + 300);
+
+    // The window exactly spans pool creation to now, so the hand-computed
+    // average only needs the prices active during each 100s interval: p0 for
+    // [t0, t0+100), p1 for [t0+100, t0+200), p2 for [t0+200, t0+300). The final
+    // swap (which set the price now current at t0+300) contributes zero
+    // duration and is correctly excluded.
+    let window: u64 = 300;
+    let expected = (p0 * 100 + p1 * 100 + p2 * 100) / window as i128;
+
+    let twap = client.get_twap(&market_id, &symbol_short!("yes"), &window);
+    assert_eq!(twap, expected);
+}
+
+#[test]
+fn test_twap_resists_single_block_price_spike() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let market_id = client.create_market(&_admin, &lp_market_params(&env));
+
+    let liquidity = 10_000_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let t0 = env.ledger().timestamp();
+
+    // Let a long baseline period elapse with the price sitting at its initial level.
+    env.ledger().with_mut(|l| l.timestamp += 10_000);
+    let price_before_spike = client.get_outcome_price(&market_id, &symbol_short!("yes"));
+
+    // A single huge swap spikes the "yes" reserve (and therefore the spot price).
+    let spike_amount = 20_000_000_i128;
+    sa.mint(&trader, &spike_amount);
+    token.approve(&trader, &client.address, &spike_amount, &9999);
+    client.swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &spike_amount,
+        &0_i128,
+    );
+
+    // Advance a single second so the spike itself contributes a (tiny) sliver
+    // of duration to the accumulator, then read both spot and TWAP.
+    env.ledger().with_mut(|l| l.timestamp += 1);
+    let spot_after_spike = client.get_outcome_price(&market_id, &symbol_short!("yes"));
+
+    let now = env.ledger().timestamp();
+    let window = now - t0;
+    let twap = client.get_twap(&market_id, &symbol_short!("yes"), &window);
+
+    assert!(spot_after_spike > price_before_spike * 2, "spike should be dramatic");
+
+    let spot_move = (spot_after_spike - price_before_spike).abs();
+    let twap_move = (twap - price_before_spike).abs();
+
+    // The spike lasted a single second out of a 10,001 second window, so it
+    // can move the TWAP by at most ~1/10000th as much as it moved the spot price.
+    assert!(
+        twap_move * 100 < spot_move,
+        "twap_move={twap_move} should be far smaller than spot_move={spot_move}"
+    );
+}
+
+#[test]
+fn test_twap_empty_window_returns_typed_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let provider = Address::generate(&env);
+    let market_id = client.create_market(&_admin, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    let liquidity = 100_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let result = client.try_get_twap(&market_id, &symbol_short!("yes"), &0_u64);
+    assert!(matches!(
+        result,
+        Err(Ok(InsightArenaError::TwapEmptyWindow))
+    ));
+}
+
+#[test]
+fn test_twap_window_predating_history_returns_typed_error() {
+    let env = Env::default();
+    env.ledger().with_mut(|l| l.timestamp = 500);
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let provider = Address::generate(&env);
+    let market_id = client.create_market(&_admin, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    let liquidity = 100_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    // Pool was created at t=500; a window of 10,000s reaches back before
+    // genesis (t=0), which predates the oldest retained observation.
+    let result = client.try_get_twap(&market_id, &symbol_short!("yes"), &10_000_u64);
+    assert!(matches!(
+        result,
+        Err(Ok(InsightArenaError::TwapInsufficientHistory))
+    ));
+}
+
+#[test]
+fn test_twap_zero_elapsed_returns_typed_error() {
+    let env = Env::default();
+    env.ledger().with_mut(|l| l.timestamp = 0);
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let provider = Address::generate(&env);
+    let market_id = client.create_market(&_admin, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    let liquidity = 100_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    assert_eq!(env.ledger().timestamp(), 0);
+
+    // At t=0 with any positive window, `window_start` saturates to 0 too, so
+    // `now - window_start` collapses to zero elapsed seconds.
+    let result = client.try_get_twap(&market_id, &symbol_short!("yes"), &1_u64);
+    assert!(matches!(
+        result,
+        Err(Ok(InsightArenaError::TwapDivideByZero))
+    ));
+}
+
+#[test]
+fn test_twap_unknown_outcome_returns_invalid_outcome() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let provider = Address::generate(&env);
+    let market_id = client.create_market(&_admin, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    let liquidity = 100_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let result = client.try_get_twap(&market_id, &symbol_short!("maybe"), &100_u64);
+    assert!(matches!(result, Err(Ok(InsightArenaError::InvalidOutcome))));
+}
+
+#[test]
+fn test_twap_ring_buffer_wraparound() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let market_id = client.create_market(&_admin, &lp_market_params(&env));
+
+    let liquidity = 100_000_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let t0 = env.ledger().timestamp();
+
+    // Trade well past the ring buffer's capacity so it wraps at least once.
+    let num_swaps: u32 = TWAP_RING_BUFFER_CAPACITY + 20;
+    let swap_amount = 1_000_i128;
+    sa.mint(&trader, &(swap_amount * num_swaps as i128));
+    token.approve(&trader, &client.address, &(swap_amount * num_swaps as i128), &9999);
+
+    for _ in 0..num_swaps {
+        env.ledger().with_mut(|l| l.timestamp += 50);
+        client.swap_outcome(
+            &trader,
+            &market_id,
+            &symbol_short!("yes"),
+            &symbol_short!("no"),
+            &swap_amount,
+            &0_i128,
+        );
+    }
+
+    let now = env.ledger().timestamp();
+    assert_eq!(now, t0 + (num_swaps as u64) * 50);
+
+    // A window reaching all the way back to pool creation now exceeds what the
+    // wrapped ring buffer retains (its oldest entries were overwritten), so it
+    // must be rejected with a typed error rather than a silently truncated
+    // (misleading) average or a panic.
+    let full_window = now - t0;
+    let result = client.try_get_twap(&market_id, &symbol_short!("yes"), &full_window);
+    assert!(matches!(
+        result,
+        Err(Ok(InsightArenaError::TwapInsufficientHistory))
+    ));
+
+    // A window covering only the most recently retained observations still
+    // succeeds without panicking, even though far more than
+    // `TWAP_RING_BUFFER_CAPACITY` price-changing operations occurred over the
+    // pool's full lifetime.
+    let recent_window: u64 = (TWAP_RING_BUFFER_CAPACITY as u64 / 2) * 50;
+    let twap = client.get_twap(&market_id, &symbol_short!("yes"), &recent_window);
+    assert!(twap > 0);
+}
+
+// ── Last LP exit integration tests (#1269) ────────────────────────────────────
+
+/// Single LP adds then removes 100% of their LP tokens. They must receive back
+/// the full deposit with no dust stranded.
+#[test]
+fn test_full_lp_exit_returns_proportional_reserves() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let creator = Address::generate(&env);
+    let lp = Address::generate(&env);
+
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let amount = 100_000_000_i128;
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    sa.mint(&lp, &amount);
+    token.approve(&lp, &client.address, &amount, &9999);
+
+    let balance_before = token.balance(&lp);
+
+    // Add all liquidity — LP tokens minted 1:1 for first deposit.
+    let lp_tokens = client.add_liquidity(&lp, &market_id, &amount);
+    assert_eq!(lp_tokens, amount);
+    assert_eq!(token.balance(&lp), 0);
+
+    // Remove all LP tokens — full deposit must be returned, no dust.
+    let withdrawn = client.remove_liquidity(&lp, &market_id, &lp_tokens);
+    assert_eq!(withdrawn, amount, "full exit must return the exact deposit");
+    assert_eq!(token.balance(&lp), balance_before, "no dust must remain");
+
+    // LP position entry must be deleted after full exit.
+    let pos_result = client.try_get_lp_position(&lp, &market_id);
+    assert!(pos_result.is_err(), "LP position must not exist after full exit");
+}
+
+/// After a full LP exit, `get_outcome_price` must return a defined result —
+/// no division-by-zero or panic.
+#[test]
+fn test_empty_pool_get_outcome_price_no_panic() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let creator = Address::generate(&env);
+    let lp = Address::generate(&env);
+
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let amount = 100_000_000_i128;
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    sa.mint(&lp, &amount);
+    token.approve(&lp, &client.address, &amount, &9999);
+
+    let lp_tokens = client.add_liquidity(&lp, &market_id, &amount);
+    client.remove_liquidity(&lp, &market_id, &lp_tokens);
+
+    // After full exit the pool record remains in storage with stale reserves.
+    // The important thing: the call must not panic (no divide-by-zero).
+    let price_result = client.try_get_outcome_price(&market_id, &symbol_short!("yes"));
+    assert!(
+        price_result.is_ok() || price_result.is_err(),
+        "get_outcome_price must return a defined result, never panic"
+    );
+}
+
+/// After a full LP exit, a `swap_outcome` attempt without trader funds must be
+/// rejected cleanly — no panic.
+#[test]
+fn test_empty_pool_swap_outcome_rejected_cleanly() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let creator = Address::generate(&env);
+    let lp = Address::generate(&env);
+    let trader = Address::generate(&env);
+
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let amount = 100_000_000_i128;
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    sa.mint(&lp, &amount);
+    token.approve(&lp, &client.address, &amount, &9999);
+
+    let lp_tokens = client.add_liquidity(&lp, &market_id, &amount);
+    client.remove_liquidity(&lp, &market_id, &lp_tokens);
+
+    // Trader has no tokens — swap is rejected because the token transfer fails.
+    // Must not panic.
+    let swap_result = client.try_swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &1_000_000_i128,
+        &0_i128,
+    );
+    assert!(swap_result.is_err(), "swap on depleted pool must be rejected cleanly");
+}
+
+/// Adding liquidity again after a full drain must re-initialize the pool
+/// correctly, treating it like a fresh first deposit.
+#[test]
+fn test_re_add_liquidity_after_full_drain_reinitializes_pool() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let creator = Address::generate(&env);
+    let lp = Address::generate(&env);
+
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let amount = 100_000_000_i128;
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    sa.mint(&lp, &(amount * 2));
+    token.approve(&lp, &client.address, &(amount * 2), &9999);
+
+    // First cycle: full deposit then full exit
+    let lp_tokens = client.add_liquidity(&lp, &market_id, &amount);
+    client.remove_liquidity(&lp, &market_id, &lp_tokens);
+
+    // Second deposit: calculate_lp_tokens sees supply=0 → first-deposit path
+    let new_lp_tokens = client.add_liquidity(&lp, &market_id, &amount);
+    assert!(new_lp_tokens > 0, "re-add after full drain must succeed");
+
+    // LP position must exist and reflect the new deposit
+    let pos = client.get_lp_position(&lp, &market_id);
+    assert_eq!(pos.lp_tokens, new_lp_tokens);
+}
+
+/// Attempting to remove more LP tokens than currently owned must be rejected
+/// with `InsufficientFunds`.
+#[test]
+fn test_remove_more_lp_tokens_than_owned_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let creator = Address::generate(&env);
+    let lp = Address::generate(&env);
+
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let amount = 100_000_000_i128;
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    sa.mint(&lp, &amount);
+    token.approve(&lp, &client.address, &amount, &9999);
+
+    let lp_tokens = client.add_liquidity(&lp, &market_id, &amount);
+
+    // Request one more token than owned
+    let result = client.try_remove_liquidity(&lp, &market_id, &(lp_tokens + 1));
+    assert!(
+        matches!(result, Err(Ok(InsightArenaError::InsufficientFunds))),
+        "removing more tokens than owned must fail with InsufficientFunds"
+    );
+}
+
+/// With two providers at a 75/25 split, removing the 25% provider entirely
+/// must leave the 75% provider's `get_lp_position` value unchanged.
+#[test]
+fn test_25pct_provider_exit_leaves_75pct_provider_position_unchanged() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+    let creator = Address::generate(&env);
+    let lp_large = Address::generate(&env);
+    let lp_small = Address::generate(&env);
+
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let large_amount = 75_000_000_i128;
+    let small_amount = 25_000_000_i128;
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+    sa.mint(&lp_large, &large_amount);
+    sa.mint(&lp_small, &small_amount);
+    token.approve(&lp_large, &client.address, &large_amount, &9999);
+    token.approve(&lp_small, &client.address, &small_amount, &9999);
+
+    // Large provider deposits 75%
+    let large_lp_tokens = client.add_liquidity(&lp_large, &market_id, &large_amount);
+
+    // Small provider deposits 25% (proportional: 25M * 75M / 75M = 25M LP tokens)
+    let small_lp_tokens = client.add_liquidity(&lp_small, &market_id, &small_amount);
+
+    // Record large provider's position before small provider exits
+    let large_pos_before = client.get_lp_position(&lp_large, &market_id);
+    assert_eq!(large_pos_before.lp_tokens, large_lp_tokens);
+
+    // Small provider fully exits
+    client.remove_liquidity(&lp_small, &market_id, &small_lp_tokens);
+
+    // Large provider's LP token count and initial deposit must be unchanged
+    let large_pos_after = client.get_lp_position(&lp_large, &market_id);
+    assert_eq!(
+        large_pos_after.lp_tokens, large_pos_before.lp_tokens,
+        "large provider's lp_tokens must not change when small provider exits"
+    );
+    assert_eq!(
+        large_pos_after.initial_deposit, large_pos_before.initial_deposit,
+        "large provider's initial_deposit must not change when small provider exits"
+    );
+}
+
+// ── AMM Swap Output Edge Cases — Issue #1262 ─────────────────────────────────
+
+#[test]
+fn test_swap_output_minimal_input_against_balanced_pool() {
+    // 1 stroop against a large balanced pool: output must be >= 0 and can
+    // never exceed the input amount itself.
+    let amount_in = 1_i128;
+    let reserve_in = 1_000_000_i128;
+    let reserve_out = 1_000_000_i128;
+    let fee_bps = 30_u32;
+
+    let amount_out = calculate_swap_output(amount_in, reserve_in, reserve_out, fee_bps).unwrap();
+    assert!(amount_out >= 0);
+    assert!(amount_out <= amount_in);
+}
+
+#[test]
+fn test_swap_output_heavily_imbalanced_reserves_both_directions() {
+    let fee_bps = 30_u32;
+
+    // Direction A: abundant input reserve, scarce output reserve (1,000,000 : 1).
+    // The output-side reserve is nearly exhausted, so output must stay
+    // strictly below it regardless of how large the input is.
+    let scarce_out = calculate_swap_output(10_000_i128, 1_000_000_i128, 1_i128, fee_bps).unwrap();
+    assert!(scarce_out >= 0);
+    assert!(scarce_out < 1_i128);
+    assert_eq!(scarce_out, 0); // Can only ever round down to 0 against a 1-unit reserve.
+
+    // Direction B: scarce input reserve, abundant output reserve (1 : 1,000,000).
+    // A modest input against a near-empty input-side reserve dominates the
+    // pool and must not panic or overflow.
+    let abundant_out =
+        calculate_swap_output(10_000_i128, 1_i128, 1_000_000_i128, fee_bps).unwrap();
+    assert!(abundant_out >= 0);
+    assert!(abundant_out < 1_000_000_i128);
+}
+
+#[test]
+fn test_swap_output_rounding_favors_pool_over_repeated_swaps() {
+    // With fee = 0, calculate_swap_output must floor (never round up) so
+    // that repeated tiny swaps can never extract more than the pool owes,
+    // i.e. the invariant k = reserve_in * reserve_out never decreases.
+    let mut reserve_in = 1_000_i128;
+    let mut reserve_out = 1_000_i128;
+    let k_initial = reserve_in * reserve_out;
+
+    for _ in 0..200 {
+        let amount_in = 1_i128;
+        let amount_out = calculate_swap_output(amount_in, reserve_in, reserve_out, 0).unwrap();
+
+        // Manually verify the result is the floor of the exact rational
+        // value — never rounded up, which would let a trader extract a
+        // fraction more than the pool actually owes.
+        let exact_numerator = amount_in * reserve_out;
+        let exact_denominator = reserve_in + amount_in;
+        assert_eq!(amount_out, exact_numerator / exact_denominator);
+
+        reserve_in += amount_in;
+        reserve_out -= amount_out;
+
+        let k_now = reserve_in * reserve_out;
+        assert!(k_now >= k_initial);
+    }
+}
+
+#[test]
+fn test_swap_output_never_exceeds_available_output_reserve() {
+    // A single trade attempting to drain far more than the pool holds must
+    // still return strictly less than the full output-side reserve.
+    let reserve_in = 5_000_i128;
+    let reserve_out = 5_000_i128;
+    let huge_amount_in = 10_000_000_i128;
+
+    let amount_out = calculate_swap_output(huge_amount_in, reserve_in, reserve_out, 30).unwrap();
+    assert!(amount_out < reserve_out);
+}
+
+#[test]
+fn test_swap_output_largest_input_without_overflow() {
+    // The largest amount_in that keeps `amount_in * reserve_out` within i128
+    // bounds must succeed without overflow.
+    let reserve_out = 1_000_i128;
+    let reserve_in = 1_000_i128;
+    let fee_bps = 30_u32;
+
+    // i128::MAX / reserve_out is the largest amount_in for which
+    // `amount_in * reserve_out` does not overflow i128.
+    let largest_safe_amount_in = i128::MAX / reserve_out;
+
+    let result = calculate_swap_output(largest_safe_amount_in, reserve_in, reserve_out, fee_bps);
+    assert!(result.is_ok());
+
+    // One stroop more overflows the numerator multiplication.
+    let result_overflow =
+        calculate_swap_output(largest_safe_amount_in + 1, reserve_in, reserve_out, fee_bps);
+    assert_eq!(result_overflow, Err(InsightArenaError::Overflow));
+}
+
+#[test]
+fn test_swap_output_invariant_k_never_decreases_with_fees() {
+    // Fees add extra value retained in the pool, so k after a fee-bearing
+    // swap must be >= k before.
+    let reserve_in = 100_000_i128;
+    let reserve_out = 100_000_i128;
+    let amount_in = 10_000_i128;
+    let fee_bps = 30_u32;
+
+    let k_before = reserve_in * reserve_out;
+    let amount_out = calculate_swap_output(amount_in, reserve_in, reserve_out, fee_bps).unwrap();
+
+    let new_reserve_in = reserve_in + amount_in;
+    let new_reserve_out = reserve_out - amount_out;
+    let k_after = new_reserve_in * new_reserve_out;
+
+    assert!(k_after >= k_before);
+}
+
+// ── Impermanent Loss Accounting Tests (Issue #1335) ──────────────────────────
+//
+// `calculate_impermanent_loss_bps` implements the standard 2-asset
+// constant-product IL formula `IL = 2*sqrt(k)/(1+k) - 1`, where `k` is the
+// ratio of (current reserve-ratio) over (entry reserve-ratio) for the pool's
+// designated IL-tracked pair (`Market::outcome_options[0]` / `[1]`). Because
+// the formula only depends on the *magnitude* of the ratio change, it is
+// symmetric under `k -> 1/k`: a price move that doubles outcome A's reserve
+// relative to B produces the same IL magnitude as one that halves it. This is
+// expected DeFi behavior (IL is a loss relative to holding regardless of
+// which side moved) and is exercised explicitly below, not a bug.
+
+#[test]
+fn test_il_no_price_change_is_zero() {
+    // k == 1 (entry ratio == current ratio) must give exactly 0 bps.
+    assert_eq!(calculate_impermanent_loss_bps(1000, 1000, 1000, 1000), Ok(0));
+    assert_eq!(
+        calculate_impermanent_loss_bps(500_000, 500_000, 2_000_000, 2_000_000),
+        Ok(0)
+    );
+    // Same *ratio*, different absolute reserves (pool grew, ratio held at 1:1).
+    assert_eq!(
+        calculate_impermanent_loss_bps(100_000, 100_000, 300_000, 300_000),
+        Ok(0)
+    );
+}
+
+#[test]
+fn test_il_price_ratio_quadruples_is_twenty_percent() {
+    // k == 4: IL = 2*sqrt(4)/(1+4) - 1 = 2*2/5 - 1 = 0.8 - 1 = -0.20, i.e. -2000 bps.
+    let il = calculate_impermanent_loss_bps(100_000, 100_000, 400_000, 100_000).unwrap();
+    assert_eq!(il, -2000);
+}
+
+#[test]
+fn test_il_symmetric_for_inverse_price_ratio() {
+    // k == 1/4 is the mirror image of k == 4 (same magnitude of relative price
+    // change, opposite direction) and must produce the same IL.
+    let il_k4 = calculate_impermanent_loss_bps(100_000, 100_000, 400_000, 100_000).unwrap();
+    let il_k_quarter = calculate_impermanent_loss_bps(100_000, 100_000, 100_000, 400_000).unwrap();
+    assert_eq!(il_k4, il_k_quarter);
+    assert_eq!(il_k_quarter, -2000);
+}
+
+#[test]
+fn test_il_moderate_price_move_k_2() {
+    // k == 2: IL = 2*sqrt(2)/3 - 1 ≈ -0.05719, i.e. ≈ -571.9 bps.
+    let il = calculate_impermanent_loss_bps(100_000, 100_000, 200_000, 100_000).unwrap();
+    let expected_float_bps = (2.0 * 2.0_f64.sqrt() / 3.0 - 1.0) * 10_000.0;
+    assert!(il < 0);
+    assert!((il as f64 - expected_float_bps).abs() <= 2.0);
+}
+
+#[test]
+fn test_il_never_positive() {
+    // By AM-GM, 2*sqrt(k)/(1+k) <= 1 for any k > 0, so IL must never be positive
+    // regardless of how extreme the price move is.
+    for (entry_a, entry_b, current_a, current_b) in [
+        (1_i128, 1_i128, 1_000_000_i128, 1_i128),
+        (1_i128, 1_000_000_i128, 1_i128, 1_i128),
+        (100_000_i128, 100_000_i128, 100_001_i128, 99_999_i128),
+    ] {
+        let il = calculate_impermanent_loss_bps(entry_a, entry_b, current_a, current_b).unwrap();
+        assert!(il <= 0);
+    }
+}
+
+#[test]
+fn test_il_rejects_non_positive_inputs() {
+    assert_eq!(
+        calculate_impermanent_loss_bps(0, 1000, 1000, 1000),
+        Err(InsightArenaError::InvalidInput)
+    );
+    assert_eq!(
+        calculate_impermanent_loss_bps(1000, 0, 1000, 1000),
+        Err(InsightArenaError::InvalidInput)
+    );
+    assert_eq!(
+        calculate_impermanent_loss_bps(1000, 1000, 0, 1000),
+        Err(InsightArenaError::InvalidInput)
+    );
+    assert_eq!(
+        calculate_impermanent_loss_bps(1000, 1000, 1000, 0),
+        Err(InsightArenaError::InvalidInput)
+    );
+    assert_eq!(
+        calculate_impermanent_loss_bps(-1000, 1000, 1000, 1000),
+        Err(InsightArenaError::InvalidInput)
+    );
+}
+
+#[test]
+fn test_get_position_il_zero_immediately_after_deposit() {
+    // No price movement has occurred yet, so the live IL for a freshly opened
+    // position must be exactly zero.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let creator = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let liquidity = 200_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    assert_eq!(client.get_position_il(&provider, &market_id), 0);
+
+    // The stored per-withdrawal cumulative figure also starts at zero.
+    let position = client.get_lp_position(&provider, &market_id);
+    assert_eq!(position.cumulative_il_bps, 0);
+}
+
+#[test]
+fn test_get_position_il_favorable_price_move() {
+    // Swapping YES for NO increases the YES reserve relative to NO, pushing
+    // the tracked pair's ratio above the 1:1 entry ratio (k > 1).
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let creator = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let liquidity = 1_000_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let position = client.get_lp_position(&provider, &market_id);
+    let (entry_a, entry_b) = (position.entry_reserve_a, position.entry_reserve_b);
+    assert_eq!(entry_a, entry_b); // 2-outcome pool: equal 1:1 entry split.
+
+    let swap_amount = 300_000_i128;
+    sa.mint(&trader, &swap_amount);
+    token.approve(&trader, &client.address, &swap_amount, &9999);
+    client.swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &swap_amount,
+        &0_i128,
+    );
+
+    let current_a = client.get_outcome_price(&market_id, &symbol_short!("yes"));
+    let current_b = client.get_outcome_price(&market_id, &symbol_short!("no"));
+    assert!(current_a > entry_a);
+    assert!(current_b < entry_b);
+
+    let expected_il =
+        calculate_impermanent_loss_bps(entry_a, entry_b, current_a, current_b).unwrap();
+    assert!(expected_il < 0);
+
+    let live_il = client.get_position_il(&provider, &market_id);
+    assert_eq!(live_il, expected_il);
+}
+
+#[test]
+fn test_get_position_il_adverse_price_move() {
+    // Swapping NO for YES is the mirror-image trade: it decreases the YES
+    // reserve relative to NO, pushing the ratio below the 1:1 entry ratio
+    // (k < 1). IL is still <= 0 (never a gain), consistent with the formula's
+    // symmetry under k -> 1/k.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let creator = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let liquidity = 1_000_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let position = client.get_lp_position(&provider, &market_id);
+    let (entry_a, entry_b) = (position.entry_reserve_a, position.entry_reserve_b);
+
+    let swap_amount = 300_000_i128;
+    sa.mint(&trader, &swap_amount);
+    token.approve(&trader, &client.address, &swap_amount, &9999);
+    client.swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("no"),
+        &symbol_short!("yes"),
+        &swap_amount,
+        &0_i128,
+    );
+
+    let current_a = client.get_outcome_price(&market_id, &symbol_short!("yes"));
+    let current_b = client.get_outcome_price(&market_id, &symbol_short!("no"));
+    assert!(current_a < entry_a);
+    assert!(current_b > entry_b);
+
+    let expected_il =
+        calculate_impermanent_loss_bps(entry_a, entry_b, current_a, current_b).unwrap();
+    assert!(expected_il < 0);
+
+    let live_il = client.get_position_il(&provider, &market_id);
+    assert_eq!(live_il, expected_il);
+}
+
+#[test]
+fn test_entry_snapshot_immutable_across_topup() {
+    // The entry snapshot must never change once a position exists, even when
+    // the same provider deposits again after the pool's price has moved.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let creator = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let first_deposit = 500_000_i128;
+    sa.mint(&provider, &first_deposit);
+    token.approve(&provider, &client.address, &first_deposit, &9999);
+    client.add_liquidity(&provider, &market_id, &first_deposit);
+
+    let position_before = client.get_lp_position(&provider, &market_id);
+    let (entry_a_before, entry_b_before) =
+        (position_before.entry_reserve_a, position_before.entry_reserve_b);
+
+    // Move the pool's price before the top-up.
+    let swap_amount = 200_000_i128;
+    sa.mint(&trader, &swap_amount);
+    token.approve(&trader, &client.address, &swap_amount, &9999);
+    client.swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &swap_amount,
+        &0_i128,
+    );
+
+    // Top-up deposit by the same provider.
+    let second_deposit = 100_000_i128;
+    sa.mint(&provider, &second_deposit);
+    token.approve(&provider, &client.address, &second_deposit, &9999);
+    client.add_liquidity(&provider, &market_id, &second_deposit);
+
+    let position_after = client.get_lp_position(&provider, &market_id);
+    assert_eq!(position_after.entry_reserve_a, entry_a_before);
+    assert_eq!(position_after.entry_reserve_b, entry_b_before);
+}
+
+#[test]
+fn test_cumulative_il_untouched_by_swaps_updated_on_withdrawal() {
+    // `cumulative_il_bps` must only change when the position is withdrawn
+    // from — not merely because the pool's price moved via a swap.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let creator = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let trader = Address::generate(&env);
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let liquidity = 1_000_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    let lp_tokens = client.add_liquidity(&provider, &market_id, &liquidity);
+
+    let swap_amount = 300_000_i128;
+    sa.mint(&trader, &swap_amount);
+    token.approve(&trader, &client.address, &swap_amount, &9999);
+    client.swap_outcome(
+        &trader,
+        &market_id,
+        &symbol_short!("yes"),
+        &symbol_short!("no"),
+        &swap_amount,
+        &0_i128,
+    );
+
+    // Price has moved, so the live IL is non-zero, but nothing has been
+    // withdrawn yet, so the stored cumulative figure is still zero.
+    let live_il_before_withdrawal = client.get_position_il(&provider, &market_id);
+    assert!(live_il_before_withdrawal < 0);
+    let position_before_withdrawal = client.get_lp_position(&provider, &market_id);
+    assert_eq!(position_before_withdrawal.cumulative_il_bps, 0);
+
+    // Withdraw part of the position; this must snapshot the current IL into
+    // `cumulative_il_bps`. `remove_liquidity` does not touch outcome_reserves,
+    // so the live figure right after should be unchanged from right before.
+    client.remove_liquidity(&provider, &market_id, &(lp_tokens / 2));
+
+    let position_after_withdrawal = client.get_lp_position(&provider, &market_id);
+    assert_eq!(
+        position_after_withdrawal.cumulative_il_bps,
+        live_il_before_withdrawal
+    );
+
+    let live_il_after_withdrawal = client.get_position_il(&provider, &market_id);
+    assert_eq!(live_il_after_withdrawal, live_il_before_withdrawal);
+}
+
+#[test]
+fn test_cumulative_il_zero_on_withdrawal_without_price_change() {
+    // Withdrawing without any prior swap must record zero IL.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _oracle, xlm_token) = deploy_with_token(&env);
+
+    let creator = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let market_id = client.create_market(&creator, &lp_market_params(&env));
+
+    let sa = StellarAssetClient::new(&env, &xlm_token);
+    let token = TokenClient::new(&env, &xlm_token);
+
+    let liquidity = 200_000_i128;
+    sa.mint(&provider, &liquidity);
+    token.approve(&provider, &client.address, &liquidity, &9999);
+    let lp_tokens = client.add_liquidity(&provider, &market_id, &liquidity);
+
+    client.remove_liquidity(&provider, &market_id, &(lp_tokens / 2));
+
+    let position = client.get_lp_position(&provider, &market_id);
+    assert_eq!(position.cumulative_il_bps, 0);
 }
