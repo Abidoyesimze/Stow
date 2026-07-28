@@ -248,7 +248,7 @@ pub struct Config {
     /// Maximum number of mutually exclusive outcomes allowed per market.
     /// Admin-configurable via [`set_max_outcomes`]. Defaults to 10 at initialization.
     pub max_outcomes: u32,
-/// Volume-based fee tier schedule. Governs the swap fee charged by every
+    /// Volume-based fee tier schedule. Governs the swap fee charged by every
     /// market's AMM pool based on its cumulative trading volume.
     /// Governance-configurable via `set_volume_fee_config` (admin, immediate).
     /// Defaults to [`VolumeFeeConfig::default_config`] at initialization.
@@ -409,7 +409,7 @@ pub fn initialize(
         arbiter_voting_period_seconds: 172_800, // ~2 days
         governance_quorum_bps: 1000, // 10% of registered users must participate
         max_outcomes: DEFAULT_MAX_OUTCOMES,
-volume_fee_config: VolumeFeeConfig::default_config(env),
+        volume_fee_config: VolumeFeeConfig::default_config(env),
         oracle_stake_amount: 100_000_000, // 10 XLM expressed in stroops
         oracle_reward_bps: 500, // 5% of stake paid as a reward when resolution stands
         vesting_tranche_count: 4,
@@ -1122,6 +1122,34 @@ pub fn set_max_outcomes(
     new_max: u32,
 ) -> Result<(), InsightArenaError> {
     ensure_not_paused(env)?;
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    if new_max < 2 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    let old_max = config.max_outcomes;
+    config.max_outcomes = new_max;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_max_outcomes_updated(env, old_max, new_max);
+
+    Ok(())
+}
+
+fn emit_max_outcomes_updated(env: &Env, old_max: u32, new_max: u32) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("max_out")),
+        (old_max, new_max),
+    );
+}
+
 // ── Volume Fee Config ──────────────────────────────────────────────────────────
 
 fn validate_volume_fee_config(config: &VolumeFeeConfig) -> Result<(), InsightArenaError> {
@@ -1165,16 +1193,6 @@ pub fn set_volume_fee_config(
         return Err(InsightArenaError::Unauthorized);
     }
 
-    if new_max < 2 {
-        return Err(InsightArenaError::InvalidInput);
-    }
-
-    let old_max = config.max_outcomes;
-    config.max_outcomes = new_max;
-    env.storage().persistent().set(&DataKey::Config, &config);
-    bump_config(env);
-
-    emit_max_outcomes_updated(env, old_max, new_max);
     validate_volume_fee_config(&new_config)?;
 
     let old_config = config.volume_fee_config.clone();
@@ -1293,10 +1311,6 @@ pub fn set_vesting_config(
     Ok(())
 }
 
-fn emit_max_outcomes_updated(env: &Env, old_max: u32, new_max: u32) {
-    env.events().publish(
-        (symbol_short!("cfg"), symbol_short!("max_out")),
-        (old_max, new_max),
 fn emit_vesting_config_updated(env: &Env, tranche_count: u32, interval_seconds: u64) {
     env.events().publish(
         (symbol_short!("cfg"), symbol_short!("vst_upd")),
