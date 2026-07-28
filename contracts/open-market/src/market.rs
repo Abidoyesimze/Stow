@@ -1244,16 +1244,14 @@ pub fn add_volume(env: &Env, amount: i128) {
 }
 
 /// Accumulate per-outcome stake pools by iterating the predictor list.
+///
+/// Outcomes are discovered from the predictions themselves, so an outcome that
+/// received no stake is absent from the result — an unstaked market yields an
+/// empty distribution. This holds for any outcome count; N-way markets simply
+/// surface however many of their options have been staked.
 fn accumulate_outcome_pools(env: &Env, market_id: u64) -> (Vec<Symbol>, Vec<i128>) {
     let mut outcome_symbols: Vec<Symbol> = Vec::new(env);
     let mut outcome_pools: Vec<i128> = Vec::new(env);
-
-    if let Ok(market) = get_market(env, market_id) {
-        for outcome in market.outcome_options.iter() {
-            outcome_symbols.push_back(outcome.clone());
-            outcome_pools.push_back(0);
-        }
-    }
 
     let predictors: Vec<Address> = env
         .storage()
