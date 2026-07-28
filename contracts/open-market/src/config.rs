@@ -244,6 +244,27 @@ pub struct Config {
     /// via `ProposalType::UpdateQuorum` (timelocked governance path). Defaults
     /// to `1000` (10%) at initialization.
     pub governance_quorum_bps: u32,
+    /// Stake (stroops) an oracle must lock via
+    /// `dispute::submit_resolution_with_stake` when submitting a market
+    /// resolution. Held through the market's dispute window; slashed if a
+    /// dispute overturns the resolution, refunded plus a reward otherwise.
+    /// Admin-configurable via `set_oracle_stake_config`. Defaults to
+    /// `100_000_000` (10 XLM) at initialization.
+    pub oracle_stake_amount: i128,
+    /// Reward paid to the oracle (bps of their locked stake) when their
+    /// submitted resolution stands unchallenged or survives a dispute.
+    /// Paid out of the protocol treasury balance, capped at what the
+    /// treasury actually holds. Admin-configurable via
+    /// `set_oracle_stake_config`. Defaults to `500` (5%) at initialization.
+    pub oracle_reward_bps: u32,
+    /// Number of vesting tranches a `season::finalize_season` reward is
+    /// split into, instead of one lump payout. Admin-configurable via
+    /// `set_vesting_config`. Defaults to `4` at initialization.
+    pub vesting_tranche_count: u32,
+    /// Seconds between successive tranche unlocks in a season reward vesting
+    /// schedule. Admin-configurable via `set_vesting_config`. Defaults to
+    /// `2_592_000` (~30 days) at initialization.
+    pub vesting_interval_seconds: u64,
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -378,6 +399,10 @@ pub fn initialize(
         arbiter_slash_bps: 1000,  // 10% of stake slashed for a missed vote
         arbiter_voting_period_seconds: 172_800, // ~2 days
         governance_quorum_bps: 1000, // 10% of registered users must participate
+        oracle_stake_amount: 100_000_000, // 10 XLM expressed in stroops
+        oracle_reward_bps: 500, // 5% of stake paid as a reward when resolution stands
+        vesting_tranche_count: 4,
+        vesting_interval_seconds: 2_592_000, // ~30 days
     };
 
     env.storage().persistent().set(&DataKey::Config, &config);
@@ -1076,6 +1101,97 @@ fn emit_governance_quorum_updated(env: &Env, old_quorum_bps: u32, new_quorum_bps
     env.events().publish(
         (symbol_short!("cfg"), symbol_short!("qrm_upd")),
         (old_quorum_bps, new_quorum_bps),
+    );
+}
+
+fn validate_oracle_stake_config(stake_amount: i128, reward_bps: u32) -> Result<(), InsightArenaError> {
+    if stake_amount <= 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+    if reward_bps > 10_000 {
+        return Err(InsightArenaError::InvalidFee);
+    }
+    Ok(())
+}
+
+/// Update the required oracle submission stake and the reward (bps of stake)
+/// paid when a submission stands. Caller must be the stored admin. Only
+/// affects submissions made after this call.
+pub fn set_oracle_stake_config(
+    env: &Env,
+    admin: Address,
+    stake_amount: i128,
+    reward_bps: u32,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    validate_oracle_stake_config(stake_amount, reward_bps)?;
+
+    config.oracle_stake_amount = stake_amount;
+    config.oracle_reward_bps = reward_bps;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_oracle_stake_config_updated(env, stake_amount, reward_bps);
+
+    Ok(())
+}
+
+fn emit_oracle_stake_config_updated(env: &Env, stake_amount: i128, reward_bps: u32) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("orc_upd")),
+        (stake_amount, reward_bps),
+    );
+}
+
+fn validate_vesting_config(tranche_count: u32, interval_seconds: u64) -> Result<(), InsightArenaError> {
+    if tranche_count == 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+    if interval_seconds == 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+    Ok(())
+}
+
+/// Update the number and spacing of tranches used to vest season rewards.
+/// Caller must be the stored admin. Only affects schedules created by
+/// `season::finalize_season` calls made after this update — already-created
+/// vesting schedules keep the parameters snapshotted at creation time.
+pub fn set_vesting_config(
+    env: &Env,
+    admin: Address,
+    tranche_count: u32,
+    interval_seconds: u64,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    validate_vesting_config(tranche_count, interval_seconds)?;
+
+    config.vesting_tranche_count = tranche_count;
+    config.vesting_interval_seconds = interval_seconds;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_vesting_config_updated(env, tranche_count, interval_seconds);
+
+    Ok(())
+}
+
+fn emit_vesting_config_updated(env: &Env, tranche_count: u32, interval_seconds: u64) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("vst_upd")),
+        (tranche_count, interval_seconds),
     );
 }
 

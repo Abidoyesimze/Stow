@@ -384,6 +384,50 @@ pub fn withdraw_treasury(env: Env, caller: Address, amount: i128) -> Result<(), 
     Ok(())
 }
 
+/// Pay `amount` (stroops) to `to` out of the tracked treasury balance.
+///
+/// Used to fund the oracle reward in `dispute::settle_oracle_submission`:
+/// the reward is capped at the live treasury balance before this is called,
+/// so it always succeeds and never overdraws the tracked accounting figure.
+///
+/// # Errors
+/// - `InsufficientFunds` when `amount` exceeds the tracked treasury balance.
+/// - `EscrowEmpty` if the contract token balance cannot cover the transfer.
+pub(crate) fn pay_oracle_reward(env: &Env, to: &Address, amount: i128) -> Result<(), InsightArenaError> {
+    if amount <= 0 {
+        return Ok(());
+    }
+
+    acquire_escrow_lock(env)?;
+
+    let treasury_balance = get_treasury_balance(env);
+    if amount > treasury_balance {
+        release_escrow_lock(env);
+        return Err(InsightArenaError::InsufficientFunds);
+    }
+
+    let cfg = config::get_config(env)?;
+    let client = token::Client::new(env, &cfg.xlm_token);
+    let contract = env.current_contract_address();
+
+    if client.balance(&contract) < amount {
+        release_escrow_lock(env);
+        return Err(InsightArenaError::EscrowEmpty);
+    }
+
+    client.transfer(&contract, to, &amount);
+
+    release_escrow_lock(env);
+
+    let new_balance = treasury_balance
+        .checked_sub(amount)
+        .ok_or(InsightArenaError::Overflow)?;
+    env.storage().persistent().set(&DataKey::Treasury, &new_balance);
+    bump_treasury(env);
+
+    Ok(())
+}
+
 pub fn get_treasury_balance(env: &Env) -> i128 {
     env.storage()
         .persistent()

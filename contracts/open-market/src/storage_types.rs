@@ -855,6 +855,20 @@ pub struct InviteCode {
     pub is_active: bool,
 }
 
+/// Read-only view of an invite code's remaining redemption budget, returned
+/// by `invite::get_invite_code_info`. Recomputed from the stored `InviteCode`
+/// rather than cached.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InviteCodeInfo {
+    pub code: Symbol,
+    pub market_id: u64,
+    /// `max_uses - current_uses`, floored at 0.
+    pub remaining_uses: u32,
+    pub expires_at: u64,
+    pub is_active: bool,
+}
+
 impl InviteCode {
     /// Creates a new `InviteCode` granting access to a private market.
     /// The code is immediately active with zero recorded uses;
@@ -1126,6 +1140,53 @@ impl CommitmentPrediction {
             revealed: false,
         }
     }
+}
+
+// ── Oracle Submission Staking ─────────────────────────────────────────────────
+//
+// Keyed by a raw `(Symbol, u64)` tuple rather than a `DataKey` variant, since
+// `DataKey` is already at its 50-variant XDR cap (see
+// `reputation::trusted_creator_key` for the established precedent).
+
+/// Records the stake an oracle locked when submitting a market resolution via
+/// `dispute::submit_resolution_with_stake`. Held through the market's dispute
+/// window; settled (slashed or refunded-plus-reward) exactly once by
+/// `dispute::settle_oracle_submission`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleSubmission {
+    pub market_id: u64,
+    pub oracle: Address,
+    pub stake_amount: i128,
+    pub submitted_at: u64,
+    /// True once the stake has been either slashed or refunded (plus reward).
+    pub settled: bool,
+}
+
+// ── Season Reward Vesting ─────────────────────────────────────────────────────
+//
+// Keyed by a raw `(Symbol, u32, Address)` tuple rather than a `DataKey`
+// variant, for the same reason as `OracleSubmission` above.
+
+/// A single recipient's vesting schedule for their `season::finalize_season`
+/// reward, split into equally-spaced tranches instead of one lump payout.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VestingSchedule {
+    pub season_id: u32,
+    pub user: Address,
+    /// Total reward amount (stroops) awarded to this recipient, across all tranches.
+    pub total_amount: i128,
+    /// Number of tranches the total is split into.
+    pub tranche_count: u32,
+    /// Seconds between successive tranche unlocks.
+    pub interval_seconds: u64,
+    /// Ledger timestamp the schedule begins counting from (season finalization time).
+    pub start_time: u64,
+    /// Number of tranches claimed so far.
+    pub claimed_tranches: u32,
+    /// Cumulative amount (stroops) claimed so far.
+    pub claimed_amount: i128,
 }
 
 /// Represents a verified winner of a creator event.
