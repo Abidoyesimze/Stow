@@ -22,6 +22,7 @@ pub const PERSISTENT_THRESHOLD: u32 = 501_120; // PERSISTENT_BUMP − 1 day
 /// before it becomes executable. ~2 days at real time. Admin-configurable via
 /// [`set_timelock_delay`].
 pub const DEFAULT_TIMELOCK_DELAY: u64 = 172_800;
+pub const DEFAULT_MAX_OUTCOMES: u32 = 10;
 
 // ── Storage-specific TTL constants (merged from ttl.rs) ───────────────────────
 // ~30 days at ~6s/ledger for frequently accessed market state.
@@ -244,7 +245,10 @@ pub struct Config {
     /// via `ProposalType::UpdateQuorum` (timelocked governance path). Defaults
     /// to `1000` (10%) at initialization.
     pub governance_quorum_bps: u32,
-/// Volume-based fee tier schedule. Governs the swap fee charged by every
+    /// Maximum number of mutually exclusive outcomes allowed per market.
+    /// Admin-configurable via [`set_max_outcomes`]. Defaults to 10 at initialization.
+    pub max_outcomes: u32,
+    /// Volume-based fee tier schedule. Governs the swap fee charged by every
     /// market's AMM pool based on its cumulative trading volume.
     /// Governance-configurable via `set_volume_fee_config` (admin, immediate).
     /// Defaults to [`VolumeFeeConfig::default_config`] at initialization.
@@ -404,7 +408,8 @@ pub fn initialize(
         arbiter_slash_bps: 1000,  // 10% of stake slashed for a missed vote
         arbiter_voting_period_seconds: 172_800, // ~2 days
         governance_quorum_bps: 1000, // 10% of registered users must participate
-volume_fee_config: VolumeFeeConfig::default_config(env),
+        max_outcomes: DEFAULT_MAX_OUTCOMES,
+        volume_fee_config: VolumeFeeConfig::default_config(env),
         oracle_stake_amount: 100_000_000, // 10 XLM expressed in stroops
         oracle_reward_bps: 500, // 5% of stake paid as a reward when resolution stands
         vesting_tranche_count: 4,
@@ -1107,6 +1112,41 @@ fn emit_governance_quorum_updated(env: &Env, old_quorum_bps: u32, new_quorum_bps
     env.events().publish(
         (symbol_short!("cfg"), symbol_short!("qrm_upd")),
         (old_quorum_bps, new_quorum_bps),
+    );
+}
+
+/// Update the global maximum number of outcomes allowed per market.
+pub fn set_max_outcomes(
+    env: &Env,
+    admin: Address,
+    new_max: u32,
+) -> Result<(), InsightArenaError> {
+    ensure_not_paused(env)?;
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    if new_max < 2 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    let old_max = config.max_outcomes;
+    config.max_outcomes = new_max;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_max_outcomes_updated(env, old_max, new_max);
+
+    Ok(())
+}
+
+fn emit_max_outcomes_updated(env: &Env, old_max: u32, new_max: u32) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("max_out")),
+        (old_max, new_max),
     );
 }
 
