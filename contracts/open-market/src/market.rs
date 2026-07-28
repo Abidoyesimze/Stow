@@ -8,6 +8,8 @@ use crate::storage_types::{
     UserProfile,
 };
 
+pub const MAX_OUTCOMES: u32 = 10;
+
 // ── Params struct ─────────────────────────────────────────────────────────────
 // Soroban limits contract functions to 10 parameters. Bundling the market
 // creation fields into a single `#[contracttype]` struct keeps the ABI legal
@@ -259,16 +261,21 @@ pub fn create_market(
         return Err(InsightArenaError::InvalidTimeRange);
     }
 
-    // ── Guard 5: at least two outcomes required ───────────────────────────────
-    if params.outcomes.len() < 2 {
+    // ── Load config for reputation, fee, stake floor, and outcome bounds ──────
+    let cfg = config::get_config(env)?;
+
+    // ── Guard 5: 2 to N outcomes (max bounded) required ────────────────────────
+    let max_outcomes = if cfg.max_outcomes > 0 {
+        cfg.max_outcomes
+    } else {
+        MAX_OUTCOMES
+    };
+    if params.outcomes.len() < 2 || params.outcomes.len() > max_outcomes {
         return Err(InsightArenaError::InvalidInput);
     }
     if has_duplicate_outcomes(&params.outcomes) {
         return Err(InsightArenaError::InvalidInput);
     }
-
-    // ── Load config for reputation, fee, and stake floor checks ───────────────
-    let cfg = config::get_config(env)?;
 
     // ── Guard 6: creator reputation must meet the governance threshold ────────
     // Trusted-creator allowlist bypasses the score check entirely. The denial
@@ -1238,14 +1245,21 @@ pub fn add_volume(env: &Env, amount: i128) {
 
 /// Accumulate per-outcome stake pools by iterating the predictor list.
 fn accumulate_outcome_pools(env: &Env, market_id: u64) -> (Vec<Symbol>, Vec<i128>) {
+    let mut outcome_symbols: Vec<Symbol> = Vec::new(env);
+    let mut outcome_pools: Vec<i128> = Vec::new(env);
+
+    if let Ok(market) = get_market(env, market_id) {
+        for outcome in market.outcome_options.iter() {
+            outcome_symbols.push_back(outcome.clone());
+            outcome_pools.push_back(0);
+        }
+    }
+
     let predictors: Vec<Address> = env
         .storage()
         .persistent()
         .get(&DataKey::PredictorList(market_id))
         .unwrap_or_else(|| Vec::new(env));
-
-    let mut outcome_symbols: Vec<Symbol> = Vec::new(env);
-    let mut outcome_pools: Vec<i128> = Vec::new(env);
 
     for predictor in predictors.iter() {
         if let Some(pred) = env

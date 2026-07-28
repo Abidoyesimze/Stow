@@ -742,6 +742,16 @@ impl InsightArenaContract {
         config::set_max_liquidity_per_outcome(&env, admin, new_cap)
     }
 
+    /// Update the global maximum number of outcomes allowed per market.
+    /// Caller must be the current admin.
+    pub fn set_max_outcomes(
+        env: Env,
+        admin: Address,
+        new_max: u32,
+    ) -> Result<(), InsightArenaError> {
+        config::set_max_outcomes(&env, admin, new_max)
+    }
+
     /// Set a per-market override for the maximum liquidity a single
     /// outcome's AMM reserve may hold (`0` clears the override). Caller
     /// must be the current admin.
