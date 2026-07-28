@@ -312,6 +312,20 @@ fn test_finalize_season_reward_distribution() {
     env.ledger().set_timestamp(100);
     client.finalize_season(&admin, &season_id);
 
+    // Rewards are now vested in tranches (#1333) instead of paid out
+    // immediately. Advance past the whole vesting schedule and claim
+    // everything in one call per recipient so the balance assertions below
+    // still reflect the full awarded amount.
+    let cfg = client.get_config();
+    env.ledger().set_timestamp(
+        100 + (cfg.vesting_tranche_count as u64) * cfg.vesting_interval_seconds + 1,
+    );
+    for entry in entries.iter() {
+        if entry.rank <= 10 {
+            client.claim_vested_reward(&entry.user, &season_id);
+        }
+    }
+
     let token_client = TokenClient::new(&env, &xlm_token);
     let top_user = entries.get(0).unwrap().user;
     let second_user = entries.get(1).unwrap().user;
