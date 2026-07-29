@@ -985,6 +985,31 @@ impl InsightArenaContract {
         season::get_user_season_points(&env, user, season_id)
     }
 
+    /// Set the market-creation anti-spam bond amount (stroops). A value of `0`
+    /// disables the bond requirement. Caller must be the stored admin.
+    ///
+    /// When `bond_amount > 0`, callers must pre-approve the contract address for
+    /// at least `bond_amount` via the XLM token contract before calling
+    /// `create_market`.
+    ///
+    /// # Errors
+    /// - `Unauthorized` if `admin` is not the stored admin.
+    /// - `InvalidInput` if `new_bond_amount` is negative.
+    pub fn set_bond_amount(
+        env: Env,
+        admin: Address,
+        new_bond_amount: i128,
+    ) -> Result<(), InsightArenaError> {
+        config::set_bond_amount(&env, admin, new_bond_amount)
+    }
+
+    /// Return the bond amount currently held in escrow for `market_id`.
+    /// Returns `0` if no bond was deposited (bond disabled at creation time
+    /// or bond already settled by resolution/cancellation).
+    pub fn get_market_bond(env: Env, market_id: u64) -> i128 {
+        escrow::get_market_bond(&env, market_id)
+    }
+
     // ── Reputation ────────────────────────────────────────────────────────────
 
     /// Return the [`CreatorStats`] for a given creator address.
