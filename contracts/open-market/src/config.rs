@@ -274,6 +274,14 @@ pub struct Config {
     /// schedule. Admin-configurable via `set_vesting_config`. Defaults to
     /// `2_592_000` (~30 days) at initialization.
     pub vesting_interval_seconds: u64,
+    /// Refundable bond (stroops) required from the creator at market creation
+    /// time to deter spam and low-quality markets. Held in escrow until the
+    /// market is resolved normally (refunded to creator) or cancelled as
+    /// invalid/spam (forfeited to the protocol treasury). `0` disables the
+    /// bond requirement. Admin-configurable via [`set_bond_amount`] or the
+    /// governance path `ProposalType::UpdateBondAmount`. Defaults to `0`
+    /// at initialization (disabled).
+    pub bond_amount: i128,
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -414,6 +422,7 @@ pub fn initialize(
         oracle_reward_bps: 500, // 5% of stake paid as a reward when resolution stands
         vesting_tranche_count: 4,
         vesting_interval_seconds: 2_592_000, // ~30 days
+        bond_amount: 0, // disabled by default; admin/governance opt in
     };
 
     env.storage().persistent().set(&DataKey::Config, &config);
@@ -1315,6 +1324,68 @@ fn emit_vesting_config_updated(env: &Env, tranche_count: u32, interval_seconds: 
     env.events().publish(
         (symbol_short!("cfg"), symbol_short!("vst_upd")),
         (tranche_count, interval_seconds),
+    );
+}
+
+/// Update the market-creation anti-spam bond amount. Caller must be the
+/// stored admin. A value of `0` disables the bond requirement entirely.
+///
+/// # Errors
+/// - `Unauthorized` if `admin` is not the stored admin.
+/// - `InvalidInput` if `new_bond_amount` is negative.
+pub fn set_bond_amount(
+    env: &Env,
+    admin: Address,
+    new_bond_amount: i128,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    if new_bond_amount < 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    let old_bond_amount = config.bond_amount;
+    config.bond_amount = new_bond_amount;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_bond_amount_updated(env, old_bond_amount, new_bond_amount);
+
+    Ok(())
+}
+
+/// Governance path for updating the bond amount. Called only from
+/// `governance::execute_proposal` after the appropriate proposal has
+/// cleared quorum, majority, and the timelock window.
+pub fn update_bond_amount_from_governance(
+    env: &Env,
+    new_bond_amount: i128,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    if new_bond_amount < 0 {
+        return Err(InsightArenaError::InvalidInput);
+    }
+
+    let old_bond_amount = config.bond_amount;
+    config.bond_amount = new_bond_amount;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_bond_amount_updated(env, old_bond_amount, new_bond_amount);
+
+    Ok(())
+}
+
+fn emit_bond_amount_updated(env: &Env, old_amount: i128, new_amount: i128) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("bnd_upd")),
+        (old_amount, new_amount),
     );
 }
 
