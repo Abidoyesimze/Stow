@@ -31,6 +31,7 @@ import { Notification } from './entities/notification.entity';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { UpdateCategoryPreferenceDto } from './dto/update-category-preference.dto';
 import { CategoryPreferenceResponseDto } from './dto/category-preference-response.dto';
+import { BulkUpdateDto } from './dto/bulk-update.dto';
 
 // ---------------------------------------------------------------------------
 // Inline DTOs (kept small — project uses inline classes elsewhere too)
@@ -213,8 +214,108 @@ export class NotificationsController {
   }
 
   // -------------------------------------------------------------------------
-  // Mark as read / delete
+  // Mark as read / unread / delete
+  // NOTE: Static routes (read-all, bulk/read, etc.) MUST come before
+  // parameterized routes (:id/read) so NestJS matches them correctly.
   // -------------------------------------------------------------------------
+
+  @Patch('read-all')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Mark all notifications as read',
+    description: 'Idempotent — calling it repeatedly has no extra effect.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Updated unread count (always zero after this call)',
+    schema: {
+      type: 'object',
+      properties: { unreadCount: { type: 'number', example: 0 } },
+    },
+  })
+  async markAllAsRead(
+    @CurrentUser() user: User,
+  ): Promise<{ unreadCount: number }> {
+    return this.notificationsService.markAllAsRead(user.stellar_address);
+  }
+
+  @Patch('unread-all')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Mark all notifications as unread',
+    description: 'Idempotent — calling it repeatedly has no extra effect.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Updated unread count (total notifications for the user)',
+    schema: {
+      type: 'object',
+      properties: { unreadCount: { type: 'number', example: 5 } },
+    },
+  })
+  async markAllAsUnread(
+    @CurrentUser() user: User,
+  ): Promise<{ unreadCount: number }> {
+    return this.notificationsService.markAllAsUnread(user.stellar_address);
+  }
+
+  @Patch('bulk/read')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Mark a list of notifications as read',
+    description:
+      'Idempotent — notifications already read are unaffected. ' +
+      'Scoped to the authenticated user only.',
+  })
+  @ApiBody({ type: BulkUpdateDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Updated unread count after the bulk operation',
+    schema: {
+      type: 'object',
+      properties: { unreadCount: { type: 'number', example: 3 } },
+    },
+  })
+  async markMultipleAsRead(
+    @CurrentUser() user: User,
+    @Body() dto: BulkUpdateDto,
+  ): Promise<{ unreadCount: number }> {
+    return this.notificationsService.markMultipleAsRead(
+      user.stellar_address,
+      dto.notificationIds,
+    );
+  }
+
+  @Patch('bulk/unread')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Mark a list of notifications as unread',
+    description:
+      'Idempotent — notifications already unread are unaffected. ' +
+      'Scoped to the authenticated user only.',
+  })
+  @ApiBody({ type: BulkUpdateDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Updated unread count after the bulk operation',
+    schema: {
+      type: 'object',
+      properties: { unreadCount: { type: 'number', example: 7 } },
+    },
+  })
+  async markMultipleAsUnread(
+    @CurrentUser() user: User,
+    @Body() dto: BulkUpdateDto,
+  ): Promise<{ unreadCount: number }> {
+    return this.notificationsService.markMultipleAsUnread(
+      user.stellar_address,
+      dto.notificationIds,
+    );
+  }
 
   @Patch(':id/read')
   @UseGuards(JwtAuthGuard)
@@ -229,15 +330,6 @@ export class NotificationsController {
       Number(id),
       user.stellar_address,
     );
-  }
-
-  @Patch('read-all')
-  @UseGuards(JwtAuthGuard)
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Mark all notifications as read' })
-  @ApiResponse({ status: 200, description: 'Count of notifications updated' })
-  async markAllAsRead(@CurrentUser() user: User): Promise<{ updated: number }> {
-    return this.notificationsService.markAllAsRead(user.stellar_address);
   }
 
   @Delete(':id')

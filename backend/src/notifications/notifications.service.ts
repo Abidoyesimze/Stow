@@ -266,25 +266,54 @@ export class NotificationsService {
     this.notificationBroadcaster.broadcastNotificationRead(userAddress, id);
   }
 
-  async markAllAsRead(userAddress: string): Promise<{ updated: number }> {
-    const result = await this.notificationsRepository.update(
+  async markAllAsRead(userAddress: string): Promise<{ unreadCount: number }> {
+    await this.notificationsRepository.update(
       { user_address: userAddress, read: false },
       { read: true },
     );
 
-    return { updated: result.affected ?? 0 };
+    const unreadCount = await this.getUnreadCount(userAddress);
+    return { unreadCount };
   }
 
   async markMultipleAsRead(
     userAddress: string,
     notificationIds: number[],
-  ): Promise<{ updated: number }> {
-    const result = await this.notificationsRepository.update(
-      { user_address: userAddress, id: In(notificationIds) },
-      { read: true },
+  ): Promise<{ unreadCount: number }> {
+    if (notificationIds.length > 0) {
+      await this.notificationsRepository.update(
+        { user_address: userAddress, id: In(notificationIds) },
+        { read: true },
+      );
+    }
+
+    const unreadCount = await this.getUnreadCount(userAddress);
+    return { unreadCount };
+  }
+
+  async markAllAsUnread(userAddress: string): Promise<{ unreadCount: number }> {
+    await this.notificationsRepository.update(
+      { user_address: userAddress, read: true },
+      { read: false },
     );
 
-    return { updated: result.affected ?? 0 };
+    const unreadCount = await this.getUnreadCount(userAddress);
+    return { unreadCount };
+  }
+
+  async markMultipleAsUnread(
+    userAddress: string,
+    notificationIds: number[],
+  ): Promise<{ unreadCount: number }> {
+    if (notificationIds.length > 0) {
+      await this.notificationsRepository.update(
+        { user_address: userAddress, id: In(notificationIds) },
+        { read: false },
+      );
+    }
+
+    const unreadCount = await this.getUnreadCount(userAddress);
+    return { unreadCount };
   }
 
   async remove(id: number, userAddress: string): Promise<void> {
