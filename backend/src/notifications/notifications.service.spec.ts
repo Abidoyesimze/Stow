@@ -643,6 +643,147 @@ describe('NotificationsService', () => {
     });
   });
 
+  describe('markAllAsRead', () => {
+    it('marks all unread as read and returns unread count (zero)', async () => {
+      mockNotificationRepo.update.mockResolvedValue({ affected: 3 });
+      mockNotificationRepo.count.mockResolvedValue(0);
+
+      const result = await service.markAllAsRead('GBRPYHIL');
+
+      expect(mockNotificationRepo.update).toHaveBeenCalledWith(
+        { user_address: 'GBRPYHIL', read: false },
+        { read: true },
+      );
+      expect(result).toEqual({ unreadCount: 0 });
+    });
+
+    it('is idempotent — second call still returns zero', async () => {
+      mockNotificationRepo.update.mockResolvedValue({ affected: 0 });
+      mockNotificationRepo.count.mockResolvedValue(0);
+
+      const result = await service.markAllAsRead('GBRPYHIL');
+      expect(result).toEqual({ unreadCount: 0 });
+    });
+  });
+
+  describe('markAllAsUnread', () => {
+    it('marks all read as unread and returns total count as unread', async () => {
+      mockNotificationRepo.update.mockResolvedValue({ affected: 5 });
+      mockNotificationRepo.count.mockResolvedValue(5);
+
+      const result = await service.markAllAsUnread('GBRPYHIL');
+
+      expect(mockNotificationRepo.update).toHaveBeenCalledWith(
+        { user_address: 'GBRPYHIL', read: true },
+        { read: false },
+      );
+      expect(result).toEqual({ unreadCount: 5 });
+    });
+
+    it('is idempotent', async () => {
+      mockNotificationRepo.update.mockResolvedValue({ affected: 0 });
+      mockNotificationRepo.count.mockResolvedValue(5);
+
+      const result = await service.markAllAsUnread('GBRPYHIL');
+      expect(result).toEqual({ unreadCount: 5 });
+    });
+  });
+
+  describe('markMultipleAsRead', () => {
+    it('marks specified notifications as read and returns updated unread count', async () => {
+      mockNotificationRepo.update.mockResolvedValue({ affected: 2 });
+      mockNotificationRepo.count.mockResolvedValue(3);
+
+      const result = await service.markMultipleAsRead('GBRPYHIL', [1, 2, 3]);
+
+      expect(mockNotificationRepo.update).toHaveBeenCalledWith(
+        { user_address: 'GBRPYHIL', id: expect.any(Object) },
+        { read: true },
+      );
+      expect(result).toEqual({ unreadCount: 3 });
+    });
+
+    it('handles empty array gracefully (no-op)', async () => {
+      mockNotificationRepo.count.mockResolvedValue(5);
+
+      const result = await service.markMultipleAsRead('GBRPYHIL', []);
+
+      expect(mockNotificationRepo.update).not.toHaveBeenCalled();
+      expect(result).toEqual({ unreadCount: 5 });
+    });
+
+    it('is idempotent — marking already-read notifications changes nothing', async () => {
+      mockNotificationRepo.update.mockResolvedValue({ affected: 0 });
+      mockNotificationRepo.count.mockResolvedValue(2);
+
+      const result = await service.markMultipleAsRead('GBRPYHIL', [1, 2]);
+      expect(result).toEqual({ unreadCount: 2 });
+    });
+
+    it('scopes to the authenticated user only', async () => {
+      mockNotificationRepo.update.mockResolvedValue({ affected: 0 });
+      mockNotificationRepo.count.mockResolvedValue(0);
+
+      // Even if IDs exist for another user, they won't match
+      await service.markMultipleAsRead('GBRPYHIL', [99, 100]);
+
+      expect(mockNotificationRepo.update).toHaveBeenCalledWith(
+        {
+          user_address: 'GBRPYHIL',
+          id: expect.any(Object),
+        },
+        { read: true },
+      );
+    });
+  });
+
+  describe('markMultipleAsUnread', () => {
+    it('marks specified notifications as unread and returns updated unread count', async () => {
+      mockNotificationRepo.update.mockResolvedValue({ affected: 2 });
+      mockNotificationRepo.count.mockResolvedValue(7);
+
+      const result = await service.markMultipleAsUnread('GBRPYHIL', [4, 5]);
+
+      expect(mockNotificationRepo.update).toHaveBeenCalledWith(
+        { user_address: 'GBRPYHIL', id: expect.any(Object) },
+        { read: false },
+      );
+      expect(result).toEqual({ unreadCount: 7 });
+    });
+
+    it('handles empty array gracefully (no-op)', async () => {
+      mockNotificationRepo.count.mockResolvedValue(5);
+
+      const result = await service.markMultipleAsUnread('GBRPYHIL', []);
+
+      expect(mockNotificationRepo.update).not.toHaveBeenCalled();
+      expect(result).toEqual({ unreadCount: 5 });
+    });
+
+    it('is idempotent — marking already-unread notifications changes nothing', async () => {
+      mockNotificationRepo.update.mockResolvedValue({ affected: 0 });
+      mockNotificationRepo.count.mockResolvedValue(3);
+
+      const result = await service.markMultipleAsUnread('GBRPYHIL', [1, 2]);
+      expect(result).toEqual({ unreadCount: 3 });
+    });
+
+    it('scopes to the authenticated user only', async () => {
+      mockNotificationRepo.update.mockResolvedValue({ affected: 0 });
+      mockNotificationRepo.count.mockResolvedValue(1);
+
+      await service.markMultipleAsUnread('GBRPYHIL', [99, 100]);
+
+      expect(mockNotificationRepo.update).toHaveBeenCalledWith(
+        {
+          user_address: 'GBRPYHIL',
+          id: expect.any(Object),
+        },
+        { read: false },
+      );
+    });
+  });
+
   describe('remove', () => {
     it('soft-deletes when found', async () => {
       mockNotificationRepo.findOne.mockResolvedValue(makeNotification());
