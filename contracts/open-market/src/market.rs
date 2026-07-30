@@ -8,6 +8,8 @@ use crate::storage_types::{
     UserProfile,
 };
 
+pub const MAX_OUTCOMES: u32 = 10;
+
 // ── Params struct ─────────────────────────────────────────────────────────────
 // Soroban limits contract functions to 10 parameters. Bundling the market
 // creation fields into a single `#[contracttype]` struct keeps the ABI legal
@@ -33,7 +35,7 @@ pub struct CreateMarketParams {
 
 // ── TTL helpers ───────────────────────────────────────────────────────────────
 
-fn bump_market(env: &Env, market_id: u64) {
+pub(crate) fn bump_market(env: &Env, market_id: u64) {
     config::extend_market_ttl(env, market_id);
 }
 
@@ -259,16 +261,21 @@ pub fn create_market(
         return Err(InsightArenaError::InvalidTimeRange);
     }
 
-    // ── Guard 5: at least two outcomes required ───────────────────────────────
-    if params.outcomes.len() < 2 {
+    // ── Load config for reputation, fee, stake floor, and outcome bounds ──────
+    let cfg = config::get_config(env)?;
+
+    // ── Guard 5: 2 to N outcomes (max bounded) required ────────────────────────
+    let max_outcomes = if cfg.max_outcomes > 0 {
+        cfg.max_outcomes
+    } else {
+        MAX_OUTCOMES
+    };
+    if params.outcomes.len() < 2 || params.outcomes.len() > max_outcomes {
         return Err(InsightArenaError::InvalidInput);
     }
     if has_duplicate_outcomes(&params.outcomes) {
         return Err(InsightArenaError::InvalidInput);
     }
-
-    // ── Load config for reputation, fee, and stake floor checks ───────────────
-    let cfg = config::get_config(env)?;
 
     // ── Guard 6: creator reputation must meet the governance threshold ────────
     // Trusted-creator allowlist bypasses the score check entirely. The denial
@@ -325,6 +332,14 @@ pub fn create_market(
         .set(&DataKey::Market(market_id), &market);
     bump_market(env, market_id);
     append_market_to_category_index(env, &market.category, market_id);
+
+    // ── Collect anti-spam bond from the creator ───────────────────────────────
+    // Bond is collected via pre-approved allowance. If bond_amount == 0 in the
+    // current config this is a no-op. The market record is already persisted so
+    // the bond storage and the market storage are always in a consistent state
+    // (if the bond transfer fails, the whole transaction reverts, taking the
+    // market record with it).
+    crate::escrow::deposit_market_bond(env, &creator, market_id)?;
 
     // ── Emit MarketCreated event ──────────────────────────────────────────────
     emit_market_created(env, market_id, &creator, params.end_time, &metadata_hash);
@@ -757,6 +772,12 @@ pub fn cancel_market(env: &Env, caller: Address, market_id: u64) -> Result<(), I
         .set(&DataKey::Market(market_id), &market);
     bump_market(env, market_id);
 
+    // ── Forfeit the creator's anti-spam bond to the treasury ─────────────────
+    // On an invalid/spam cancellation the bond is never returned — it is
+    // credited to the protocol treasury as a deterrent. If no bond was
+    // deposited (bond was disabled at creation time) this is a no-op.
+    let _ = crate::escrow::forfeit_market_bond(env, market_id);
+
     // Deactivate all conditional children so no orphaned markets remain.
     // Each child market is also marked cancelled; its participants may call
     // claim_cancel_refund on the child market independently.
@@ -852,6 +873,13 @@ pub fn resolve_market(
         config::PERSISTENT_THRESHOLD,
         config::PERSISTENT_BUMP,
     );
+
+    // ── Refund the creator's anti-spam bond on clean resolution ──────────────
+    // Normal resolution returns the bond to the creator — it was only there to
+    // deter spam, not to permanently penalise legitimate market creators.
+    // If no bond was deposited (bond was disabled at creation time) this is
+    // a no-op.
+    let _ = crate::escrow::refund_market_bond(&env, &market.creator, market_id);
 
     emit_market_resolved(&env, market_id, resolved_outcome.clone());
     reputation::on_market_resolved(&env, &market.creator, market.participant_count);
@@ -1237,15 +1265,20 @@ pub fn add_volume(env: &Env, amount: i128) {
 }
 
 /// Accumulate per-outcome stake pools by iterating the predictor list.
+///
+/// Outcomes are discovered from the predictions themselves, so an outcome that
+/// received no stake is absent from the result — an unstaked market yields an
+/// empty distribution. This holds for any outcome count; N-way markets simply
+/// surface however many of their options have been staked.
 fn accumulate_outcome_pools(env: &Env, market_id: u64) -> (Vec<Symbol>, Vec<i128>) {
+    let mut outcome_symbols: Vec<Symbol> = Vec::new(env);
+    let mut outcome_pools: Vec<i128> = Vec::new(env);
+
     let predictors: Vec<Address> = env
         .storage()
         .persistent()
         .get(&DataKey::PredictorList(market_id))
         .unwrap_or_else(|| Vec::new(env));
-
-    let mut outcome_symbols: Vec<Symbol> = Vec::new(env);
-    let mut outcome_pools: Vec<i128> = Vec::new(env);
 
     for predictor in predictors.iter() {
         if let Some(pred) = env

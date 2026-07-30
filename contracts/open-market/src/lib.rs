@@ -786,6 +786,16 @@ impl InsightArenaContract {
         config::set_max_liquidity_per_outcome(&env, admin, new_cap)
     }
 
+    /// Update the global maximum number of outcomes allowed per market.
+    /// Caller must be the current admin.
+    pub fn set_max_outcomes(
+        env: Env,
+        admin: Address,
+        new_max: u32,
+    ) -> Result<(), InsightArenaError> {
+        config::set_max_outcomes(&env, admin, new_max)
+    }
+
     /// Set a per-market override for the maximum liquidity a single
     /// outcome's AMM reserve may hold (`0` clears the override). Caller
     /// must be the current admin.
@@ -973,6 +983,31 @@ impl InsightArenaContract {
     /// Returns `0` for unknown users. Never panics.
     pub fn get_user_season_points(env: Env, user: Address, season_id: u32) -> u32 {
         season::get_user_season_points(&env, user, season_id)
+    }
+
+    /// Set the market-creation anti-spam bond amount (stroops). A value of `0`
+    /// disables the bond requirement. Caller must be the stored admin.
+    ///
+    /// When `bond_amount > 0`, callers must pre-approve the contract address for
+    /// at least `bond_amount` via the XLM token contract before calling
+    /// `create_market`.
+    ///
+    /// # Errors
+    /// - `Unauthorized` if `admin` is not the stored admin.
+    /// - `InvalidInput` if `new_bond_amount` is negative.
+    pub fn set_bond_amount(
+        env: Env,
+        admin: Address,
+        new_bond_amount: i128,
+    ) -> Result<(), InsightArenaError> {
+        config::set_bond_amount(&env, admin, new_bond_amount)
+    }
+
+    /// Return the bond amount currently held in escrow for `market_id`.
+    /// Returns `0` if no bond was deposited (bond disabled at creation time
+    /// or bond already settled by resolution/cancellation).
+    pub fn get_market_bond(env: Env, market_id: u64) -> i128 {
+        escrow::get_market_bond(&env, market_id)
     }
 
     // ── Reputation ────────────────────────────────────────────────────────────
@@ -1193,5 +1228,21 @@ impl InsightArenaContract {
         new_config: crate::storage_types::FeeTierConfig,
     ) -> Result<(), InsightArenaError> {
         liquidity::set_fee_tier_config(&env, admin, new_config)
+    }
+
+    // ── Volume-Based Fee Tiers (#1326) ──────────────────────────────────────────
+
+    /// Return the current volume-based fee tier schedule.
+    pub fn get_volume_fee_config(env: Env) -> crate::storage_types::VolumeFeeConfig {
+        config::get_volume_fee_config(&env)
+    }
+
+    /// Update the volume-based fee tier schedule. Caller must be the platform admin.
+    pub fn update_volume_fee_config(
+        env: Env,
+        admin: Address,
+        new_config: crate::storage_types::VolumeFeeConfig,
+    ) -> Result<(), InsightArenaError> {
+        config::set_volume_fee_config(&env, admin, new_config)
     }
 }

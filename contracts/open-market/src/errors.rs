@@ -100,11 +100,16 @@ pub enum InsightArenaError {
     RefundAlreadyClaimed = 26,
     /// The caller has no stake in this market and is therefore not entitled to a refund.
     /// Raised by `claim_cancel_refund` when the address never submitted a prediction.
+    /// REUSED for anti-spam bond: also raised when `deposit_market_bond` is called
+    /// for a market that already has a bond deposited (prevents double-deposit).
     NotAParticipant = 27,
 
     // ── Escrow ────────────────────────────────────────────────────────────────
     /// The contract's escrow balance is insufficient to complete the transfer.
     /// Raised when a payout or refund exceeds the available on-chain funds.
+    /// REUSED for anti-spam bond: also raised when `create_market` is called
+    /// with `bond_amount > 0` but the creator has not transferred the required
+    /// bond into escrow (i.e. allowance/balance is insufficient).
     InsufficientFunds = 30,
     /// A native XLM token transfer via the Stellar asset contract failed.
     /// Raised when the underlying `transfer` call returns an error.

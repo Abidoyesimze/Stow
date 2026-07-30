@@ -553,3 +553,175 @@ pub fn get_insurance_pool_payouts_total(env: &Env) -> i128 {
         .map(|c| c.insurance_pool_payouts_total)
         .unwrap_or(0)
 }
+
+// ── Market Creation Anti-Spam Bond ────────────────────────────────────────────
+//
+// Bond records are stored with a raw tuple key `(Symbol, u64)` instead of a
+// `DataKey` variant, because `DataKey` is already at the 50-variant XDR cap.
+// This follows the same pattern used elsewhere in `storage_types.rs` when the
+// enum has no room to grow.
+//
+// Key layout: (Symbol::new(env, "MktBond"), market_id)  →  i128 (bond amount)
+
+fn bond_storage_key(env: &Env, market_id: u64) -> (soroban_sdk::Symbol, u64) {
+    (soroban_sdk::Symbol::new(env, "MktBond"), market_id)
+}
+
+/// Deposit the anti-spam bond from `creator` into the contract's escrow for
+/// `market_id`.
+///
+/// The bond amount is read from the current global `Config::bond_amount`. If
+/// `bond_amount == 0` the function is a no-op and returns `Ok(())`.
+///
+/// # Errors
+/// - `NotAParticipant` (reused) if a bond record already exists for this
+///   market (double-deposit guard).
+/// - `InsufficientFunds` (reused) if the creator's allowance/balance is
+///   insufficient to cover the bond.
+/// - Propagates pause and config errors from inner helpers.
+pub fn deposit_market_bond(
+    env: &Env,
+    creator: &Address,
+    market_id: u64,
+) -> Result<(), InsightArenaError> {
+    let cfg = config::get_config(env)?;
+
+    // Bond is disabled — nothing to do.
+    if cfg.bond_amount == 0 {
+        return Ok(());
+    }
+
+    let bond_key = bond_storage_key(env, market_id);
+
+    // Guard: refuse if a bond was already deposited (should not normally
+    // happen, but prevents accidental double-deposit).
+    if env.storage().persistent().has(&bond_key) {
+        return Err(InsightArenaError::NotAParticipant);
+    }
+
+    let amount = cfg.bond_amount;
+    let contract = env.current_contract_address();
+    let client = token::Client::new(env, &cfg.xlm_token);
+
+    // Verify sufficient allowance before attempting the transfer.
+    if client.allowance(creator, &contract) < amount {
+        return Err(InsightArenaError::InsufficientFunds);
+    }
+
+    client.transfer_from(&contract, creator, &contract, &amount);
+
+    // Record the bond against the market.
+    env.storage().persistent().set(&bond_key, &amount);
+    env.storage().persistent().extend_ttl(
+        &bond_key,
+        config::PERSISTENT_THRESHOLD,
+        config::PERSISTENT_BUMP,
+    );
+
+    emit_bond_deposited(env, market_id, creator, amount);
+
+    Ok(())
+}
+
+/// Refund the anti-spam bond to `creator` when the market resolves normally.
+///
+/// If no bond record exists (bond was disabled at creation time) the function
+/// is a no-op and returns `Ok(())`.
+///
+/// # Errors
+/// - Propagates pause and config errors from inner helpers.
+/// - `EscrowEmpty` if the contract token balance cannot cover the refund.
+pub fn refund_market_bond(
+    env: &Env,
+    creator: &Address,
+    market_id: u64,
+) -> Result<(), InsightArenaError> {
+    let bond_key = bond_storage_key(env, market_id);
+
+    let amount: i128 = match env.storage().persistent().get(&bond_key) {
+        Some(v) => v,
+        None => return Ok(()), // bond was never required — nothing to refund
+    };
+
+    if amount <= 0 {
+        env.storage().persistent().remove(&bond_key);
+        return Ok(());
+    }
+
+    let cfg = config::get_config(env)?;
+    let client = token::Client::new(env, &cfg.xlm_token);
+    let contract = env.current_contract_address();
+
+    if client.balance(&contract) < amount {
+        return Err(InsightArenaError::EscrowEmpty);
+    }
+
+    client.transfer(&contract, creator, &amount);
+
+    // Remove the bond record — it can never be claimed again.
+    env.storage().persistent().remove(&bond_key);
+
+    emit_bond_refunded(env, market_id, creator, amount);
+
+    Ok(())
+}
+
+/// Forfeit the anti-spam bond to the protocol treasury when a market is
+/// cancelled for being invalid/spam.
+///
+/// If no bond record exists (bond was disabled at creation time) the function
+/// is a no-op and returns `Ok(())`.
+///
+/// The forfeited amount is credited to the treasury balance via
+/// [`add_to_treasury_balance`] and the bond record is removed.
+///
+/// # Errors
+/// - Propagates config errors from inner helpers.
+pub fn forfeit_market_bond(env: &Env, market_id: u64) -> Result<(), InsightArenaError> {
+    let bond_key = bond_storage_key(env, market_id);
+
+    let amount: i128 = match env.storage().persistent().get(&bond_key) {
+        Some(v) => v,
+        None => return Ok(()), // bond was never required — nothing to forfeit
+    };
+
+    // Remove the bond record before crediting the treasury (fail-safe ordering).
+    env.storage().persistent().remove(&bond_key);
+
+    if amount > 0 {
+        add_to_treasury_balance(env, amount);
+        emit_bond_forfeited(env, market_id, amount);
+    }
+
+    Ok(())
+}
+
+/// Return the bond amount currently held for `market_id`, or `0` if no bond
+/// was deposited (bond was disabled at creation time or already settled).
+pub fn get_market_bond(env: &Env, market_id: u64) -> i128 {
+    let bond_key = bond_storage_key(env, market_id);
+    env.storage().persistent().get(&bond_key).unwrap_or(0)
+}
+
+// ── Bond event emission ───────────────────────────────────────────────────────
+
+fn emit_bond_deposited(env: &Env, market_id: u64, creator: &Address, amount: i128) {
+    env.events().publish(
+        (symbol_short!("bnd"), symbol_short!("deposit")),
+        (market_id, creator.clone(), amount),
+    );
+}
+
+fn emit_bond_refunded(env: &Env, market_id: u64, creator: &Address, amount: i128) {
+    env.events().publish(
+        (symbol_short!("bnd"), symbol_short!("refund")),
+        (market_id, creator.clone(), amount),
+    );
+}
+
+fn emit_bond_forfeited(env: &Env, market_id: u64, amount: i128) {
+    env.events().publish(
+        (symbol_short!("bnd"), symbol_short!("forfeit")),
+        (market_id, amount),
+    );
+}

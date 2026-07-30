@@ -2,6 +2,10 @@ import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Notification, NotificationType } from './entities/notification.entity';
+import {
+  NotificationCategoryPreference,
+  NotificationCategory,
+} from './entities/notification-category-preference.entity';
 import { CreatorEvent } from '../matches/entities/creator-event.entity';
 import { Match } from '../matches/entities/match.entity';
 import { MatchPrediction } from '../matches/entities/match-prediction.entity';
@@ -38,6 +42,8 @@ export class NotificationGeneratorService implements OnModuleDestroy {
   constructor(
     @InjectRepository(Notification)
     private readonly notificationsRepository: Repository<Notification>,
+    @InjectRepository(NotificationCategoryPreference)
+    private readonly categoryPreferencesRepository: Repository<NotificationCategoryPreference>,
     @InjectRepository(CreatorEvent)
     private readonly creatorEventRepository: Repository<CreatorEvent>,
     @InjectRepository(Match)
@@ -451,41 +457,67 @@ export class NotificationGeneratorService implements OnModuleDestroy {
     notificationType: NotificationType,
   ): Promise<boolean> {
     try {
+      // Check legacy per-type preferences (UserPreferences)
       const user = await this.userRepository.findOne({
         where: { stellar_address: userAddress },
         relations: ['preferences'],
       });
 
-      if (!user || !user.preferences) {
-        return true; // Default to sending if no preferences found
+      if (user?.preferences) {
+        const prefs = user.preferences;
+        switch (notificationType) {
+          case NotificationType.EventCreated:
+            if (prefs.event_created_notifications === false) return false;
+            break;
+          case NotificationType.MatchAdded:
+            if (prefs.match_added_notifications === false) return false;
+            break;
+          case NotificationType.PredictionSubmitted:
+            if (prefs.prediction_submitted_notifications === false) return false;
+            break;
+          case NotificationType.MatchResolved:
+            if (prefs.match_resolved_notifications === false) return false;
+            break;
+          case NotificationType.WinnerVerified:
+            if (prefs.winner_verified_notifications === false) return false;
+            break;
+          case NotificationType.EventCancelled:
+            if (prefs.event_cancelled_notifications === false) return false;
+            break;
+        }
       }
 
-      const prefs = user.preferences;
-
-      // Check specific notification type preferences
-      switch (notificationType) {
-        case NotificationType.EventCreated:
-          return prefs.event_created_notifications !== false;
-        case NotificationType.MatchAdded:
-          return prefs.match_added_notifications !== false;
-        case NotificationType.PredictionSubmitted:
-          return prefs.prediction_submitted_notifications !== false;
-        case NotificationType.MatchResolved:
-          return prefs.match_resolved_notifications !== false;
-        case NotificationType.WinnerVerified:
-          return prefs.winner_verified_notifications !== false;
-        case NotificationType.EventCancelled:
-          return prefs.event_cancelled_notifications !== false;
-        default:
-          return true;
+      // Check per-category preference for in_app channel
+      if (user?.id) {
+        const category = this.mapTypeToCategory(notificationType);
+        if (category) {
+          const catPref = await this.categoryPreferencesRepository.findOne({
+            where: { userId: user.id, category },
+          });
+          if (catPref && !catPref.in_app) return false;
+        }
       }
+
+      return true;
     } catch (error) {
       this.logger.error(
         `Error checking notification preferences for ${userAddress}`,
         error,
       );
-      return true; // Default to sending on error
+      return true;
     }
+  }
+
+  private mapTypeToCategory(type: NotificationType): NotificationCategory | null {
+    const map: Record<string, NotificationCategory> = {
+      [NotificationType.EventCreated]: NotificationCategory.EventCreated,
+      [NotificationType.MatchAdded]: NotificationCategory.MatchAdded,
+      [NotificationType.PredictionSubmitted]: NotificationCategory.PredictionSubmitted,
+      [NotificationType.MatchResolved]: NotificationCategory.MatchResolved,
+      [NotificationType.WinnerVerified]: NotificationCategory.WinnerVerified,
+      [NotificationType.EventCancelled]: NotificationCategory.EventCancelled,
+    };
+    return map[type] ?? null;
   }
 
   private async getEventParticipants(eventId: number): Promise<string[]> {

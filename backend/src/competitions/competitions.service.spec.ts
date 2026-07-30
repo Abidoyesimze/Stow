@@ -7,7 +7,11 @@ import {
   CompetitionVisibility,
 } from './entities/competition.entity';
 import { CompetitionParticipant } from './entities/competition-participant.entity';
+import { CompetitionBracket } from './entities/competition-bracket.entity';
+import { BracketRound } from './entities/bracket-round.entity';
+import { BracketMatchup } from './entities/bracket-matchup.entity';
 import { CreateCompetitionDto } from './dto/create-competition.dto';
+import { SeedingMetric } from './dto/generate-bracket.dto';
 import { User } from '../users/entities/user.entity';
 
 describe('CompetitionsService', () => {
@@ -46,7 +50,26 @@ describe('CompetitionsService', () => {
   const mockParticipantsRepository = {
     createQueryBuilder: jest.fn(),
     findOne: jest.fn(),
+    find: jest.fn(),
     count: jest.fn(),
+  };
+
+  const mockBracketRepo = {
+    create: jest.fn(),
+    save: jest.fn(),
+    findOne: jest.fn(),
+  };
+
+  const mockRoundRepo = {
+    create: jest.fn(),
+    save: jest.fn(),
+    find: jest.fn(),
+  };
+
+  const mockMatchupRepo = {
+    create: jest.fn(),
+    save: jest.fn(),
+    find: jest.fn(),
   };
 
   const makeListQueryBuilder = (competitions: Partial<Competition>[]) => {
@@ -115,6 +138,18 @@ describe('CompetitionsService', () => {
         {
           provide: getRepositoryToken(CompetitionParticipant),
           useValue: mockParticipantsRepository,
+        },
+        {
+          provide: getRepositoryToken(CompetitionBracket),
+          useValue: mockBracketRepo,
+        },
+        {
+          provide: getRepositoryToken(BracketRound),
+          useValue: mockRoundRepo,
+        },
+        {
+          provide: getRepositoryToken(BracketMatchup),
+          useValue: mockMatchupRepo,
         },
       ],
     }).compile();
@@ -546,6 +581,74 @@ describe('CompetitionsService', () => {
 
       await expect(service.leave('comp-1', 'user-1')).rejects.toThrow(
         'You are not a participant in this competition',
+      );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Bracket generation
+  // -------------------------------------------------------------------------
+
+  describe('generateBracket', () => {
+    const mockBracketRepo = {
+      create: jest.fn(),
+      save: jest.fn(),
+      findOne: jest.fn(),
+    };
+    const mockRoundRepo = {
+      create: jest.fn(),
+      save: jest.fn(),
+      find: jest.fn(),
+    };
+    const mockMatchupRepo = {
+      create: jest.fn(),
+      save: jest.fn(),
+      find: jest.fn(),
+    };
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    it('should throw NotFoundException if competition not found', async () => {
+      mockRepository.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.generateBracket('comp-1', { metric: SeedingMetric.Score }, 'user-1'),
+      ).rejects.toThrow('Competition with ID "comp-1" not found');
+    });
+
+    it('should throw ForbiddenException if not creator', async () => {
+      mockRepository.findOne.mockResolvedValue({
+        ...mockCompetition,
+        creator: { id: 'other-user' },
+      });
+
+      await expect(
+        service.generateBracket('comp-1', { metric: SeedingMetric.Score }, 'user-1'),
+      ).rejects.toThrow('Only the creator can generate a bracket');
+    });
+
+    it('should throw BadRequestException if fewer than 2 participants', async () => {
+      mockRepository.findOne.mockResolvedValue({
+        ...mockCompetition,
+        creator: { id: 'user-1' },
+      });
+      mockBracketRepo.findOne.mockResolvedValue(null);
+      mockParticipantsRepository.find.mockResolvedValue([{ id: 'p1' }]);
+
+      await expect(
+        service.generateBracket('comp-1', { metric: SeedingMetric.Score }, 'user-1'),
+      ).rejects.toThrow('At least 2 participants');
+    });
+  });
+
+  describe('getBracket', () => {
+    it('should throw NotFoundException if no bracket exists', async () => {
+      mockBracketRepo.findOne.mockResolvedValue(null);
+
+      await expect(service.getBracket('comp-1')).rejects.toThrow(
+        'No bracket found',
       );
     });
   });

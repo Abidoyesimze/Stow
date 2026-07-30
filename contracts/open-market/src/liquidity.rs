@@ -6,7 +6,7 @@ use crate::escrow;
 use crate::market;
 use crate::storage_types::{
     DataKey, FeeTier, FeeTierConfig, LPPosition, LiquidityPool, Market, MarketFeeInfo,
-    PriceAccumulator, PriceObservation, SwapRecord, VolatilityState,
+    PriceAccumulator, PriceObservation, SwapRecord, VolatilityState, VolumeFeeConfig,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -142,6 +142,29 @@ pub fn fee_bps_for_tier(tier: &FeeTier, cfg: &FeeTierConfig) -> u32 {
     }
 }
 
+/// Select the volume-based fee tier for a market given its cumulative volume.
+/// Returns the index into `VolumeFeeConfig::tiers` and the corresponding fee bps.
+/// The last tier whose threshold is ≤ `cumulative_volume` is chosen.
+pub fn select_volume_fee_tier(
+    cumulative_volume: i128,
+    config: &VolumeFeeConfig,
+) -> (u32, u32) {
+    let mut active_idx: u32 = 0;
+    let mut active_fee_bps = config.tiers.get(0).map(|t| t.fee_bps).unwrap_or(30);
+
+    for i in 1..config.tiers.len() {
+        let entry = config.tiers.get(i).unwrap();
+        if cumulative_volume >= entry.volume_threshold {
+            active_idx = i;
+            active_fee_bps = entry.fee_bps;
+        } else {
+            break;
+        }
+    }
+
+    (active_idx, active_fee_bps)
+}
+
 fn validate_fee_tier_config(cfg: &FeeTierConfig) -> Result<(), InsightArenaError> {
     if cfg.calm_threshold_bps >= cfg.volatile_threshold_bps {
         return Err(InsightArenaError::InvalidInput);
@@ -265,20 +288,28 @@ fn update_volatility_state(
     Ok(state)
 }
 
-/// Return the current dynamic fee tier and effective swap fee for a market.
+/// Return the current dynamic fee state for a market.
+/// `effective_fee_bps` reflects the volume-based fee tier active for this
+/// market's cumulative volume. Volatility-tier info (`tier`, `volatility_ema_bps`)
+/// is provided for informational / off-chain analysis.
 pub fn get_market_fee_info(env: &Env, market_id: u64) -> Result<MarketFeeInfo, InsightArenaError> {
-    market::get_market(env, market_id)?;
+    let mkt = market::get_market(env, market_id)?;
 
     let tier_config = get_fee_tier_config(env);
     let volatility = get_volatility_state(env, market_id);
     let tier = determine_fee_tier(volatility.ema_bps, &tier_config);
-    let effective_fee_bps = fee_bps_for_tier(&tier, &tier_config);
+
+    let cfg = config::get_config(env)?;
+    let (volume_tier_index, effective_fee_bps) =
+        select_volume_fee_tier(mkt.cumulative_volume, &cfg.volume_fee_config);
 
     Ok(MarketFeeInfo {
         market_id,
         tier,
         effective_fee_bps,
         volatility_ema_bps: volatility.ema_bps,
+        volume_tier_index,
+        volume_tier_fee_bps: effective_fee_bps,
     })
 }
 
@@ -962,12 +993,17 @@ pub fn swap_outcome(
         .get(to_outcome.clone())
         .ok_or(InsightArenaError::InvalidOutcome)?;
 
-    // Fee tier is derived from volatility observed *before* this swap, so a
-    // trade cannot influence the fee rate it itself pays.
+    // ── Volume-based fee tier selection ────────────────────────────────────
+    // The fee is derived from the market's cumulative volume *before* this
+    // swap, so a trade cannot influence the fee rate it itself pays.
+    let cfg = config::get_config(env)?;
+    let volume_before = mkt.cumulative_volume;
+    let (volume_tier_before, effective_fee_bps) =
+        select_volume_fee_tier(volume_before, &cfg.volume_fee_config);
+
+    // Volatility state is still tracked (for informational purposes / TWAP).
     let tier_config = get_fee_tier_config(env);
     let volatility_before = get_volatility_state(env, market_id);
-    let tier = determine_fee_tier(volatility_before.ema_bps, &tier_config);
-    let effective_fee_bps = fee_bps_for_tier(&tier, &tier_config);
 
     let amount_out = calculate_swap_output(amount_in, from_reserve, to_reserve, effective_fee_bps)?;
 
@@ -984,6 +1020,7 @@ pub fn swap_outcome(
     // Split the fee between the protocol treasury and liquidity providers.
     // `lp_fee_share` is derived by subtraction so the two shares always sum
     // to `fee_amount` exactly, with no stroop lost or double-counted.
+    // Protocol share bps is read from the volatility-based FeeTierConfig.
     let protocol_fee_share = fee_amount
         .checked_mul(tier_config.protocol_share_bps as i128)
         .ok_or(InsightArenaError::Overflow)?
@@ -1027,7 +1064,6 @@ pub fn swap_outcome(
     // default `treasury_split_bps == 10_000`, so the entire protocol fee
     // share keeps flowing to the treasury exactly as it did before this
     // split was introduced.
-    let cfg = config::get_config(env)?;
     let treasury_amount = protocol_fee_share
         .checked_mul(cfg.treasury_split_bps as i128)
         .ok_or(InsightArenaError::Overflow)?
@@ -1054,6 +1090,26 @@ pub fn swap_outcome(
         total_lp_share,
     );
 
+    // ── Update cumulative market volume and detect tier crossing ─────────────
+    let new_volume = volume_before
+        .checked_add(amount_in)
+        .ok_or(InsightArenaError::Overflow)?;
+
+    let (volume_tier_after, _) =
+        select_volume_fee_tier(new_volume, &cfg.volume_fee_config);
+
+    if volume_tier_after > volume_tier_before {
+        emit_volume_tier_crossed(env, market_id, volume_tier_before, volume_tier_after, new_volume);
+    }
+
+    let mut mkt = mkt;
+    mkt.cumulative_volume = new_volume;
+    env.storage()
+        .persistent()
+        .set(&DataKey::Market(market_id), &mkt);
+    market::bump_market(env, market_id);
+
+    // ── Record swap with volume tier snapshot ────────────────────────────────
     let record = SwapRecord::new(
         trader,
         market_id,
@@ -1063,6 +1119,7 @@ pub fn swap_outcome(
         amount_out,
         fee_amount,
         env.ledger().timestamp(),
+        volume_tier_before,
     );
 
     let mut history: Vec<SwapRecord> = env
@@ -1078,6 +1135,19 @@ pub fn swap_outcome(
     update_pool_volume(env, market_id, amount_in);
 
     Ok(amount_out)
+}
+
+fn emit_volume_tier_crossed(
+    env: &Env,
+    market_id: u64,
+    from_tier: u32,
+    to_tier: u32,
+    cumulative_volume: i128,
+) {
+    env.events().publish(
+        (symbol_short!("vol"), symbol_short!("tier_x")),
+        (market_id, from_tier, to_tier, cumulative_volume),
+    );
 }
 
 /// Emit an event recording exactly how a swap's collected fee was split

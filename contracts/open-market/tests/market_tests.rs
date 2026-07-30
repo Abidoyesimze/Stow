@@ -1892,3 +1892,129 @@ fn market_created_event_includes_metadata_hash() {
     assert!(found, "market created event must include metadata_hash");
     assert_eq!(client.get_metadata_hash(&id), metadata_hash);
 }
+
+#[test]
+fn test_create_market_fails_exceeds_max_outcomes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = deploy(&env);
+    let creator = Address::generate(&env);
+
+    let mut params = default_params(&env);
+    params.outcomes = vec![
+        &env,
+        Symbol::new(&env, "opt1"),
+        Symbol::new(&env, "opt2"),
+        Symbol::new(&env, "opt3"),
+        Symbol::new(&env, "opt4"),
+        Symbol::new(&env, "opt5"),
+        Symbol::new(&env, "opt6"),
+        Symbol::new(&env, "opt7"),
+        Symbol::new(&env, "opt8"),
+        Symbol::new(&env, "opt9"),
+        Symbol::new(&env, "opt10"),
+        Symbol::new(&env, "opt11"),
+    ];
+
+    let result = client.try_create_market(&creator, &params);
+    assert!(matches!(result, Err(Ok(InsightArenaError::InvalidInput))));
+}
+
+#[test]
+fn test_3way_market_end_to_end() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, oracle, xlm_token) = deploy_with_token(&env);
+    let creator = Address::generate(&env);
+
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+    let user_c = Address::generate(&env);
+    let user_d = Address::generate(&env);
+
+    fund(&env, &xlm_token, &user_a, 100_000_000);
+    fund(&env, &xlm_token, &user_b, 200_000_000);
+    fund(&env, &xlm_token, &user_c, 300_000_000);
+    fund(&env, &xlm_token, &user_d, 100_000_000);
+
+    let mut params = default_params(&env);
+    params.max_stake = 500_000_000;
+    let opt_a = Symbol::new(&env, "team_a");
+    let opt_b = Symbol::new(&env, "team_b");
+    let opt_draw = Symbol::new(&env, "draw");
+    params.outcomes = vec![&env, opt_a.clone(), opt_b.clone(), opt_draw.clone()];
+    params.creator_fee_bps = 0;
+
+    let market_id = client.create_market(&creator, &params);
+    assert_eq!(market_id, 1);
+
+    client.submit_prediction(&user_a, &market_id, &opt_a, &100_000_000);
+    client.submit_prediction(&user_b, &market_id, &opt_b, &200_000_000);
+    client.submit_prediction(&user_c, &market_id, &opt_draw, &300_000_000);
+    client.submit_prediction(&user_d, &market_id, &opt_a, &100_000_000);
+
+    let market = client.get_market(&market_id);
+    assert_eq!(market.total_pool, 700_000_000);
+    assert_eq!(market.participant_count, 4);
+
+    let dist = client.get_outcome_distribution(&market_id);
+    assert_eq!(dist.len(), 3);
+
+    env.ledger().set_timestamp(params.resolution_time + 1);
+
+    client.resolve_market(&oracle, &market_id, &opt_a);
+
+    let market_resolved = client.get_market(&market_id);
+    assert!(market_resolved.is_resolved);
+    assert_eq!(market_resolved.resolved_outcome, Some(opt_a.clone()));
+
+    let payout_a = client.claim_payout(&user_a, &market_id);
+    let payout_d = client.claim_payout(&user_d, &market_id);
+
+    assert_eq!(payout_a, 343_000_000);
+    assert_eq!(payout_d, 343_000_000);
+
+    let err_b = client.try_claim_payout(&user_b, &market_id);
+    assert!(matches!(err_b, Err(Ok(InsightArenaError::InvalidOutcome))));
+}
+
+#[test]
+fn test_nway_market_5_outcomes_end_to_end() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, oracle, xlm_token) = deploy_with_token(&env);
+    let creator = Address::generate(&env);
+
+    let mut params = default_params(&env);
+    params.creator_fee_bps = 0;
+    params.outcomes = vec![
+        &env,
+        Symbol::new(&env, "opt1"),
+        Symbol::new(&env, "opt2"),
+        Symbol::new(&env, "opt3"),
+        Symbol::new(&env, "opt4"),
+        Symbol::new(&env, "opt5"),
+    ];
+
+    let market_id = client.create_market(&creator, &params);
+
+    let u1 = Address::generate(&env);
+    let u2 = Address::generate(&env);
+    fund(&env, &xlm_token, &u1, 50_000_000);
+    fund(&env, &xlm_token, &u2, 50_000_000);
+
+    let winning_outcome = Symbol::new(&env, "opt3");
+    let losing_outcome = Symbol::new(&env, "opt5");
+
+    client.submit_prediction(&u1, &market_id, &winning_outcome, &50_000_000);
+    client.submit_prediction(&u2, &market_id, &losing_outcome, &50_000_000);
+
+    env.ledger().set_timestamp(params.resolution_time + 1);
+    client.resolve_market(&oracle, &market_id, &winning_outcome);
+
+    let payout1 = client.claim_payout(&u1, &market_id);
+    assert_eq!(payout1, 98_000_000);
+
+    let err2 = client.try_claim_payout(&u2, &market_id);
+    assert!(matches!(err2, Err(Ok(InsightArenaError::InvalidOutcome))));
+}
