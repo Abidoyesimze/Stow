@@ -1,4 +1,10 @@
-import { Inject, Logger, OnModuleDestroy, forwardRef } from '@nestjs/common';
+import {
+  Inject,
+  Logger,
+  OnModuleDestroy,
+  Optional,
+  forwardRef,
+} from '@nestjs/common';
 import { AnalyticsService } from '../analytics/analytics.service';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -12,10 +18,15 @@ import {
   WebSocketServer,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
+import { OddsBroadcasterService } from './odds-broadcaster.service';
 
 interface AuthenticatedSocket extends Socket {
   userAddress?: string;
 }
+
+/** UUID v4 pattern used to validate market room subscriptions. */
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 @WebSocketGateway({
   cors: { origin: '*', credentials: true },
@@ -31,6 +42,8 @@ export class EventsGateway
   private readonly connections = new Map<string, string>(); // socketId → userAddress
   private readonly rateLimits = new Map<string, number>(); // socketId → message count
   private readonly heartbeats = new Map<string, NodeJS.Timeout>();
+  /** Tracks which market rooms each socket has subscribed to for cleanup on disconnect. */
+  private readonly socketMarkets = new Map<string, Set<string>>(); // socketId → Set<marketId>
   private readonly RATE_LIMIT = 60; // messages per minute
   private readonly RATE_WINDOW = 60_000;
 
@@ -39,6 +52,7 @@ export class EventsGateway
     private readonly configService: ConfigService,
     @Inject(forwardRef(() => AnalyticsService))
     private readonly analyticsService: AnalyticsService,
+    @Optional() private readonly oddsBroadcaster?: OddsBroadcasterService,
   ) {}
 
   async handleConnection(client: AuthenticatedSocket): Promise<void> {
@@ -106,6 +120,16 @@ export class EventsGateway
     this.rateLimits.delete(client.id);
     this.analyticsService.removeActiveSession(client.id);
     this.broadcastActiveUsers();
+
+    // Unsubscribe the socket from all market rooms it had joined.
+    const markets = this.socketMarkets.get(client.id);
+    if (markets) {
+      for (const marketId of markets) {
+        this.oddsBroadcaster?.onUnsubscribe(marketId);
+      }
+      this.socketMarkets.delete(client.id);
+    }
+
     this.logger.log(`Client disconnected: ${client.id}`);
   }
 
@@ -114,6 +138,7 @@ export class EventsGateway
       clearInterval(heartbeat);
     }
     this.heartbeats.clear();
+    this.socketMarkets.clear();
   }
 
   @SubscribeMessage('join')
@@ -194,6 +219,86 @@ export class EventsGateway
     if (!heartbeat) return;
     clearInterval(heartbeat);
     this.heartbeats.delete(socketId);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Live odds subscription handlers (#1361)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Join a per-market odds room.
+   *
+   * Client sends: `{ event: 'subscribe:market', data: '<market-uuid>' }`
+   * Server responds with: `{ event: 'subscribed:market', data: { market_id } }`
+   * and starts delivering `odds:update` events to the room.
+   */
+  @SubscribeMessage('subscribe:market')
+  async handleSubscribeMarket(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() marketId: string,
+  ): Promise<void> {
+    if (!this.checkRateLimit(client.id)) {
+      client.emit('error', { message: 'Rate limit exceeded' });
+      client.disconnect();
+      return;
+    }
+
+    if (!marketId || !UUID_RE.test(marketId)) {
+      client.emit('error', { message: 'Invalid market id' });
+      return;
+    }
+
+    const room = `market:${marketId}`;
+    await client.join(room);
+
+    // Track this subscription on the socket for disconnect cleanup.
+    if (!this.socketMarkets.has(client.id)) {
+      this.socketMarkets.set(client.id, new Set());
+    }
+    const markets = this.socketMarkets.get(client.id)!;
+
+    // Only register with the broadcaster once per socket per market.
+    if (!markets.has(marketId)) {
+      markets.add(marketId);
+      this.oddsBroadcaster?.onSubscribe(marketId);
+    }
+
+    client.emit('subscribed:market', { market_id: marketId });
+    this.logger.debug(`${client.id} subscribed to market:${marketId}`);
+    this.trackActivity(client);
+  }
+
+  /**
+   * Leave a per-market odds room.
+   *
+   * Client sends: `{ event: 'unsubscribe:market', data: '<market-uuid>' }`
+   * Server responds with: `{ event: 'unsubscribed:market', data: { market_id } }`
+   */
+  @SubscribeMessage('unsubscribe:market')
+  async handleUnsubscribeMarket(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() marketId: string,
+  ): Promise<void> {
+    if (!marketId || !UUID_RE.test(marketId)) {
+      client.emit('error', { message: 'Invalid market id' });
+      return;
+    }
+
+    const room = `market:${marketId}`;
+    await client.leave(room);
+
+    const markets = this.socketMarkets.get(client.id);
+    if (markets?.has(marketId)) {
+      markets.delete(marketId);
+      this.oddsBroadcaster?.onUnsubscribe(marketId);
+      if (markets.size === 0) {
+        this.socketMarkets.delete(client.id);
+      }
+    }
+
+    client.emit('unsubscribed:market', { market_id: marketId });
+    this.logger.debug(`${client.id} unsubscribed from market:${marketId}`);
+    this.trackActivity(client);
   }
 
   getServer(): Server {
