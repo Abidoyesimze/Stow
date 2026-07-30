@@ -23,10 +23,7 @@ import {
   UserMarketsSortOrder,
 } from './dto/list-user-markets.dto';
 import { UserBookmark } from '../markets/entities/user-bookmark.entity';
-import {
-  ReferralStatus,
-  UserReferral,
-} from './entities/user-referral.entity';
+import { ReferralStatus, UserReferral } from './entities/user-referral.entity';
 
 describe('UsersService', () => {
   let service: UsersService;
@@ -722,9 +719,9 @@ describe('UsersService', () => {
     });
 
     it('rejects self-referral', async () => {
-      await expect(
-        service.claimReferral('user-1', 'user-1'),
-      ).rejects.toThrow(BadRequestException);
+      await expect(service.claimReferral('user-1', 'user-1')).rejects.toThrow(
+        BadRequestException,
+      );
       expect(repository.findOneBy).not.toHaveBeenCalled();
     });
 

@@ -32,6 +32,11 @@ import { OracleReliabilityService } from './oracle-reliability.service';
     SubmissionHistoryService,
     OracleReliabilityService,
   ],
-  exports: [OracleService, WebhookService, SubmissionHistoryService, OracleReliabilityService],
+  exports: [
+    OracleService,
+    WebhookService,
+    SubmissionHistoryService,
+    OracleReliabilityService,
+  ],
 })
 export class OracleModule {}

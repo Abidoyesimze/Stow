@@ -337,7 +337,7 @@ describe('SeasonsService', () => {
       top_winner: null,
       on_chain_season_id: null,
       soroban_tx_hash: null,
-        rollover_processed_at: null,
+      rollover_processed_at: null,
       created_at: new Date(),
       updated_at: new Date(),
     };
@@ -626,13 +626,15 @@ describe('SeasonsService', () => {
         service as unknown as { dataSource: { createQueryRunner: jest.Mock } }
       ).dataSource.createQueryRunner = jest.fn().mockReturnValue(qr);
 
-      seasonsRepository.findOne = jest.fn().mockImplementation(
-        async (opts: { where?: { id?: string; season_number?: number } }) => {
-          if (opts?.where?.id === 'end-1') return finalized;
-          if (opts?.where?.season_number === 2) return nextSeason;
-          return null;
-        },
-      );
+      seasonsRepository.findOne = jest
+        .fn()
+        .mockImplementation(
+          async (opts: { where?: { id?: string; season_number?: number } }) => {
+            if (opts?.where?.id === 'end-1') return finalized;
+            if (opts?.where?.season_number === 2) return nextSeason;
+            return null;
+          },
+        );
 
       seasonsRepository.save = jest
         .fn()
@@ -683,5 +685,4 @@ describe('SeasonsService', () => {
       expect(processed.rollover_processed_at).toBeTruthy();
     });
   });
-
 });

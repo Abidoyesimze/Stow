@@ -13,9 +13,7 @@ import {
   ExternalMatchResult,
   ExternalResultStatus,
 } from './entities/external-match-result.entity';
-import {
-  EXTERNAL_RESULT_FEED_CLIENT,
-} from './external-result-feed.client';
+import { EXTERNAL_RESULT_FEED_CLIENT } from './external-result-feed.client';
 import type {
   ExternalResultFeedClient,
   ExternalMatchResultPayload,
@@ -43,7 +41,10 @@ export class ExternalResultIngestionService
       'MATCH_RESULTS_POLL_INTERVAL_MS',
       60000,
     );
-    if (interval > 0 && this.configService.get<string>('MATCH_RESULTS_FEED_URL')) {
+    if (
+      interval > 0 &&
+      this.configService.get<string>('MATCH_RESULTS_FEED_URL')
+    ) {
       this.timer = setInterval(() => void this.ingest(), interval);
     }
   }

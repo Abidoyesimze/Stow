@@ -272,7 +272,7 @@ export class SorobanService {
         let attempts = 0;
         while (
           statusResponse.status ===
-          SorobanRpc.Api.GetTransactionStatus.NOT_FOUND &&
+            SorobanRpc.Api.GetTransactionStatus.NOT_FOUND &&
           attempts < 10
         ) {
           await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -541,7 +541,7 @@ export class SorobanService {
       let attempts = 0;
       while (
         statusResponse.status ===
-        SorobanRpc.Api.GetTransactionStatus.NOT_FOUND &&
+          SorobanRpc.Api.GetTransactionStatus.NOT_FOUND &&
         attempts < 10
       ) {
         await new Promise((resolve) => setTimeout(resolve, 2000));

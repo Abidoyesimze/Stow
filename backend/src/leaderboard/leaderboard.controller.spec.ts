@@ -270,9 +270,7 @@ describe('LeaderboardController', () => {
         limit: 20,
         message: 'No snapshots found on or before 2026-01-01.',
       };
-      jest
-        .spyOn(service, 'getSnapshots')
-        .mockResolvedValue(mockEmptyResponse);
+      jest.spyOn(service, 'getSnapshots').mockResolvedValue(mockEmptyResponse);
 
       const result = await controller.getSnapshots({ date: '2026-01-01' });
 

@@ -24,4 +24,4 @@ import { Market } from '../markets/entities/market.entity';
   providers: [PredictionsService, SlippageCheckerService],
   exports: [PredictionsService],
 })
-export class PredictionsModule { }
+export class PredictionsModule {}

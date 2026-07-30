@@ -140,7 +140,10 @@ export class OracleController {
   @UseGuards(OracleAuthGuard)
   @ApiSecurity('api-key')
   @ApiOperation({ summary: 'Get reliability scores for all oracle sources' })
-  @ApiResponse({ status: 200, description: 'List of source reliability scores' })
+  @ApiResponse({
+    status: 200,
+    description: 'List of source reliability scores',
+  })
   @ApiResponse({ status: 401, description: 'Unauthorized - invalid API key' })
   async getSourceReliability() {
     return this.reliabilityService.getScores();

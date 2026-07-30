@@ -403,7 +403,12 @@ describe('PredictionsService', () => {
       mockMarketsRepo.findOne.mockResolvedValue(market);
       mockPredictionsRepo.findOne.mockResolvedValue(null);
       mockSlippageChecker.checkSlippage.mockImplementation(() => {
-        throw new SlippageExceededException('4000000', '5000000', '0', '2000000');
+        throw new SlippageExceededException(
+          '4000000',
+          '5000000',
+          '0',
+          '2000000',
+        );
       });
 
       await expect(
@@ -426,7 +431,12 @@ describe('PredictionsService', () => {
       mockMarketsRepo.findOne.mockResolvedValue(market);
       mockPredictionsRepo.findOne.mockResolvedValue(null);
       mockSlippageChecker.checkSlippage.mockImplementation(() => {
-        throw new SlippageExceededException('0', '5000000', '3000000', '2000000');
+        throw new SlippageExceededException(
+          '0',
+          '5000000',
+          '3000000',
+          '2000000',
+        );
       });
 
       await expect(
@@ -1434,9 +1444,9 @@ describe('PredictionsService', () => {
       const result = await service.evaluateFraudSignalsForUser('user-1');
 
       expect(Array.isArray(result)).toBe(true);
-      expect(
-        result.every((flag) => flag.status === FraudFlagStatus.OPEN),
-      ).toBe(true);
+      expect(result.every((flag) => flag.status === FraudFlagStatus.OPEN)).toBe(
+        true,
+      );
     });
   });
 

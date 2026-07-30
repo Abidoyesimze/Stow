@@ -614,7 +614,11 @@ describe('CompetitionsService', () => {
       mockRepository.findOne.mockResolvedValue(null);
 
       await expect(
-        service.generateBracket('comp-1', { metric: SeedingMetric.Score }, 'user-1'),
+        service.generateBracket(
+          'comp-1',
+          { metric: SeedingMetric.Score },
+          'user-1',
+        ),
       ).rejects.toThrow('Competition with ID "comp-1" not found');
     });
 
@@ -625,7 +629,11 @@ describe('CompetitionsService', () => {
       });
 
       await expect(
-        service.generateBracket('comp-1', { metric: SeedingMetric.Score }, 'user-1'),
+        service.generateBracket(
+          'comp-1',
+          { metric: SeedingMetric.Score },
+          'user-1',
+        ),
       ).rejects.toThrow('Only the creator can generate a bracket');
     });
 
@@ -638,7 +646,11 @@ describe('CompetitionsService', () => {
       mockParticipantsRepository.find.mockResolvedValue([{ id: 'p1' }]);
 
       await expect(
-        service.generateBracket('comp-1', { metric: SeedingMetric.Score }, 'user-1'),
+        service.generateBracket(
+          'comp-1',
+          { metric: SeedingMetric.Score },
+          'user-1',
+        ),
       ).rejects.toThrow('At least 2 participants');
     });
   });

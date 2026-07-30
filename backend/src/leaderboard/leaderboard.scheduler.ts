@@ -43,7 +43,10 @@ export class LeaderboardScheduler implements OnModuleInit {
     this.logger.log('Hourly leaderboard recalculation triggered');
     try {
       await this.leaderboardService.recalculateRanks();
-      await this.cacheWarmingService.warmLeaderboard({ warmed: [], failed: [] });
+      await this.cacheWarmingService.warmLeaderboard({
+        warmed: [],
+        failed: [],
+      });
     } catch (err) {
       this.logger.error('Leaderboard recalculation failed', err);
     }

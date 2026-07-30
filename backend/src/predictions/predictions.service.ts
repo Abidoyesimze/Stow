@@ -31,6 +31,7 @@ import {
   PredictionWithStatus,
   PaginatedMyPredictionsResponse,
 } from './dto/list-my-predictions.dto';
+import { PnlQueryDto, PnlResponseDto } from './dto/pnl-query.dto';
 import { ExportPredictionsDto } from './dto/export-predictions.dto';
 import { User } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
@@ -45,6 +46,16 @@ import {
 const STROOPS_PER_XLM = 10_000_000n;
 
 function stroopsToXlm(stroops: bigint): number {
+  return Number(stroops) / Number(STROOPS_PER_XLM);
+}
+
+/**
+ * Same conversion but accepts negative bigint values, preserving the sign.
+ */
+function signedStroopsToXlm(stroops: bigint): number {
+  if (stroops < 0n) {
+    return -(Number(-stroops) / Number(STROOPS_PER_XLM));
+  }
   return Number(stroops) / Number(STROOPS_PER_XLM);
 }
 
@@ -66,7 +77,7 @@ export class PredictionsService {
     private readonly dataSource: DataSource,
     private readonly configService: ConfigService,
     private readonly usersService: UsersService,
-  ) { }
+  ) {}
 
   /**
    * Submit a prediction for a market with optional slippage protection.
@@ -156,9 +167,9 @@ export class PredictionsService {
           participant_count: () => 'participant_count + 1',
           ...(BigInt(dto.stake_amount_stroops) !== 0n
             ? {
-              total_pool_stroops: () =>
-                'CAST(total_pool_stroops AS BIGINT) + :stakeAmount',
-            }
+                total_pool_stroops: () =>
+                  'CAST(total_pool_stroops AS BIGINT) + :stakeAmount',
+              }
             : {}),
         })
         .where('id = :id', { id: market.id })
@@ -175,9 +186,9 @@ export class PredictionsService {
           total_predictions: () => 'total_predictions + 1',
           ...(BigInt(dto.stake_amount_stroops) !== 0n
             ? {
-              total_staked_stroops: () =>
-                'CAST(total_staked_stroops AS BIGINT) + :stakeAmount',
-            }
+                total_staked_stroops: () =>
+                  'CAST(total_staked_stroops AS BIGINT) + :stakeAmount',
+              }
             : {}),
         })
         .where('id = :id', { id: user.id })
@@ -575,21 +586,21 @@ export class PredictionsService {
         const stream = await qb.stream();
 
         for await (const prediction of stream) {
-          const market = (prediction as any).market ?? {};
+          const market = prediction.market ?? {};
           const status = computeExportStatus(prediction, market);
-          const note = ((prediction as any).note ?? '').replace(/"/g, '""');
+          const note = (prediction.note ?? '').replace(/"/g, '""');
           const title = (market.title ?? '').replace(/"/g, '""');
           const row = [
-            (prediction as any).id,
+            prediction.id,
             `"${title}"`,
-            `"${(prediction as any).chosen_outcome}"`,
-            (prediction as any).stake_amount_stroops,
+            `"${prediction.chosen_outcome}"`,
+            prediction.stake_amount_stroops,
             status,
-            (prediction as any).payout_amount_stroops ?? '0',
+            prediction.payout_amount_stroops ?? '0',
             `"${note}"`,
-            (prediction as any).submitted_at instanceof Date
-              ? (prediction as any).submitted_at.toISOString()
-              : String((prediction as any).submitted_at),
+            prediction.submitted_at instanceof Date
+              ? prediction.submitted_at.toISOString()
+              : String(prediction.submitted_at),
           ].join(',');
 
           readable.push(row + '\n');
@@ -654,10 +665,7 @@ export class PredictionsService {
       'FRAUD_TIMING_CLUSTER_WINDOW_SECONDS',
       30,
     );
-    const minRatio = this.getFloatConfig(
-      'FRAUD_TIMING_CLUSTER_MIN_RATIO',
-      0.6,
-    );
+    const minRatio = this.getFloatConfig('FRAUD_TIMING_CLUSTER_MIN_RATIO', 0.6);
 
     const predictions = await this.predictionsRepository.find({
       where: { user: { id: userId } },
@@ -708,10 +716,7 @@ export class PredictionsService {
   private async computeCounterpartyConcentrationSignal(
     userId: string,
   ): Promise<FraudSignalResult | null> {
-    const minMarkets = this.getIntConfig(
-      'FRAUD_COUNTERPARTY_MIN_MARKETS',
-      5,
-    );
+    const minMarkets = this.getIntConfig('FRAUD_COUNTERPARTY_MIN_MARKETS', 5);
     const hhiThreshold = this.getFloatConfig(
       'FRAUD_COUNTERPARTY_HHI_THRESHOLD',
       0.5,
@@ -820,6 +825,182 @@ export class PredictionsService {
     );
 
     return saved;
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // P&L Calculation
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Compute realized and unrealized P&L for a user.
+   *
+   * Realized P&L  — settled (resolved or cancelled) markets only.
+   *   Won:      payout_amount_stroops - stake_amount_stroops
+   *   Lost:     0 - stake_amount_stroops  (stake is gone)
+   *   Cancelled: 0 (stake returned by protocol; treated as break-even here)
+   *
+   * Unrealized P&L — open (unresolved, uncancelled) markets.
+   *   Implied fair value = stake × (total_pool / stake_for_chosen_outcome)
+   *   Unrealized P&L    = implied_value - stake
+   *
+   *   When stake_for_chosen_outcome is 0 (shouldn't happen but guard it),
+   *   we fall back to 0 unrealized value.
+   *
+   * The optional time filter applies to `prediction.submitted_at` so users
+   * can scope the report to a specific window.
+   *
+   * When `breakdown=true` the response also includes a per-market array whose
+   * values sum exactly to the aggregate totals (verified by the caller and
+   * by our unit tests).
+   */
+  async getPnl(user: User, dto: PnlQueryDto): Promise<PnlResponseDto> {
+    const qb = this.predictionsRepository
+      .createQueryBuilder('prediction')
+      .leftJoinAndSelect('prediction.market', 'market')
+      .where('prediction.userId = :userId', { userId: user.id });
+
+    if (dto.from) {
+      qb.andWhere('prediction.submitted_at >= :from', {
+        from: new Date(dto.from),
+      });
+    }
+    if (dto.to) {
+      qb.andWhere('prediction.submitted_at <= :to', {
+        to: new Date(dto.to),
+      });
+    }
+
+    const predictions = await qb.getMany();
+
+    // We need per-outcome stake totals for every open market the user is in,
+    // so we can compute implied odds. Fetch all predictions for those markets
+    // (not just the user's) in a single query.
+    const openMarketIds = [
+      ...new Set(
+        predictions
+          .filter((p) => !p.market.is_resolved && !p.market.is_cancelled)
+          .map((p) => p.market.id),
+      ),
+    ];
+
+    // Map: marketId -> outcome -> total staked (stroops as bigint)
+    const marketOutcomeStake = new Map<string, Map<string, bigint>>();
+
+    if (openMarketIds.length > 0) {
+      const rows: Array<{ marketId: string; outcome: string; total: string }> =
+        await this.predictionsRepository
+          .createQueryBuilder('p')
+          .select('p.marketId', 'marketId')
+          .addSelect('p.chosen_outcome', 'outcome')
+          .addSelect('SUM(CAST(p.stake_amount_stroops AS BIGINT))', 'total')
+          .where('p.marketId IN (:...openMarketIds)', { openMarketIds })
+          .groupBy('p.marketId, p.chosen_outcome')
+          .getRawMany();
+
+      for (const row of rows) {
+        if (!marketOutcomeStake.has(row.marketId)) {
+          marketOutcomeStake.set(row.marketId, new Map());
+        }
+        marketOutcomeStake
+          .get(row.marketId)!
+          .set(row.outcome, BigInt(row.total));
+      }
+    }
+
+    // Aggregate
+    let totalRealizedStroops = 0n;
+    let totalUnrealizedStroops = 0n;
+    let totalStakedStroops = 0n;
+
+    const perMarketMap = new Map<
+      string,
+      {
+        market_id: string;
+        market_title: string;
+        realizedStroops: bigint;
+        unrealizedStroops: bigint;
+        stakedStroops: bigint;
+      }
+    >();
+
+    for (const prediction of predictions) {
+      const market = prediction.market;
+      const stake = BigInt(prediction.stake_amount_stroops);
+      totalStakedStroops += stake;
+
+      let realizedStroops = 0n;
+      let unrealizedStroops = 0n;
+
+      if (market.is_cancelled) {
+        // Protocol returns the stake; treat as break-even (0 P&L)
+        realizedStroops = 0n;
+      } else if (market.is_resolved) {
+        // Settled market
+        if (market.resolved_outcome === prediction.chosen_outcome) {
+          // Won: payout - stake
+          const payout = BigInt(prediction.payout_amount_stroops ?? '0');
+          realizedStroops = payout - stake;
+        } else {
+          // Lost: -stake
+          realizedStroops = -stake;
+        }
+      } else {
+        // Open position — compute implied value from pool-weighted odds
+        const outcomeStake = marketOutcomeStake.get(market.id);
+        const chosenOutcomeStake =
+          outcomeStake?.get(prediction.chosen_outcome) ?? 0n;
+        const totalPool = BigInt(market.total_pool_stroops ?? '0');
+
+        if (chosenOutcomeStake > 0n && totalPool > 0n) {
+          // implied_value = stake * (total_pool / chosen_outcome_pool)
+          // Using integer arithmetic with a precision multiplier to avoid
+          // floating-point loss before the final XLM conversion.
+          const PRECISION = 1_000_000n;
+          const impliedValueStroops =
+            (stake * totalPool * PRECISION) / chosenOutcomeStake / PRECISION;
+          unrealizedStroops = impliedValueStroops - stake;
+        }
+        // else: can't compute odds; leave unrealized at 0
+      }
+
+      totalRealizedStroops += realizedStroops;
+      totalUnrealizedStroops += unrealizedStroops;
+
+      if (dto.breakdown) {
+        const existing = perMarketMap.get(market.id);
+        if (existing) {
+          existing.realizedStroops += realizedStroops;
+          existing.unrealizedStroops += unrealizedStroops;
+          existing.stakedStroops += stake;
+        } else {
+          perMarketMap.set(market.id, {
+            market_id: market.id,
+            market_title: market.title,
+            realizedStroops,
+            unrealizedStroops,
+            stakedStroops: stake,
+          });
+        }
+      }
+    }
+
+    const result: PnlResponseDto = {
+      realized_pnl_xlm: signedStroopsToXlm(totalRealizedStroops),
+      unrealized_pnl_xlm: signedStroopsToXlm(totalUnrealizedStroops),
+      total_staked_xlm: stroopsToXlm(totalStakedStroops),
+    };
+
+    if (dto.breakdown) {
+      result.per_market = [...perMarketMap.values()].map((entry) => ({
+        market_id: entry.market_id,
+        market_title: entry.market_title,
+        realized_pnl_xlm: signedStroopsToXlm(entry.realizedStroops),
+        unrealized_pnl_xlm: signedStroopsToXlm(entry.unrealizedStroops),
+        staked_xlm: stroopsToXlm(entry.stakedStroops),
+      }));
+    }
+
+    return result;
   }
 
   private getIntConfig(key: string, fallback: number): number {

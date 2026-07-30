@@ -194,8 +194,7 @@ export class NotificationsController {
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary:
-      'Create or update a per-category notification preference',
+    summary: 'Create or update a per-category notification preference',
     description:
       'Set in_app, email, and/or push toggles for a specific notification category. ' +
       'Defaults: in_app=true, email=true, push=false.',

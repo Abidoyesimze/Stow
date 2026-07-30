@@ -16,10 +16,7 @@ import {
 import { User } from './entities/user.entity';
 import { UserPreferences } from './entities/user-preferences.entity';
 import { UserFollow } from './entities/user-follow.entity';
-import {
-  ReferralStatus,
-  UserReferral,
-} from './entities/user-referral.entity';
+import { ReferralStatus, UserReferral } from './entities/user-referral.entity';
 import {
   ClaimReferralResponseDto,
   MyReferralsResponseDto,

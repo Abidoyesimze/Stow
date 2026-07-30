@@ -36,7 +36,9 @@ describe('NotificationsController', () => {
             markAllAsRead: jest.fn().mockResolvedValue({ unreadCount: 0 }),
             markAllAsUnread: jest.fn().mockResolvedValue({ unreadCount: 0 }),
             markMultipleAsRead: jest.fn().mockResolvedValue({ unreadCount: 0 }),
-            markMultipleAsUnread: jest.fn().mockResolvedValue({ unreadCount: 0 }),
+            markMultipleAsUnread: jest
+              .fn()
+              .mockResolvedValue({ unreadCount: 0 }),
             remove: jest.fn(),
           },
         },
@@ -180,10 +182,7 @@ describe('NotificationsController', () => {
         .mockResolvedValue({ unreadCount: 3 });
 
       const dto = { notificationIds: [1, 2, 3] };
-      const result = await controller.markMultipleAsRead(
-        mockUser as User,
-        dto,
-      );
+      const result = await controller.markMultipleAsRead(mockUser as User, dto);
 
       expect(spy).toHaveBeenCalledWith(
         'GBRPYHIL2CI3WHZDTOOQFC6EB4RRJC3XNRBF7XN',
@@ -198,10 +197,7 @@ describe('NotificationsController', () => {
         .mockResolvedValue({ unreadCount: 5 });
 
       const dto = { notificationIds: [] };
-      const result = await controller.markMultipleAsRead(
-        mockUser as User,
-        dto,
-      );
+      const result = await controller.markMultipleAsRead(mockUser as User, dto);
 
       expect(spy).toHaveBeenCalledWith(
         'GBRPYHIL2CI3WHZDTOOQFC6EB4RRJC3XNRBF7XN',

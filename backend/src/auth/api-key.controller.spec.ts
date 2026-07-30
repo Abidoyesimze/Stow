@@ -35,7 +35,10 @@ describe('ApiKeyController', () => {
   describe('create', () => {
     it('should create an API key with scopes', async () => {
       const mockUser = { id: 'user123' } as User;
-      const dto: CreateApiKeyDto = { name: 'Test Key', scopes: ['read', 'write'] };
+      const dto: CreateApiKeyDto = {
+        name: 'Test Key',
+        scopes: ['read', 'write'],
+      };
       const expectedResponse = {
         id: 'key1',
         name: 'Test Key',

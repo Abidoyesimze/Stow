@@ -1,8 +1,6 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
-export class CreateCompetitionBracket1777000000000
-  implements MigrationInterface
-{
+export class CreateCompetitionBracket1777000000000 implements MigrationInterface {
   name = 'CreateCompetitionBracket1777000000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
@@ -84,20 +82,14 @@ export class CreateCompetitionBracket1777000000000
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(
-      `DROP INDEX "IDX_bracket_matchups_round_match"`,
-    );
+    await queryRunner.query(`DROP INDEX "IDX_bracket_matchups_round_match"`);
     await queryRunner.query(`DROP TABLE "bracket_matchups"`);
-    await queryRunner.query(
-      `DROP INDEX "IDX_bracket_rounds_bracket_round"`,
-    );
+    await queryRunner.query(`DROP INDEX "IDX_bracket_rounds_bracket_round"`);
     await queryRunner.query(`DROP TABLE "bracket_rounds"`);
     await queryRunner.query(
       `DROP INDEX "IDX_competition_brackets_competition_id"`,
     );
     await queryRunner.query(`DROP TABLE "competition_brackets"`);
-    await queryRunner.query(
-      `DROP TYPE "competition_brackets_status_enum"`,
-    );
+    await queryRunner.query(`DROP TYPE "competition_brackets_status_enum"`);
   }
 }
