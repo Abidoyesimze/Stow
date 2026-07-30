@@ -175,6 +175,11 @@ class EnvironmentVariables {
   @IsOptional()
   @IsNumber()
   MATCH_RESULTS_POLL_INTERVAL_MS?: number;
+
+  // Live odds WebSocket channel throttle (#1361)
+  @IsOptional()
+  @IsNumber()
+  ODDS_THROTTLE_MS?: number;
 }
 
 export function validate(config: Record<string, unknown>) {
