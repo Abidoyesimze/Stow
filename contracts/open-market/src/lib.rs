@@ -540,6 +540,48 @@ impl InsightArenaContract {
         prediction::transfer_prediction(&env, market_id, from, to, shares)
     }
 
+    /// Withdraw part of an open position before market lock time.
+    ///
+    /// Allows a predictor to reduce exposure if conviction changes, improving
+    /// capital efficiency. An early-exit fee is deducted and redistributed
+    /// pro-rata to remaining participants.
+    ///
+    /// # Arguments
+    /// - `predictor`: Address withdrawing the position (must authorize)
+    /// - `market_id`: The market ID
+    /// - `withdrawal_amount`: Amount to withdraw (stroops)
+    ///
+    /// # Returns
+    /// - `(refund_amount, fee_amount)`: Tuple of (amount to be refunded, fee deducted)
+    ///   where `refund_amount + fee_amount = withdrawal_amount`
+    ///
+    /// # Errors
+    /// - `WithdrawalAfterLockTime`: Attempted withdrawal after market.end_time
+    /// - `InvalidWithdrawalAmount`: Amount is zero or negative
+    /// - `WithdrawalExceedsStake`: Attempting to withdraw more than current stake
+    /// - `MarketNotFound`, `PredictionNotFound`: Market or position doesn't exist
+    /// - `MarketAlreadyResolved`, `MarketAlreadyCancelled`: Market state doesn't allow withdrawal
+    pub fn withdraw_position(
+        env: Env,
+        predictor: Address,
+        market_id: u64,
+        withdrawal_amount: i128,
+    ) -> Result<(i128, i128), InsightArenaError> {
+        prediction::withdraw_position(&env, predictor, market_id, withdrawal_amount)
+    }
+
+    /// Estimate early-exit fee and refund for a given withdrawal amount.
+    /// Pure view function; does not modify state.
+    ///
+    /// Returns `(refund_amount, fee_amount)` where fee is calculated from the
+    /// current `Config::early_exit_fee_bps`.
+    pub fn get_early_exit_fee_estimate(
+        env: Env,
+        withdrawal_amount: i128,
+    ) -> Result<(i128, i128), InsightArenaError> {
+        prediction::get_early_exit_fee_estimate(&env, withdrawal_amount)
+    }
+
     /// Return the stored [`Prediction`] for a given `(market_id, predictor)` pair.
     pub fn get_prediction(
         env: Env,
@@ -794,6 +836,19 @@ impl InsightArenaContract {
         new_max: u32,
     ) -> Result<(), InsightArenaError> {
         config::set_max_outcomes(&env, admin, new_max)
+    }
+
+    /// Update the early-exit fee rate (bps) applied to partial position withdrawals.
+    /// Caller must be the current admin. Default is 500 bps (5%).
+    ///
+    /// The fee is deducted from withdrawal amounts and redistributed pro-rata
+    /// to remaining participants, improving liquidity for those who stay.
+    pub fn set_early_exit_fee_bps(
+        env: Env,
+        admin: Address,
+        new_fee_bps: u32,
+    ) -> Result<(), InsightArenaError> {
+        config::set_early_exit_fee_bps(&env, admin, new_fee_bps)
     }
 
     /// Set a per-market override for the maximum liquidity a single
