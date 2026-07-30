@@ -51,14 +51,17 @@ import { PnlQueryDto, PnlResponseDto } from './dto/pnl-query.dto';
 @ApiBearerAuth()
 @Controller('predictions')
 export class PredictionsController {
-  constructor(private readonly predictionsService: PredictionsService) { }
+  constructor(private readonly predictionsService: PredictionsService) {}
 
   @Post()
   @UseGuards(BanGuard)
   @Idempotent()
   @ThrottleTier('write')
   @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({ summary: 'Submit a prediction on a market with optional slippage protection' })
+  @ApiOperation({
+    summary:
+      'Submit a prediction on a market with optional slippage protection',
+  })
   @ApiResponse({
     status: 201,
     description: 'Prediction submitted with realized price and shares',
@@ -153,11 +156,13 @@ export class PredictionsController {
     @CurrentUser() user: User,
   ): Promise<PnlResponseDto> {
     return this.predictionsService.getPnl(user, query);
+  }
+
   @Get('export')
   @ThrottleTier('read')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Export the authenticated user\'s prediction history as CSV',
+    summary: "Export the authenticated user's prediction history as CSV",
   })
   @ApiResponse({
     status: 200,

@@ -31,11 +31,7 @@ import {
   PredictionWithStatus,
   PaginatedMyPredictionsResponse,
 } from './dto/list-my-predictions.dto';
-import {
-  PnlQueryDto,
-  MarketPnlEntry,
-  PnlResponseDto,
-} from './dto/pnl-query.dto';
+import { PnlQueryDto, PnlResponseDto } from './dto/pnl-query.dto';
 import { ExportPredictionsDto } from './dto/export-predictions.dto';
 import { User } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
@@ -590,21 +586,21 @@ export class PredictionsService {
         const stream = await qb.stream();
 
         for await (const prediction of stream) {
-          const market = (prediction as any).market ?? {};
+          const market = prediction.market ?? {};
           const status = computeExportStatus(prediction, market);
-          const note = ((prediction as any).note ?? '').replace(/"/g, '""');
+          const note = (prediction.note ?? '').replace(/"/g, '""');
           const title = (market.title ?? '').replace(/"/g, '""');
           const row = [
-            (prediction as any).id,
+            prediction.id,
             `"${title}"`,
-            `"${(prediction as any).chosen_outcome}"`,
-            (prediction as any).stake_amount_stroops,
+            `"${prediction.chosen_outcome}"`,
+            prediction.stake_amount_stroops,
             status,
-            (prediction as any).payout_amount_stroops ?? '0',
+            prediction.payout_amount_stroops ?? '0',
             `"${note}"`,
-            (prediction as any).submitted_at instanceof Date
-              ? (prediction as any).submitted_at.toISOString()
-              : String((prediction as any).submitted_at),
+            prediction.submitted_at instanceof Date
+              ? prediction.submitted_at.toISOString()
+              : String(prediction.submitted_at),
           ].join(',');
 
           readable.push(row + '\n');
