@@ -41,6 +41,7 @@ import {
   ClaimAllRewardsResponseDto,
   RewardsSummaryDto,
 } from './dto/rewards-summary.dto';
+import { PnlQueryDto, PnlResponseDto } from './dto/pnl-query.dto';
 
 @ApiTags('Predictions')
 @ApiBearerAuth()
@@ -124,6 +125,27 @@ export class PredictionsController {
     @CurrentUser() user: User,
   ): Promise<ClaimAllRewardsResponseDto> {
     return this.predictionsService.claimAllRewards(user);
+  }
+
+  @Get('pnl')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: "Get the authenticated user's realized and unrealized P&L",
+    description:
+      'Returns realized P&L (from settled predictions) and unrealized P&L ' +
+      '(from open positions at current implied odds). Supports time filtering ' +
+      'via `from`/`to` and an optional per-market breakdown via `breakdown=true`.',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Aggregate realized/unrealized P&L, with an optional per-market breakdown',
+  })
+  async getPnl(
+    @Query() query: PnlQueryDto,
+    @CurrentUser() user: User,
+  ): Promise<PnlResponseDto> {
+    return this.predictionsService.getPnl(user, query);
   }
 
   @Get(':id')
