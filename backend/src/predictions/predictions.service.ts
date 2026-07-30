@@ -81,7 +81,7 @@ export class PredictionsService {
     private readonly dataSource: DataSource,
     private readonly configService: ConfigService,
     private readonly usersService: UsersService,
-  ) { }
+  ) {}
 
   /**
    * Submit a prediction for a market with optional slippage protection.
@@ -171,9 +171,9 @@ export class PredictionsService {
           participant_count: () => 'participant_count + 1',
           ...(BigInt(dto.stake_amount_stroops) !== 0n
             ? {
-              total_pool_stroops: () =>
-                'CAST(total_pool_stroops AS BIGINT) + :stakeAmount',
-            }
+                total_pool_stroops: () =>
+                  'CAST(total_pool_stroops AS BIGINT) + :stakeAmount',
+              }
             : {}),
         })
         .where('id = :id', { id: market.id })
@@ -190,9 +190,9 @@ export class PredictionsService {
           total_predictions: () => 'total_predictions + 1',
           ...(BigInt(dto.stake_amount_stroops) !== 0n
             ? {
-              total_staked_stroops: () =>
-                'CAST(total_staked_stroops AS BIGINT) + :stakeAmount',
-            }
+                total_staked_stroops: () =>
+                  'CAST(total_staked_stroops AS BIGINT) + :stakeAmount',
+              }
             : {}),
         })
         .where('id = :id', { id: user.id })
@@ -669,10 +669,7 @@ export class PredictionsService {
       'FRAUD_TIMING_CLUSTER_WINDOW_SECONDS',
       30,
     );
-    const minRatio = this.getFloatConfig(
-      'FRAUD_TIMING_CLUSTER_MIN_RATIO',
-      0.6,
-    );
+    const minRatio = this.getFloatConfig('FRAUD_TIMING_CLUSTER_MIN_RATIO', 0.6);
 
     const predictions = await this.predictionsRepository.find({
       where: { user: { id: userId } },
@@ -723,10 +720,7 @@ export class PredictionsService {
   private async computeCounterpartyConcentrationSignal(
     userId: string,
   ): Promise<FraudSignalResult | null> {
-    const minMarkets = this.getIntConfig(
-      'FRAUD_COUNTERPARTY_MIN_MARKETS',
-      5,
-    );
+    const minMarkets = this.getIntConfig('FRAUD_COUNTERPARTY_MIN_MARKETS', 5);
     const hhiThreshold = this.getFloatConfig(
       'FRAUD_COUNTERPARTY_HHI_THRESHOLD',
       0.5,
@@ -911,7 +905,9 @@ export class PredictionsService {
         if (!marketOutcomeStake.has(row.marketId)) {
           marketOutcomeStake.set(row.marketId, new Map());
         }
-        marketOutcomeStake.get(row.marketId)!.set(row.outcome, BigInt(row.total));
+        marketOutcomeStake
+          .get(row.marketId)!
+          .set(row.outcome, BigInt(row.total));
       }
     }
 
@@ -965,9 +961,7 @@ export class PredictionsService {
           // floating-point loss before the final XLM conversion.
           const PRECISION = 1_000_000n;
           const impliedValueStroops =
-            (stake * totalPool * PRECISION) /
-            chosenOutcomeStake /
-            PRECISION;
+            (stake * totalPool * PRECISION) / chosenOutcomeStake / PRECISION;
           unrealizedStroops = impliedValueStroops - stake;
         }
         // else: can't compute odds; leave unrealized at 0
