@@ -1,7 +1,4 @@
-import {
-  ExecutionContext,
-  Injectable,
-} from '@nestjs/common';
+import { ExecutionContext, Injectable } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerStorage } from '@nestjs/throttler';
 import type { ThrottlerModuleOptions } from '@nestjs/throttler/dist/throttler-module-options.interface';
@@ -29,9 +26,7 @@ export class TieredThrottlerGuard extends ThrottlerGuard {
 
     const tierName = tier ?? 'default';
 
-    const tierThrottlers = this.throttlers.filter(
-      (t) => t.name === tierName,
-    );
+    const tierThrottlers = this.throttlers.filter((t) => t.name === tierName);
 
     if (tierThrottlers.length === 0) {
       return true;
@@ -64,7 +59,9 @@ export class TieredThrottlerGuard extends ThrottlerGuard {
   ): string {
     const req = context.switchToHttp().getRequest();
     const userId = this.extractUserId(req);
-    const tracker = userId ? `user:${userId}` : (req.ip ?? req.socket?.remoteAddress ?? 'unknown');
+    const tracker = userId
+      ? `user:${userId}`
+      : (req.ip ?? req.socket?.remoteAddress ?? 'unknown');
     return `throttle:${name}:${tracker}:${suffix}`;
   }
 

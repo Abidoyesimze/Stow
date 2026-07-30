@@ -26,7 +26,15 @@ import { PnlQueryDto } from './dto/pnl-query.dto';
 const STROOPS_PER_XLM = 10_000_000;
 
 type MockRepo<T extends ObjectLiteral> = jest.Mocked<
-  Pick<Repository<T>, 'find' | 'findOne' | 'create' | 'save' | 'createQueryBuilder' | 'findAndCount'>
+  Pick<
+    Repository<T>,
+    | 'find'
+    | 'findOne'
+    | 'create'
+    | 'save'
+    | 'createQueryBuilder'
+    | 'findAndCount'
+  >
 >;
 
 // ─── Factories ────────────────────────────────────────────────────────────────
@@ -103,7 +111,11 @@ describe('PredictionsService.getPnl()', () => {
 
   const setupService = async (
     predictionsForUser: Prediction[],
-    outcomeStakeRows: Array<{ marketId: string; outcome: string; total: string }>,
+    outcomeStakeRows: Array<{
+      marketId: string;
+      outcome: string;
+      total: string;
+    }>,
   ) => {
     const qb = buildQbChain(
       () => Promise.resolve(predictionsForUser),
@@ -131,8 +143,14 @@ describe('PredictionsService.getPnl()', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PredictionsService,
-        { provide: getRepositoryToken(Prediction), useValue: mockPredictionsRepo },
-        { provide: getRepositoryToken(Market), useValue: { findOne: jest.fn() } },
+        {
+          provide: getRepositoryToken(Prediction),
+          useValue: mockPredictionsRepo,
+        },
+        {
+          provide: getRepositoryToken(Market),
+          useValue: { findOne: jest.fn() },
+        },
         { provide: getRepositoryToken(User), useValue: {} },
         {
           provide: getRepositoryToken(PredictionFraudFlag),
@@ -147,13 +165,21 @@ describe('PredictionsService.getPnl()', () => {
           provide: SorobanService,
           useValue: { submitPrediction: jest.fn(), claimPayout: jest.fn() },
         },
-        { provide: SlippageCheckerService, useValue: { checkSlippage: jest.fn() } },
+        {
+          provide: SlippageCheckerService,
+          useValue: { checkSlippage: jest.fn() },
+        },
         {
           provide: UsersService,
-          useValue: { recordQualifyingAction: jest.fn().mockResolvedValue(undefined) },
+          useValue: {
+            recordQualifyingAction: jest.fn().mockResolvedValue(undefined),
+          },
         },
         { provide: getDataSourceToken(), useValue: { transaction: jest.fn() } },
-        { provide: ConfigService, useValue: { get: jest.fn().mockReturnValue(undefined) } },
+        {
+          provide: ConfigService,
+          useValue: { get: jest.fn().mockReturnValue(undefined) },
+        },
       ],
     }).compile();
 
@@ -403,8 +429,16 @@ describe('PredictionsService.getPnl()', () => {
 
       // 6 XLM pool, 2 XLM on Yes → implied value = 2*(6/2)=6 → unrealized = +4 XLM
       const outcomeRows = [
-        { marketId: 'mkt-3', outcome: 'Yes', total: String(2 * STROOPS_PER_XLM) },
-        { marketId: 'mkt-3', outcome: 'No', total: String(4 * STROOPS_PER_XLM) },
+        {
+          marketId: 'mkt-3',
+          outcome: 'Yes',
+          total: String(2 * STROOPS_PER_XLM),
+        },
+        {
+          marketId: 'mkt-3',
+          outcome: 'No',
+          total: String(4 * STROOPS_PER_XLM),
+        },
       ];
 
       await setupService([p1, p2, p3], outcomeRows);
@@ -425,7 +459,10 @@ describe('PredictionsService.getPnl()', () => {
 
       // Per-market sums must equal aggregate totals
       const sumRealized = pm.reduce((acc, e) => acc + e.realized_pnl_xlm, 0);
-      const sumUnrealized = pm.reduce((acc, e) => acc + e.unrealized_pnl_xlm, 0);
+      const sumUnrealized = pm.reduce(
+        (acc, e) => acc + e.unrealized_pnl_xlm,
+        0,
+      );
       const sumStaked = pm.reduce((acc, e) => acc + e.staked_xlm, 0);
 
       expect(sumRealized).toBeCloseTo(result.realized_pnl_xlm);
@@ -457,7 +494,12 @@ describe('PredictionsService.getPnl()', () => {
     it('passes from/to dates into query builder andWhere calls', async () => {
       await setupService([], []);
 
-      const andWhereSpy = (mockPredictionsRepo.createQueryBuilder() as unknown as Record<string, jest.Mock>).andWhere;
+      const andWhereSpy = (
+        mockPredictionsRepo.createQueryBuilder() as unknown as Record<
+          string,
+          jest.Mock
+        >
+      ).andWhere;
 
       await service.getPnl(makeUser(), {
         from: '2025-01-01T00:00:00.000Z',
@@ -477,13 +519,17 @@ describe('PredictionsService.getPnl()', () => {
     it('does not add date constraints when from/to are absent', async () => {
       await setupService([], []);
 
-      const andWhereSpy = (mockPredictionsRepo.createQueryBuilder() as unknown as Record<string, jest.Mock>).andWhere;
+      const andWhereSpy = (
+        mockPredictionsRepo.createQueryBuilder() as unknown as Record<
+          string,
+          jest.Mock
+        >
+      ).andWhere;
 
       await service.getPnl(makeUser(), {});
 
       const dateConstraintCalls = andWhereSpy.mock.calls.filter(
-        (args: unknown[]) =>
-          (args[0] as string).includes('submitted_at'),
+        (args: unknown[]) => (args[0] as string).includes('submitted_at'),
       );
       expect(dateConstraintCalls).toHaveLength(0);
     });

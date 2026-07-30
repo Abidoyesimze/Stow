@@ -470,9 +470,7 @@ export class CompetitionsService {
     }
 
     if (competition.creator?.id !== userId) {
-      throw new ForbiddenException(
-        'Only the creator can generate a bracket',
-      );
+      throw new ForbiddenException('Only the creator can generate a bracket');
     }
 
     // Check for existing bracket
@@ -480,7 +478,9 @@ export class CompetitionsService {
       where: { competition_id: competitionId },
     });
     if (existing) {
-      throw new ConflictException('Bracket already exists for this competition');
+      throw new ConflictException(
+        'Bracket already exists for this competition',
+      );
     }
 
     // Fetch all participants
@@ -549,7 +549,7 @@ export class CompetitionsService {
         match_number: m + 1,
         participant_1_id: p1?.id ?? null,
         participant_2_id: p2?.id ?? null,
-        winner_id: isBye ? p1?.id ?? null : null,
+        winner_id: isBye ? (p1?.id ?? null) : null,
         is_bye: isBye,
       });
       const saved = await this.matchupsRepository.save(matchup);
@@ -625,9 +625,7 @@ export class CompetitionsService {
     };
   }
 
-  private getOrderClause(
-    metric: SeedingMetric,
-  ): Record<string, string> {
+  private getOrderClause(metric: SeedingMetric): Record<string, string> {
     switch (metric) {
       case SeedingMetric.Score:
         return { score: 'DESC', joined_at: 'ASC' };

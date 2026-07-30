@@ -108,9 +108,7 @@ describe('DigestService', () => {
     mockQueryBuilder.select.mockReturnThis();
     mockQueryBuilder.where.mockReturnThis();
     mockQueryBuilder.andWhere.mockReturnThis();
-    mockQueryBuilder.getRawMany.mockResolvedValue([
-      { digest_timezone: 'UTC' },
-    ]);
+    mockQueryBuilder.getRawMany.mockResolvedValue([{ digest_timezone: 'UTC' }]);
   });
 
   it('should be defined', () => {
@@ -208,11 +206,7 @@ describe('DigestService', () => {
       await service.handleHourlyCheck(new Date('2024-01-15T08:00:00Z'));
 
       expect(sendDailySpy).toHaveBeenCalledTimes(2);
-      expect(sendDailySpy).toHaveBeenCalledWith(
-        expect.any(Date),
-        'UTC',
-        8,
-      );
+      expect(sendDailySpy).toHaveBeenCalledWith(expect.any(Date), 'UTC', 8);
       expect(sendDailySpy).toHaveBeenCalledWith(
         expect.any(Date),
         'Africa/Lagos',
@@ -264,11 +258,7 @@ describe('DigestService', () => {
 
       // the invalid zone is skipped; the valid one still gets processed
       expect(sendDailySpy).toHaveBeenCalledTimes(1);
-      expect(sendDailySpy).toHaveBeenCalledWith(
-        expect.any(Date),
-        'UTC',
-        8,
-      );
+      expect(sendDailySpy).toHaveBeenCalledWith(expect.any(Date), 'UTC', 8);
     });
   });
 
@@ -276,7 +266,9 @@ describe('DigestService', () => {
 
   describe('runDigests / processUserDigest', () => {
     it('sends an email when there are unread notifications in the window', async () => {
-      jest.spyOn(prefsRepo, 'find').mockResolvedValue([mockPref as UserPreferences]);
+      jest
+        .spyOn(prefsRepo, 'find')
+        .mockResolvedValue([mockPref as UserPreferences]);
       jest
         .spyOn(notificationRepo, 'find')
         .mockResolvedValue([mockNotification as Notification]);
@@ -292,7 +284,9 @@ describe('DigestService', () => {
     });
 
     it('skips a user with no unread notifications in the window (does not email or write state)', async () => {
-      jest.spyOn(prefsRepo, 'find').mockResolvedValue([mockPref as UserPreferences]);
+      jest
+        .spyOn(prefsRepo, 'find')
+        .mockResolvedValue([mockPref as UserPreferences]);
       jest.spyOn(notificationRepo, 'find').mockResolvedValue([]);
 
       await service.sendDailyDigests(
@@ -306,7 +300,9 @@ describe('DigestService', () => {
     });
 
     it('skips a user whose period was already sent (idempotency)', async () => {
-      jest.spyOn(prefsRepo, 'find').mockResolvedValue([mockPref as UserPreferences]);
+      jest
+        .spyOn(prefsRepo, 'find')
+        .mockResolvedValue([mockPref as UserPreferences]);
       jest
         .spyOn(notificationRepo, 'find')
         .mockResolvedValue([mockNotification as Notification]);
@@ -350,7 +346,9 @@ describe('DigestService', () => {
     });
 
     it('skips a user with no stored email', async () => {
-      jest.spyOn(prefsRepo, 'find').mockResolvedValue([mockPref as UserPreferences]);
+      jest
+        .spyOn(prefsRepo, 'find')
+        .mockResolvedValue([mockPref as UserPreferences]);
       jest.spyOn(userRepo, 'findOne').mockResolvedValue({
         ...mockUser,
         email: null,

@@ -43,7 +43,9 @@ export class RateLimitService {
    *
    * @param identifier - unique key used by ThrottlerStorage (user id)
    */
-  async getStatus(identifier: string): Promise<Record<string, RateLimitStatusDto>> {
+  async getStatus(
+    identifier: string,
+  ): Promise<Record<string, RateLimitStatusDto>> {
     const result: Record<string, RateLimitStatusDto> = {};
 
     for (const [tierName, tierConfig] of Object.entries(this.tiers)) {

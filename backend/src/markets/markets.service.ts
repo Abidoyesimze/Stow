@@ -43,7 +43,11 @@ import { UserBookmark } from './entities/user-bookmark.entity';
 import { MarketPriceSnapshot } from './entities/market-price-snapshot.entity';
 import { Prediction } from '../predictions/entities/prediction.entity';
 import { WebhookDispatcherService } from '../webhooks/services/webhook-dispatcher.service';
-import { PriceHistoryQueryDto, TimeRange, Interval } from './dto/price-history-query.dto';
+import {
+  PriceHistoryQueryDto,
+  TimeRange,
+  Interval,
+} from './dto/price-history-query.dto';
 
 @Injectable()
 export class MarketsService {
@@ -167,7 +171,8 @@ export class MarketsService {
     const { timeRange, interval } = query;
     const market = await this.findByIdOrOnChainId(marketId);
 
-    const qb = this.priceSnapshotRepository.createQueryBuilder('snapshot')
+    const qb = this.priceSnapshotRepository
+      .createQueryBuilder('snapshot')
       .where('snapshot.market_id = :marketId', { marketId: market.id });
 
     if (timeRange !== TimeRange.ALL) {
@@ -176,7 +181,7 @@ export class MarketsService {
       if (timeRange === TimeRange.ONE_DAY) intervalStr = '1 day';
       if (timeRange === TimeRange.SEVEN_DAYS) intervalStr = '7 days';
       if (timeRange === TimeRange.THIRTY_DAYS) intervalStr = '30 days';
-      
+
       qb.andWhere(`snapshot.created_at >= NOW() - INTERVAL '${intervalStr}'`);
     }
 
@@ -194,8 +199,8 @@ export class MarketsService {
       .addOrderBy('snapshot.outcome_index', 'ASC');
 
     const results = await qb.getRawMany();
-    
-    return results.map(row => ({
+
+    return results.map((row) => ({
       timestamp: row.timestamp,
       outcome_index: row.outcome_index,
       price: Number(row.price),
@@ -205,7 +210,11 @@ export class MarketsService {
   /**
    * Internal helper to record a new price point for an outcome
    */
-  async snapshotPrice(marketId: string, outcomeIndex: number, price: number): Promise<void> {
+  async snapshotPrice(
+    marketId: string,
+    outcomeIndex: number,
+    price: number,
+  ): Promise<void> {
     const snapshot = this.priceSnapshotRepository.create({
       market_id: marketId,
       outcome_index: outcomeIndex,

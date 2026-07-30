@@ -80,8 +80,12 @@ describe('CacheWarmingService', () => {
       limit: 8,
     });
     expect(analyticsService.getCategoryAnalytics).toHaveBeenCalled();
-    expect(marketsService.findByIdOrOnChainId).toHaveBeenCalledWith('popular-1');
-    expect(marketsService.findByIdOrOnChainId).toHaveBeenCalledWith('popular-2');
+    expect(marketsService.findByIdOrOnChainId).toHaveBeenCalledWith(
+      'popular-1',
+    );
+    expect(marketsService.findByIdOrOnChainId).toHaveBeenCalledWith(
+      'popular-2',
+    );
     // Leaderboard top-N slices
     expect(leaderboardService.getTopN).toHaveBeenCalledWith(10, undefined);
     expect(leaderboardService.getTopN).toHaveBeenCalledWith(20, undefined);

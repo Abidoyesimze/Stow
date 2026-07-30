@@ -57,8 +57,12 @@ describe('LeaderboardScheduler', () => {
 
   describe('handleHourlyRecalculation', () => {
     it('should call recalculateRanks then warm leaderboard cache', async () => {
-      const recalcSpy = jest.spyOn(service, 'recalculateRanks').mockResolvedValue();
-      const warmSpy = jest.spyOn(cacheWarmingService, 'warmLeaderboard').mockResolvedValue();
+      const recalcSpy = jest
+        .spyOn(service, 'recalculateRanks')
+        .mockResolvedValue();
+      const warmSpy = jest
+        .spyOn(cacheWarmingService, 'warmLeaderboard')
+        .mockResolvedValue();
 
       await scheduler.handleHourlyRecalculation();
 

@@ -55,7 +55,8 @@ import { TieredThrottlerGuard } from './common/guards/tiered-throttler.guard';
         throttlers: [
           {
             name: 'default',
-            ttl: configService.get<number>('RATE_LIMIT_DEFAULT_TTL_MS') ?? 60_000,
+            ttl:
+              configService.get<number>('RATE_LIMIT_DEFAULT_TTL_MS') ?? 60_000,
             limit: configService.get<number>('RATE_LIMIT_DEFAULT_LIMIT') ?? 100,
           },
           {

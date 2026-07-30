@@ -3,7 +3,11 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { ApiKeyService } from './api-key.service';
 import { ApiKey } from './entities/api-key.entity';
 import * as bcrypt from 'bcrypt';
-import { UnauthorizedException, NotFoundException, ForbiddenException } from '@nestjs/common';
+import {
+  UnauthorizedException,
+  NotFoundException,
+  ForbiddenException,
+} from '@nestjs/common';
 
 jest.mock('bcrypt');
 
@@ -49,11 +53,13 @@ describe('ApiKeyService', () => {
 
       const result = await service.create('user123', mockDto);
 
-      expect(repository.create).toHaveBeenCalledWith(expect.objectContaining({
-        userId: 'user123',
-        name: mockDto.name,
-        scopes: mockDto.scopes,
-      }));
+      expect(repository.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'user123',
+          name: mockDto.name,
+          scopes: mockDto.scopes,
+        }),
+      );
       expect(result.scopes).toEqual(mockDto.scopes);
       expect(result.id).toBe(mockApiKey.id);
     });
@@ -77,12 +83,16 @@ describe('ApiKeyService', () => {
     });
 
     it('should throw UnauthorizedException for an invalid format', async () => {
-      await expect(service.validateKey('invalidformat')).rejects.toThrow(UnauthorizedException);
+      await expect(service.validateKey('invalidformat')).rejects.toThrow(
+        UnauthorizedException,
+      );
     });
 
     it('should throw UnauthorizedException if no candidate matches', async () => {
       repository.find.mockResolvedValue([]);
-      await expect(service.validateKey('ia_validkey12345')).rejects.toThrow(UnauthorizedException);
+      await expect(service.validateKey('ia_validkey12345')).rejects.toThrow(
+        UnauthorizedException,
+      );
     });
   });
 });

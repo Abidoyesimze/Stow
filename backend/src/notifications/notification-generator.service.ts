@@ -473,7 +473,8 @@ export class NotificationGeneratorService implements OnModuleDestroy {
             if (prefs.match_added_notifications === false) return false;
             break;
           case NotificationType.PredictionSubmitted:
-            if (prefs.prediction_submitted_notifications === false) return false;
+            if (prefs.prediction_submitted_notifications === false)
+              return false;
             break;
           case NotificationType.MatchResolved:
             if (prefs.match_resolved_notifications === false) return false;
@@ -508,11 +509,14 @@ export class NotificationGeneratorService implements OnModuleDestroy {
     }
   }
 
-  private mapTypeToCategory(type: NotificationType): NotificationCategory | null {
+  private mapTypeToCategory(
+    type: NotificationType,
+  ): NotificationCategory | null {
     const map: Record<string, NotificationCategory> = {
       [NotificationType.EventCreated]: NotificationCategory.EventCreated,
       [NotificationType.MatchAdded]: NotificationCategory.MatchAdded,
-      [NotificationType.PredictionSubmitted]: NotificationCategory.PredictionSubmitted,
+      [NotificationType.PredictionSubmitted]:
+        NotificationCategory.PredictionSubmitted,
       [NotificationType.MatchResolved]: NotificationCategory.MatchResolved,
       [NotificationType.WinnerVerified]: NotificationCategory.WinnerVerified,
       [NotificationType.EventCancelled]: NotificationCategory.EventCancelled,

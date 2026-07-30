@@ -4,7 +4,8 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 
 export class PnlQueryDto {
   @ApiPropertyOptional({
-    description: 'Include only predictions submitted on or after this date (ISO 8601)',
+    description:
+      'Include only predictions submitted on or after this date (ISO 8601)',
     example: '2025-01-01T00:00:00.000Z',
   })
   @IsOptional()
@@ -12,7 +13,8 @@ export class PnlQueryDto {
   from?: string;
 
   @ApiPropertyOptional({
-    description: 'Include only predictions submitted on or before this date (ISO 8601)',
+    description:
+      'Include only predictions submitted on or before this date (ISO 8601)',
     example: '2025-12-31T23:59:59.999Z',
   })
   @IsOptional()

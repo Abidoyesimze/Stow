@@ -28,21 +28,30 @@ export class BracketMatchup {
   @Column({ type: 'uuid', nullable: true })
   participant_1_id: string | null;
 
-  @ManyToOne(() => CompetitionParticipant, { onDelete: 'SET NULL', nullable: true })
+  @ManyToOne(() => CompetitionParticipant, {
+    onDelete: 'SET NULL',
+    nullable: true,
+  })
   @JoinColumn({ name: 'participant_1_id' })
   participant_1: CompetitionParticipant;
 
   @Column({ type: 'uuid', nullable: true })
   participant_2_id: string | null;
 
-  @ManyToOne(() => CompetitionParticipant, { onDelete: 'SET NULL', nullable: true })
+  @ManyToOne(() => CompetitionParticipant, {
+    onDelete: 'SET NULL',
+    nullable: true,
+  })
   @JoinColumn({ name: 'participant_2_id' })
   participant_2: CompetitionParticipant;
 
   @Column({ type: 'uuid', nullable: true })
   winner_id: string | null;
 
-  @ManyToOne(() => CompetitionParticipant, { onDelete: 'SET NULL', nullable: true })
+  @ManyToOne(() => CompetitionParticipant, {
+    onDelete: 'SET NULL',
+    nullable: true,
+  })
   @JoinColumn({ name: 'winner_id' })
   winner: CompetitionParticipant;
 
