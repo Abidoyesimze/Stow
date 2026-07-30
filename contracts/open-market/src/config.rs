@@ -282,6 +282,11 @@ pub struct Config {
     /// governance path `ProposalType::UpdateBondAmount`. Defaults to `0`
     /// at initialization (disabled).
     pub bond_amount: i128,
+    /// Early-exit fee (bps, 0-10000) applied to partial withdrawals before
+    /// market lock time. Deducted from the withdrawal amount and redistributed
+    /// to remaining participants. Admin-configurable via `set_early_exit_fee_bps`.
+    /// Defaults to `500` (5%) at initialization.
+    pub early_exit_fee_bps: u32,
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -423,6 +428,7 @@ pub fn initialize(
         vesting_tranche_count: 4,
         vesting_interval_seconds: 2_592_000, // ~30 days
         bond_amount: 0, // disabled by default; admin/governance opt in
+        early_exit_fee_bps: 500, // 5% default early-exit fee
     };
 
     env.storage().persistent().set(&DataKey::Config, &config);
@@ -1405,4 +1411,48 @@ pub(crate) fn ensure_not_paused(env: &Env) -> Result<(), InsightArenaError> {
         return Err(InsightArenaError::Paused);
     }
     Ok(())
+}
+
+/// Update the early-exit fee rate for partial withdrawals.
+/// Caller must be the stored admin.
+///
+/// The fee is deducted from withdrawal amounts and redistributed to remaining
+/// participants pro-rata to their stake. Defaults to 5% (500 bps).
+pub fn set_early_exit_fee_bps(
+    env: &Env,
+    admin: Address,
+    new_fee_bps: u32,
+) -> Result<(), InsightArenaError> {
+    let mut config = load_config(env)?;
+
+    admin.require_auth();
+    if admin != config.admin {
+        return Err(InsightArenaError::Unauthorized);
+    }
+
+    if new_fee_bps > 10_000 {
+        return Err(InsightArenaError::InvalidFee);
+    }
+
+    let old_fee_bps = config.early_exit_fee_bps;
+    config.early_exit_fee_bps = new_fee_bps;
+    env.storage().persistent().set(&DataKey::Config, &config);
+    bump_config(env);
+
+    emit_early_exit_fee_updated(env, old_fee_bps, new_fee_bps);
+
+    Ok(())
+}
+
+fn emit_early_exit_fee_updated(env: &Env, old_fee_bps: u32, new_fee_bps: u32) {
+    env.events().publish(
+        (symbol_short!("cfg"), symbol_short!("exit_fee")),
+        (old_fee_bps, new_fee_bps),
+    );
+}
+
+/// Get the current early-exit fee without extending TTL (read-only).
+pub fn get_early_exit_fee_bps(env: &Env) -> Result<u32, InsightArenaError> {
+    let config = load_config(env)?;
+    Ok(config.early_exit_fee_bps)
 }

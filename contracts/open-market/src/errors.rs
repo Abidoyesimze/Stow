@@ -208,5 +208,9 @@ pub enum InsightArenaError {
     SelfTransfer = 111,
     /// `transfer_prediction` was called with `shares <= 0`.
     /// A transfer must move a strictly positive amount.
+    /// REUSED for early position withdrawals:
+    /// - Withdrawal attempted after market lock time (MarketExpired not applicable pre-lock)
+    /// - Withdrawal amount is zero or invalid
+    /// - Withdrawal amount exceeds user's current stake
     ZeroShareTransfer = 112,
 }
