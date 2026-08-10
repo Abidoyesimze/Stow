@@ -15,7 +15,6 @@ The project solves the problem of opaque, centralized savings platforms in emerg
 - Goal-based savings with automated milestones
 - Group savings pools with shared rules and payouts enforced by the contract, not an organizer
 - Group split savings — a group saves into a shared pool and the balance is split back among members by their agreed shares, calculated and settled on-chain
-- Optional, opt-in yield sourced from real on-chain lending (see Yield Model)
 - Dollar-denominated by default — save in USDC, cash in and out in local currency via Stellar anchors
 - Passwordless onboarding with passkey smart wallets and sponsored fees
 - Web interface for seamless contract interaction
@@ -397,23 +396,6 @@ See our detailed [CONTRIBUTING.md](CONTRIBUTING.md) for coding standards (Rust/S
 
 ---
 
-## 🗺 Roadmap
-
-### Current Phase (Q1 2026)
-- ✅ Core savings contract
-- ✅ Basic web interface
-- 🚧 Group savings pools
-- 🚧 Group split savings
-- 🚧 Passkey onboarding & sponsored fees
-- 🚧 Security audit (mainnet gate)
-
-### Next Phase (Q2 2026)
-- Opt-in yield (Tier-1 adapter, isolated)
-- Goal-based savings UI
-- Notification system
-- First local-currency anchor (SEP-24)
-- Social recovery
-- Mainnet deployment
 
 ### Future
 - Additional anchors & cash on/off-ramps
@@ -430,23 +412,3 @@ See our detailed [CONTRIBUTING.md](CONTRIBUTING.md) for coding standards (Rust/S
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ---
-
-## 🙏 Acknowledgments
-
-- Stellar Development Foundation for the Soroban platform
-- Drips Wave for grants and support
-- Open-source contributors and testers
-
----
-
-## 📞 Support
-
-Need help? Here's how to get support:
-
-1. Check the [Troubleshooting](#-troubleshooting) section
-2. Search [existing issues](https://github.com/your-org/stow/issues)
-3. Open a [new issue](https://github.com/your-org/stow/issues/new) with detailed information
-4. Join our [Discord community](https://discord.gg/stow) _(if available)_
-
----
-
