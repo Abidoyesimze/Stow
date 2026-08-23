@@ -1,12 +1,12 @@
 import {
   Injectable,
+  Logger,
   NestInterceptor,
   ExecutionContext,
   CallHandler,
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { tap } from 'rxjs/operators';
-import { AnalyticsService } from '../../analytics/analytics.service';
 
 interface UserRequest {
   user?: { id: string };
@@ -18,7 +18,7 @@ interface UserRequest {
 
 @Injectable()
 export class ActivityLoggingInterceptor implements NestInterceptor {
-  constructor(private readonly analyticsService: AnalyticsService) {}
+  private readonly logger = new Logger(ActivityLoggingInterceptor.name);
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
     const request = context.switchToHttp().getRequest<UserRequest>();
@@ -27,15 +27,16 @@ export class ActivityLoggingInterceptor implements NestInterceptor {
     return next.handle().pipe(
       tap(() => {
         if (user && ['POST', 'PATCH', 'DELETE'].includes(method)) {
-          // Log specific actions
           const actionType = this.getActionType(method, url);
           if (actionType) {
-            void this.analyticsService.logActivity(
-              user.id,
+            // TODO(issue): persist activity to an audit store for savings actions.
+            this.logger.log({
+              msg: 'user_activity',
+              userId: user.id,
               actionType,
-              this.sanitizeBody(body),
+              body: this.sanitizeBody(body),
               ip,
-            );
+            });
           }
         }
       }),
@@ -43,17 +44,13 @@ export class ActivityLoggingInterceptor implements NestInterceptor {
   }
 
   private getActionType(method: string, url: string): string | null {
-    if (url.includes('/markets') && method === 'POST') return 'MARKET_CREATED';
-    if (url.includes('/predictions') && method === 'POST')
-      return 'PREDICTION_MADE';
-    if (url.includes('/competitions') && method === 'POST')
-      return 'COMPETITION_CREATED';
+    if (url.includes('/savings') && method === 'POST') return 'SAVINGS_DEPOSIT';
+    if (url.includes('/goals') && method === 'POST') return 'GOAL_CREATED';
+    if (url.includes('/groups') && method === 'POST') return 'GROUP_CREATED';
     if (url.includes('/admin/users') && url.includes('/ban'))
       return 'USER_BANNED';
     if (url.includes('/admin/users') && url.includes('/unban'))
       return 'USER_UNBANNED';
-    if (url.includes('/admin/markets') && url.includes('/resolve'))
-      return 'MARKET_RESOLVED_BY_ADMIN';
     return null;
   }
 
@@ -62,7 +59,7 @@ export class ActivityLoggingInterceptor implements NestInterceptor {
   ): Record<string, unknown> | null {
     if (!body) return null;
     const sanitized = { ...body };
-    delete sanitized.password; // Example: never log sensitive data
+    delete sanitized.password; // never log sensitive data
     return sanitized;
   }
 }

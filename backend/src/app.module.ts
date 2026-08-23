@@ -7,35 +7,20 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { ThrottlerModule } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
-import { AchievementsModule } from './achievements/achievements.module';
 import { AdminModule } from './admin/admin.module';
-import { AnalyticsModule } from './analytics/analytics.module';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
 import { CommonModule } from './common/common.module';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
-import { CompetitionsModule } from './competitions/competitions.module';
-import { CreatorEventsModule } from './creator-events/creator-events.module';
 import { validate } from './config/env.validation';
-import { FlagsModule } from './flags/flags.module';
 import { HealthModule } from './health/health.module';
 import { IndexerModule } from './indexer/indexer.module';
-import { LeaderboardModule } from './leaderboard/leaderboard.module';
-import { MarketsModule } from './markets/markets.module';
-import { MatchesModule } from './matches/matches.module';
 import { NotificationsModule } from './notifications/notifications.module';
-import { OracleModule } from './oracle/oracle.module';
-import { PredictionsModule } from './predictions/predictions.module';
-import { SearchModule } from './search/search.module';
-import { SeasonsModule } from './seasons/seasons.module';
 import { SorobanModule } from './soroban/soroban.module';
 import { UsersModule } from './users/users.module';
-import { DisputesModule } from './disputes/disputes.module';
 import { ContractModule } from './contract/contract.module';
-import { CacheWarmingModule } from './cache/cache-warming.module';
-import { WebsocketModule } from './websocket/websocket.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { AccountModule } from './account/account.module';
 import { TieredThrottlerGuard } from './common/guards/tiered-throttler.guard';
@@ -107,27 +92,12 @@ import { TieredThrottlerGuard } from './common/guards/tiered-throttler.guard';
     HealthModule,
     AuthModule,
     UsersModule,
-    MarketsModule,
-    PredictionsModule,
-    CompetitionsModule,
-    CreatorEventsModule,
-    SeasonsModule,
-    AnalyticsModule,
-    LeaderboardModule,
     NotificationsModule,
-    OracleModule,
     SorobanModule,
     AdminModule,
-    AchievementsModule,
-    SearchModule,
     CommonModule,
-    FlagsModule,
-    DisputesModule,
-    MatchesModule,
     IndexerModule,
     ContractModule,
-    CacheWarmingModule,
-    WebsocketModule,
     WebhooksModule,
     AccountModule,
     JwtModule.registerAsync({

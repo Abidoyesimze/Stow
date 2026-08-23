@@ -1,5 +1,4 @@
 import {
-  BadGatewayException,
   BadRequestException,
   ConflictException,
   Injectable,
@@ -7,56 +6,30 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Between, Repository } from 'typeorm';
-import { AnalyticsService } from '../analytics/analytics.service';
-import { ActivityLog } from '../analytics/entities/activity-log.entity';
-import { CompetitionParticipant } from '../competitions/entities/competition-participant.entity';
-import { Competition } from '../competitions/entities/competition.entity';
-import { ListFlagsQueryDto } from '../flags/dto/list-flags-query.dto';
-import { ResolveFlagDto } from '../flags/dto/resolve-flag.dto';
-import { Flag, FlagStatus } from '../flags/entities/flag.entity';
-import { FlagsService } from '../flags/flags.service';
-import { Comment } from '../markets/entities/comment.entity';
-import { Market } from '../markets/entities/market.entity';
-import { NotificationType } from '../notifications/entities/notification.entity';
-import { NotificationsService } from '../notifications/notifications.service';
-import { Prediction } from '../predictions/entities/prediction.entity';
-import { ListFraudFlagsQueryDto } from '../predictions/dto/list-fraud-flags-query.dto';
-import { PredictionsService } from '../predictions/predictions.service';
-import { SorobanService } from '../soroban/soroban.service';
+import { Repository } from 'typeorm';
 import { User } from '../users/entities/user.entity';
-import { CreatorEvent } from '../matches/entities/creator-event.entity';
 import { UserFlag } from './entities/user-flag.entity';
 import { VerifiedAddress } from './entities/verified-address.entity';
-import { FeeHistory } from '../indexer/entities/fee-history.entity';
-import { ActivityLogQueryDto } from './dto/activity-log-query.dto';
-import {
-  BulkImportMarketsResponseDto,
-  BulkImportRowResult,
-} from './dto/bulk-import-markets.dto';
-import { plainToInstance } from 'class-transformer';
-import { validate } from 'class-validator';
-import { CreateMarketDto } from '../markets/dto/create-market.dto';
-import { MarketsService } from '../markets/markets.service';
 import {
   BulkUserAction,
   BulkUserActionDto,
   BulkUserActionResponseDto,
   BulkUserActionResultDto,
 } from './dto/bulk-user-action.dto';
-import { DateRangeQueryDto } from './dto/date-range-query.dto';
-import { FeeStatsResponseDto } from './dto/fee-stats-response.dto';
 import { ListUsersQueryDto } from './dto/list-users-query.dto';
 import { ListVerifiedAddressesQueryDto } from './dto/list-verified-addresses-query.dto';
-import {
-  ReportFormat,
-  ReportQueryDto,
-  ReportTimeframe,
-} from './dto/report-query.dto';
-import { ResolveMarketDto } from './dto/resolve-market.dto';
-import { StatsResponseDto } from './dto/stats-response.dto';
 import { UpdateUserRoleDto } from './dto/update-user-role.dto';
 
+/**
+ * Administrative operations.
+ *
+ * After the pivot from the prediction market, this service keeps generic
+ * user/role administration. Market/prediction/competition moderation, fee
+ * stats, and CSV market import were removed with their modules.
+ *
+ * TODO(issue): add savings-domain admin (e.g. inspect group pools, flag
+ * suspicious accounts) as the savings features land.
+ */
 @Injectable()
 export class AdminService {
   private readonly logger = new Logger(AdminService.name);
@@ -64,174 +37,9 @@ export class AdminService {
   constructor(
     @InjectRepository(User)
     private readonly usersRepository: Repository<User>,
-    @InjectRepository(Market)
-    private readonly marketsRepository: Repository<Market>,
-    @InjectRepository(Comment)
-    private readonly commentsRepository: Repository<Comment>,
-    @InjectRepository(Prediction)
-    private readonly predictionsRepository: Repository<Prediction>,
-    @InjectRepository(Competition)
-    private readonly competitionsRepository: Repository<Competition>,
-    @InjectRepository(CompetitionParticipant)
-    private readonly competitionParticipantsRepository: Repository<CompetitionParticipant>,
-    @InjectRepository(ActivityLog)
-    private readonly activityLogsRepository: Repository<ActivityLog>,
-    @InjectRepository(Flag)
-    private readonly flagsRepository: Repository<Flag>,
-    @InjectRepository(CreatorEvent)
-    private readonly creatorEventRepository: Repository<CreatorEvent>,
     @InjectRepository(VerifiedAddress)
     private readonly verifiedAddressesRepository: Repository<VerifiedAddress>,
-    @InjectRepository(FeeHistory)
-    private readonly feeHistoryRepository: Repository<FeeHistory>,
-    private readonly marketsService: MarketsService,
-
-    private readonly analyticsService: AnalyticsService,
-    private readonly notificationsService: NotificationsService,
-    private readonly sorobanService: SorobanService,
-    private readonly flagsService: FlagsService,
-    private readonly predictionsService: PredictionsService,
   ) {}
-
-  async getStats(): Promise<StatsResponseDto> {
-    const now = new Date();
-    const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-
-    const total_users = await this.usersRepository.count();
-    const active_users_24h = await this.usersRepository.count({
-      where: { updated_at: Between(twentyFourHoursAgo, now) },
-    });
-    const active_users_7d = await this.usersRepository.count({
-      where: { updated_at: Between(sevenDaysAgo, now) },
-    });
-
-    const total_markets = await this.marketsRepository.count();
-    const active_markets = await this.marketsRepository.count({
-      where: { is_resolved: false, is_cancelled: false },
-    });
-    const resolved_markets = await this.marketsRepository.count({
-      where: { is_resolved: true },
-    });
-
-    const total_predictions = await this.predictionsRepository.count();
-
-    const volumeResult = (await this.marketsRepository
-      .createQueryBuilder('market')
-      .select('SUM(CAST(market.total_pool_stroops AS DECIMAL))', 'total')
-      .getRawOne()) as { total: string | null };
-
-    const total_volume_stroops = volumeResult?.total || '0';
-
-    const total_competitions = await this.competitionsRepository.count();
-
-    // Platform revenue (2% fee of total volume as an example)
-    const platform_revenue_stroops = (
-      (BigInt(total_volume_stroops.split('.')[0]) * BigInt(2)) /
-      BigInt(100)
-    ).toString();
-
-    const pending_flags = await this.flagsRepository.count({
-      where: { status: FlagStatus.PENDING },
-    });
-
-    return {
-      total_users,
-      active_users_24h,
-      active_users_7d,
-      total_markets,
-      active_markets,
-      resolved_markets,
-      total_predictions,
-      total_volume_stroops,
-      total_competitions,
-      platform_revenue_stroops,
-      pending_flags,
-    };
-  }
-
-  async getFeeStats(range: DateRangeQueryDto): Promise<FeeStatsResponseDto> {
-    const now = new Date();
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const startOfWeek = new Date(now);
-    startOfWeek.setDate(now.getDate() - now.getDay());
-    startOfWeek.setHours(0, 0, 0, 0);
-
-    const eventQb = this.creatorEventRepository.createQueryBuilder('event');
-    const countQb = this.creatorEventRepository.createQueryBuilder('event');
-
-    if (range.start_date) {
-      eventQb.andWhere('event.on_chain_created_at >= :startDate', {
-        startDate: new Date(range.start_date),
-      });
-      countQb.andWhere('event.on_chain_created_at >= :startDate', {
-        startDate: new Date(range.start_date),
-      });
-    }
-    if (range.end_date) {
-      eventQb.andWhere('event.on_chain_created_at <= :endDate', {
-        endDate: new Date(range.end_date),
-      });
-      countQb.andWhere('event.on_chain_created_at <= :endDate', {
-        endDate: new Date(range.end_date),
-      });
-    }
-
-    const totalEvents = await countQb.getCount();
-
-    const totalFeeResult = (await eventQb
-      .select('SUM(CAST(event.creation_fee_paid AS DECIMAL))', 'total')
-      .getRawOne()) as { total: string | null };
-    const totalFees = totalFeeResult?.total || '0';
-
-    const monthFeeResult = (await this.creatorEventRepository
-      .createQueryBuilder('event')
-      .select('SUM(CAST(event.creation_fee_paid AS DECIMAL))', 'total')
-      .where('event.on_chain_created_at >= :startOfMonth', { startOfMonth })
-      .getRawOne()) as { total: string | null };
-    const monthFees = monthFeeResult?.total || '0';
-
-    const weekFeeResult = (await this.creatorEventRepository
-      .createQueryBuilder('event')
-      .select('SUM(CAST(event.creation_fee_paid AS DECIMAL))', 'total')
-      .where('event.on_chain_created_at >= :startOfWeek', { startOfWeek })
-      .getRawOne()) as { total: string | null };
-    const weekFees = weekFeeResult?.total || '0';
-
-    const avgFee =
-      totalEvents > 0
-        ? (BigInt(totalFees.split('.')[0]) / BigInt(totalEvents)).toString()
-        : '0';
-
-    const feeHistory = await this.feeHistoryRepository.find({
-      order: { created_at: 'DESC' },
-      take: 10,
-    });
-
-    return {
-      current_creation_fee: await this.getCurrentCreationFee(),
-      total_fees_collected: totalFees,
-      fees_collected_this_month: monthFees,
-      fees_collected_this_week: weekFees,
-      total_events_created: totalEvents,
-      average_fee_per_event: avgFee,
-      treasury_balance: totalFees,
-      fee_history: feeHistory,
-    };
-  }
-
-  private async getCurrentCreationFee(): Promise<string> {
-    try {
-      return await this.sorobanService.getCreationFee();
-    } catch {
-      // Fallback to last fee from history
-    }
-
-    const lastFee = await this.feeHistoryRepository.findOne({
-      order: { created_at: 'DESC' },
-    });
-    return lastFee?.new_fee_stroops ?? '10000000'; // Default 0.01 XLM
-  }
 
   async listUsers(query: ListUsersQueryDto) {
     const {
@@ -249,9 +57,7 @@ export class AdminService {
     if (search) {
       queryBuilder.where(
         'user.username ILIKE :search OR user.stellar_address ILIKE :search',
-        {
-          search: `%${search}%`,
-        },
+        { search: `%${search}%` },
       );
     }
 
@@ -265,12 +71,7 @@ export class AdminService {
 
     return {
       data: users,
-      meta: {
-        total,
-        page,
-        limit,
-        totalPages: Math.ceil(total / limit),
-      },
+      meta: { total, page, limit, totalPages: Math.ceil(total / limit) },
     };
   }
 
@@ -295,13 +96,7 @@ export class AdminService {
       events_created: a.events_created,
     }));
 
-    return {
-      data,
-      total,
-      page,
-      limit,
-      totalPages: Math.ceil(total / limit),
-    };
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
   }
 
   async banUser(id: string, reason: string, adminId: string): Promise<User> {
@@ -315,12 +110,7 @@ export class AdminService {
     user.banned_by = adminId;
 
     await this.usersRepository.save(user);
-
-    await this.analyticsService.logActivity(user.id, 'USER_BANNED', {
-      reason,
-      banned_by: adminId,
-    });
-
+    this.logger.log(`Admin ${adminId} banned user ${id}: ${reason}`);
     return user;
   }
 
@@ -335,11 +125,7 @@ export class AdminService {
     user.banned_by = null;
 
     await this.usersRepository.save(user);
-
-    await this.analyticsService.logActivity(user.id, 'USER_UNBANNED', {
-      unbanned_by: adminId,
-    });
-
+    this.logger.log(`Admin ${adminId} unbanned user ${id}`);
     return user;
   }
 
@@ -391,18 +177,6 @@ export class AdminService {
               );
               break;
           }
-
-          await manager.save(
-            ActivityLog,
-            manager.create(ActivityLog, {
-              userId: user.id,
-              actionType: `USER_BULK_${dto.action.toUpperCase()}`,
-              actionDetails: {
-                admin_id: adminId,
-                reason: dto.reason ?? null,
-              },
-            }),
-          );
         });
 
         results.push({ user_id: userId, success: true });
@@ -423,11 +197,7 @@ export class AdminService {
       } failed`,
     );
 
-    return {
-      results,
-      succeeded,
-      failed: results.length - succeeded,
-    };
+    return { results, succeeded, failed: results.length - succeeded };
   }
 
   async updateUserRole(
@@ -447,633 +217,10 @@ export class AdminService {
 
     await this.usersRepository.save(user);
 
-    await this.analyticsService.logActivity(adminId, 'USER_ROLE_CHANGED', {
-      target_user_id: id,
-      previous_role: previousRole,
-      new_role: dto.role,
-    });
-
     this.logger.log(
       `Admin ${adminId} changed role of user ${id} from "${previousRole}" to "${dto.role}"`,
     );
 
     return user;
-  }
-
-  async getUserActivity(userId: string, query: ActivityLogQueryDto) {
-    const { page = 1, limit = 10, actionType, startDate, endDate } = query;
-    const skip = (page - 1) * limit;
-
-    const queryBuilder = this.activityLogsRepository.createQueryBuilder('log');
-    queryBuilder.where('log.userId = :userId', { userId });
-
-    if (actionType) {
-      queryBuilder.andWhere('log.actionType = :actionType', { actionType });
-    }
-
-    if (startDate && endDate) {
-      queryBuilder.andWhere('log.timestamp BETWEEN :startDate AND :endDate', {
-        startDate: new Date(startDate),
-        endDate: new Date(endDate),
-      });
-    }
-
-    queryBuilder.orderBy('log.timestamp', 'DESC').skip(skip).take(limit);
-
-    const [logs, total] = await queryBuilder.getManyAndCount();
-
-    return {
-      data: logs,
-      meta: {
-        total,
-        page,
-        limit,
-        totalPages: Math.ceil(total / limit),
-      },
-    };
-  }
-
-  async listFlags(query: ListFlagsQueryDto) {
-    return this.flagsService.listFlags(query);
-  }
-
-  /**
-   * Advisory prediction-fraud signal flags (timing clustering, counterparty
-   * concentration). Informational only - resolving/dismissing a flag here
-   * does not itself ban or restrict the flagged user.
-   */
-  async listFraudFlags(query: ListFraudFlagsQueryDto) {
-    return this.predictionsService.listFraudFlags(query);
-  }
-
-  async resolveFlag(
-    flagId: string,
-    resolveFlagDto: ResolveFlagDto,
-    adminId: string,
-  ) {
-    return this.flagsService.resolveFlag(flagId, resolveFlagDto, adminId);
-  }
-
-  async adminResolveMarket(
-    id: string,
-    dto: ResolveMarketDto,
-    adminId: string,
-  ): Promise<Market> {
-    const market = await this.marketsRepository.findOne({
-      where: [{ id }, { on_chain_market_id: id }],
-    });
-
-    if (!market) {
-      throw new NotFoundException(`Market "${id}" not found`);
-    }
-
-    if (market.is_resolved) {
-      throw new ConflictException('Market is already resolved');
-    }
-
-    if (market.is_cancelled) {
-      throw new BadRequestException('Cannot resolve a cancelled market');
-    }
-
-    if (!market.outcome_options.includes(dto.resolved_outcome)) {
-      throw new BadRequestException(
-        `Invalid outcome "${dto.resolved_outcome}". Valid options: ${market.outcome_options.join(', ')}`,
-      );
-    }
-
-    // Trigger payout distribution on-chain
-    try {
-      await this.sorobanService.resolveMarket(
-        market.on_chain_market_id,
-        dto.resolved_outcome,
-      );
-    } catch (err) {
-      this.logger.error(
-        'Soroban resolveMarket failed during admin resolution',
-        err,
-      );
-      throw new BadGatewayException('Failed to resolve market on Soroban');
-    }
-
-    market.is_resolved = true;
-    market.resolved_outcome = dto.resolved_outcome;
-    const saved = await this.marketsRepository.save(market);
-
-    // Notify all participants
-    const predictions = await this.predictionsRepository.find({
-      where: { market: { id: market.id } },
-      relations: ['user'],
-    });
-
-    await Promise.all(
-      predictions.map((p) =>
-        this.notificationsService.create(
-          p.user.stellar_address,
-          NotificationType.MatchResolved,
-          'Market Resolved',
-          `The market "${market.title}" has been resolved. Winning outcome: ${dto.resolved_outcome}.`,
-          {
-            market_id: market.id,
-            resolved_outcome: dto.resolved_outcome,
-            your_prediction: p.chosen_outcome,
-            won: p.chosen_outcome === dto.resolved_outcome,
-            ...(dto.resolution_note
-              ? { resolution_note: dto.resolution_note }
-              : {}),
-          },
-        ),
-      ),
-    );
-
-    // Log admin action
-    await this.analyticsService.logActivity(
-      adminId,
-      'MARKET_RESOLVED_BY_ADMIN',
-      {
-        market_id: market.id,
-        resolved_outcome: dto.resolved_outcome,
-        resolution_note: dto.resolution_note ?? null,
-      },
-    );
-
-    this.logger.log(
-      `Admin ${adminId} resolved market "${market.title}" (${market.id}) with outcome "${dto.resolved_outcome}"`,
-    );
-
-    return saved;
-  }
-
-  async adminCancelCompetition(
-    competitionId: string,
-    adminId: string,
-  ): Promise<Competition> {
-    const competition = await this.competitionsRepository.findOne({
-      where: { id: competitionId },
-    });
-
-    if (!competition) {
-      throw new NotFoundException(
-        `Competition with ID "${competitionId}" not found`,
-      );
-    }
-
-    if (competition.is_cancelled) {
-      throw new ConflictException('Competition is already cancelled');
-    }
-
-    if (competition.is_finalized) {
-      throw new ConflictException('Finalized competitions cannot be cancelled');
-    }
-
-    const participants = await this.competitionParticipantsRepository.find({
-      where: { competition_id: competition.id },
-      relations: ['user'],
-    });
-
-    const totalPool = BigInt(competition.prize_pool_stroops);
-    const participantCount = participants.length;
-    const shouldRefund = totalPool > 0n && participantCount > 0;
-
-    const refundAllocations = new Map<string, string>();
-
-    if (shouldRefund) {
-      const baseRefund = totalPool / BigInt(participantCount);
-      let remainder = totalPool % BigInt(participantCount);
-
-      for (const participant of participants) {
-        const hasAddress = Boolean(participant.user?.stellar_address);
-        if (!hasAddress) {
-          refundAllocations.set(participant.user_id, '0');
-          continue;
-        }
-
-        let refundAmount = baseRefund;
-        if (remainder > 0n) {
-          refundAmount += 1n;
-          remainder -= 1n;
-        }
-
-        refundAllocations.set(participant.user_id, refundAmount.toString());
-
-        try {
-          await this.sorobanService.refundCompetitionParticipant(
-            participant.user.stellar_address,
-            competition.id,
-            refundAmount.toString(),
-          );
-        } catch (err) {
-          this.logger.error('Soroban competition refund failed', err);
-          throw new BadGatewayException(
-            'Failed to refund participants on Soroban',
-          );
-        }
-      }
-    }
-
-    competition.is_cancelled = true;
-    const savedCompetition =
-      await this.competitionsRepository.save(competition);
-
-    await Promise.all(
-      participants.map((participant) =>
-        this.notificationsService.create(
-          participant.user.stellar_address,
-          NotificationType.EventCancelled,
-          'Competition Cancelled',
-          `The competition "${competition.title}" has been cancelled by an administrator.${
-            shouldRefund ? ' Any applicable refunds have been initiated.' : ''
-          }`,
-          {
-            competition_id: competition.id,
-            is_cancelled: true,
-            refunded_stroops: refundAllocations.get(participant.user_id) ?? '0',
-          },
-        ),
-      ),
-    );
-
-    await this.analyticsService.logActivity(
-      adminId,
-      'COMPETITION_CANCELLED_BY_ADMIN',
-      {
-        competition_id: competition.id,
-        participants_notified: participants.length,
-        refunds_initiated: shouldRefund,
-      },
-    );
-
-    this.logger.log(
-      `Admin ${adminId} cancelled competition "${competition.title}" (${competition.id})`,
-    );
-
-    return savedCompetition;
-  }
-
-  async moderateComment(
-    commentId: string,
-    isModerated: boolean,
-    reason?: string,
-  ): Promise<Comment> {
-    const comment = await this.commentsRepository.findOne({
-      where: { id: commentId },
-    });
-
-    if (!comment) {
-      throw new NotFoundException(`Comment with ID "${commentId}" not found`);
-    }
-
-    comment.is_moderated = isModerated;
-    comment.moderation_reason = reason ?? null;
-
-    return await this.commentsRepository.save(comment);
-  }
-
-  async featureMarket(marketId: string, adminId: string): Promise<Market> {
-    const market = await this.marketsRepository.findOne({
-      where: [{ id: marketId }, { on_chain_market_id: marketId }],
-    });
-
-    if (!market) {
-      throw new NotFoundException(`Market "${marketId}" not found`);
-    }
-
-    if (market.is_featured) {
-      throw new ConflictException('Market is already featured');
-    }
-
-    market.is_featured = true;
-    market.featured_at = new Date();
-    const saved = await this.marketsRepository.save(market);
-
-    // Log admin action
-    await this.analyticsService.logActivity(
-      adminId,
-      'MARKET_FEATURED_BY_ADMIN',
-      {
-        market_id: market.id,
-        featured_at: market.featured_at,
-      },
-    );
-
-    this.logger.log(
-      `Admin ${adminId} featured market "${market.title}" (${market.id})`,
-    );
-
-    return saved;
-  }
-
-  async unfeatureMarket(marketId: string, adminId: string): Promise<Market> {
-    const market = await this.marketsRepository.findOne({
-      where: [{ id: marketId }, { on_chain_market_id: marketId }],
-    });
-
-    if (!market) {
-      throw new NotFoundException(`Market "${marketId}" not found`);
-    }
-
-    if (!market.is_featured) {
-      throw new ConflictException('Market is not featured');
-    }
-
-    market.is_featured = false;
-    market.featured_at = null;
-    const saved = await this.marketsRepository.save(market);
-
-    // Log admin action
-    await this.analyticsService.logActivity(
-      adminId,
-      'MARKET_UNFEATURED_BY_ADMIN',
-      {
-        market_id: market.id,
-        unfeatured_at: new Date(),
-      },
-    );
-
-    this.logger.log(
-      `Admin ${adminId} unfeatured market "${market.title}" (${market.id})`,
-    );
-
-    return saved;
-  }
-
-  async getActivityReport(query: ReportQueryDto) {
-    const { timeframe, format } = query;
-    const now = new Date();
-    let startDate: Date;
-
-    switch (timeframe) {
-      case ReportTimeframe.Daily:
-        startDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-        break;
-      case ReportTimeframe.Weekly:
-        startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-        break;
-      case ReportTimeframe.Monthly:
-        startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-        break;
-      default:
-        startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    }
-
-    // User Growth
-    const userGrowth = await this.usersRepository.count({
-      where: { created_at: Between(startDate, now) },
-    });
-
-    // Market Creation Trends
-    const marketsCreated = await this.marketsRepository.count({
-      where: { created_at: Between(startDate, now) },
-    });
-
-    // Platform Revenue (accumulated in this period)
-    const volumeResult = (await this.marketsRepository
-      .createQueryBuilder('market')
-      .select('SUM(CAST(market.total_pool_stroops AS DECIMAL))', 'total')
-      .where('market.created_at BETWEEN :startDate AND :endDate', {
-        startDate,
-        endDate: now,
-      })
-      .getRawOne()) as { total: string | null };
-
-    const periodVolume = volumeResult?.total || '0';
-    const periodRevenue = (
-      (BigInt(periodVolume.split('.')[0]) * BigInt(2)) /
-      BigInt(100)
-    ).toString();
-
-    // Predictions activity
-    const predictionsCount = await this.predictionsRepository.count({
-      where: { submitted_at: Between(startDate, now) },
-    });
-
-    const reportData = {
-      timeframe,
-      period_start: startDate.toISOString(),
-      period_end: now.toISOString(),
-      user_growth: userGrowth,
-      markets_created: marketsCreated,
-      total_predictions: predictionsCount,
-      period_volume_stroops: periodVolume,
-      platform_revenue_stroops: periodRevenue,
-    };
-
-    if (format === ReportFormat.CSV) {
-      const headers = Object.keys(reportData).join(',');
-      const values = Object.values(reportData).join(',');
-      return `${headers}\n${values}`;
-    }
-
-    return reportData;
-  }
-
-  async listCreatorEventsForModeration(query: {
-    status?: string;
-    creator?: string;
-    page?: number;
-    limit?: number;
-    sortBy?: string;
-    sortOrder?: 'ASC' | 'DESC';
-  }) {
-    const {
-      status = 'all',
-      creator,
-      page = 1,
-      limit = 20,
-      sortBy = 'created_at',
-      sortOrder = 'DESC',
-    } = query;
-
-    const skip = (page - 1) * limit;
-    const take = Math.min(limit, 100);
-
-    const qb = this.creatorEventRepository.createQueryBuilder('event');
-    qb.leftJoinAndSelect('event.matches', 'matches');
-
-    // Filter by status
-    if (status !== 'all') {
-      if (status === 'active') {
-        qb.andWhere('event.is_cancelled = false AND event.is_active = true');
-      } else if (status === 'cancelled') {
-        qb.andWhere('event.is_cancelled = true');
-      } else if (status === 'completed') {
-        qb.andWhere('event.is_active = false');
-      } else if (status === 'flagged') {
-        qb.leftJoinAndSelect('event.flags', 'flags');
-        qb.andWhere('flags.id IS NOT NULL');
-      }
-    }
-
-    // Filter by creator
-    if (creator) {
-      qb.andWhere('event.creator_address = :creator', {
-        creator: creator,
-      });
-    }
-
-    // Count total before pagination
-    const total = await qb.getCount();
-
-    // Apply sorting and pagination
-    qb.orderBy(`event.${sortBy}`, sortOrder).skip(skip).take(take);
-
-    const events = await qb.getMany();
-
-    // Enrich events with additional data
-    const enrichedEvents = await Promise.all(
-      events.map(async (event) => {
-        const participantCount = event.participant_count || 0;
-        const matchCount = event.match_count || 0;
-
-        // Get creator user info
-        const creatorUser = await this.usersRepository.findOne({
-          where: { stellar_address: event.creator_address },
-        });
-
-        // Get flags for this event (if any)
-        const flags: any[] = [];
-
-        // Get admin actions for this event
-        const adminActions: any[] = [];
-
-        return {
-          id: event.id,
-          title: event.title,
-          description: event.description,
-          status: event.is_cancelled
-            ? 'cancelled'
-            : event.is_active
-              ? 'active'
-              : 'completed',
-          creator: {
-            id: creatorUser?.id || '',
-            stellar_address: event.creator_address,
-            username: creatorUser?.username,
-            avatar_url: creatorUser?.avatar_url,
-            is_verified: creatorUser?.role === 'admin' || false,
-          },
-          participant_count: participantCount,
-          match_count: matchCount,
-          flags,
-          admin_actions: adminActions,
-          created_at: event.created_at.toISOString(),
-          updated_at: event.created_at.toISOString(),
-        };
-      }),
-    );
-
-    return {
-      data: enrichedEvents,
-      total,
-      page: page,
-      limit: take,
-    };
-  }
-  /**
-   * Bulk-imports markets from a CSV string. Validates each row independently
-   * via CreateMarketDto/class-validator; invalid rows are reported with
-   * reasons and do not abort the rest of the import. Each valid row is
-   * created in its own transaction via createMarketRowTransactional, so a
-   * failure on one row (validation or Soroban) never rolls back another
-   * row's already-committed market.
-   */
-  async importMarketsFromCsv(
-    csv: string,
-    userId: string,
-  ): Promise<BulkImportMarketsResponseDto> {
-    const user = await this.usersRepository.findOne({ where: { id: userId } });
-    if (!user) {
-      throw new NotFoundException('User not found');
-    }
-
-    const lines = csv
-      .trim()
-      .split(/\r?\n/)
-      .filter((l) => l.trim().length > 0);
-    if (lines.length < 2) {
-      throw new BadRequestException(
-        'CSV must contain a header row and at least one data row',
-      );
-    }
-
-    const header = lines[0].split(',').map((h) => h.trim());
-    const dataRows = lines.slice(1);
-    const results: BulkImportRowResult[] = [];
-    let createdCount = 0;
-
-    for (let i = 0; i < dataRows.length; i++) {
-      const rowNumber = i + 2; // +1 for header, +1 for 1-indexing
-      const cells = dataRows[i].split(',').map((c) => c.trim());
-
-      if (cells.length !== header.length) {
-        results.push({
-          row: rowNumber,
-          status: 'failed',
-          errors: [
-            'Expected ' + header.length + ' columns, got ' + cells.length,
-          ],
-        });
-        continue;
-      }
-
-      const raw: Record<string, string> = {};
-      header.forEach((col, idx) => {
-        raw[col] = cells[idx];
-      });
-
-      const plain: Record<string, unknown> = {
-        title: raw.title,
-        description: raw.description,
-        category: raw.category,
-        outcome_options: raw.outcome_options
-          ? raw.outcome_options.split(';').map((s) => s.trim())
-          : [],
-        end_time: raw.end_time,
-        resolution_time: raw.resolution_time,
-        creator_fee_bps:
-          raw.creator_fee_bps !== undefined
-            ? Number(raw.creator_fee_bps)
-            : undefined,
-        min_stake_stroops: raw.min_stake_stroops,
-        max_stake_stroops: raw.max_stake_stroops,
-        is_public:
-          raw.is_public !== undefined
-            ? raw.is_public.toLowerCase() === 'true'
-            : undefined,
-      };
-
-      const dto = plainToInstance(CreateMarketDto, plain);
-      const errors = await validate(dto as object);
-      if (errors.length > 0) {
-        const messages = errors.flatMap((e) =>
-          Object.values(e.constraints ?? {}),
-        );
-        results.push({ row: rowNumber, status: 'failed', errors: messages });
-        continue;
-      }
-
-      try {
-        const market = await this.marketsService.createMarketRowTransactional(
-          dto,
-          user,
-        );
-        results.push({
-          row: rowNumber,
-          status: 'created',
-          market_id: market.id,
-        });
-        createdCount++;
-      } catch (err) {
-        const message =
-          err instanceof Error ? err.message : 'Unknown error creating market';
-        results.push({ row: rowNumber, status: 'failed', errors: [message] });
-      }
-    }
-
-    return {
-      total: dataRows.length,
-      created_count: createdCount,
-      failed_count: dataRows.length - createdCount,
-      results,
-    };
   }
 }

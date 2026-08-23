@@ -30,22 +30,7 @@ import {
   FollowStatsResponseDto,
 } from './dto/user-follow.dto';
 import { User } from './entities/user.entity';
-import {
-  ListUserPredictionsDto,
-  PaginatedPublicUserPredictionsResponse,
-} from './dto/list-user-predictions.dto';
-import {
-  ListUserBookmarksDto,
-  PaginatedUserBookmarksResponse,
-} from './dto/list-user-bookmarks.dto';
 import { ApiBearerAuth } from '@nestjs/swagger';
-
-import { ListUserCompetitionsDto } from './dto/list-user-competitions.dto';
-import {
-  ListUserMarketsDto,
-  PaginatedUserMarketsResponse,
-} from './dto/list-user-markets.dto';
-import { UserStatsResponseDto } from './dto/user-stats.dto';
 import {
   ClaimReferralDto,
   ClaimReferralResponseDto,
@@ -68,34 +53,6 @@ export class UsersController {
     return plainToInstance(UserResponseDto, user, {
       excludeExtraneousValues: true,
     });
-  }
-
-  @Get('me/stats')
-  @ApiOperation({
-    summary: 'Get lightweight prediction stats for current user',
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'User stats retrieved successfully',
-    type: UserStatsResponseDto,
-  })
-  @ApiResponse({ status: 401, description: 'Unauthorized' })
-  getMyStats(@CurrentUser() user: User): Promise<UserStatsResponseDto> {
-    return this.usersService.getMyStats(user.id);
-  }
-
-  @Get('me/bookmarks')
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get favorite markets for current user' })
-  @ApiResponse({
-    status: 200,
-    description: 'Paginated user bookmarks',
-  })
-  async getUserBookmarks(
-    @CurrentUser() user: User,
-    @Query() query: ListUserBookmarksDto,
-  ): Promise<PaginatedUserBookmarksResponse> {
-    return this.usersService.findUserBookmarks(user.id, query);
   }
 
   @Get('me/referrals')
@@ -174,51 +131,6 @@ export class UsersController {
     return plainToInstance(PublicUserDto, user, {
       excludeExtraneousValues: true,
     });
-  }
-
-  @Get(':address/predictions')
-  @Public()
-  @UsePipes(
-    new ValidationPipe({ whitelist: true, forbidNonWhitelisted: false }),
-  )
-  @ApiOperation({
-    summary: "Get a user's predictions for resolved markets (public)",
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Paginated predictions for resolved markets only',
-  })
-  async getPublicPredictions(
-    @Param('address') address: string,
-    @Query() query: ListUserPredictionsDto,
-  ): Promise<PaginatedPublicUserPredictionsResponse> {
-    return this.usersService.findPublicPredictionsByAddress(address, query);
-  }
-
-  @Get(':address/markets')
-  @Public()
-  @UsePipes(
-    new ValidationPipe({ whitelist: true, forbidNonWhitelisted: false }),
-  )
-  @ApiOperation({ summary: 'List markets created by a user (public)' })
-  @ApiResponse({ status: 200, description: 'Paginated markets list' })
-  @ApiResponse({ status: 404, description: 'User not found' })
-  async getUserMarkets(
-    @Param('address') address: string,
-    @Query() query: ListUserMarketsDto,
-  ): Promise<PaginatedUserMarketsResponse> {
-    return this.usersService.findMarketsByAddress(address, query);
-  }
-
-  @Get(':address/competitions')
-  @Public()
-  @ApiOperation({ summary: 'Get competitions a user has participated in' })
-  @ApiResponse({ status: 200, description: 'List of competitions' })
-  async getUserCompetitions(
-    @Param('address') address: string,
-    @Query() query: ListUserCompetitionsDto,
-  ) {
-    return this.usersService.findUserCompetitions(address, query);
   }
 
   @Get('me/export')

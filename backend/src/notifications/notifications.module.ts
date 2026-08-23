@@ -12,10 +12,6 @@ import { DigestService } from './digest.service';
 import { UsersModule } from '../users/users.module';
 import { User } from '../users/entities/user.entity';
 import { UserPreferences } from '../users/entities/user-preferences.entity';
-import { CreatorEvent } from '../matches/entities/creator-event.entity';
-import { Match } from '../matches/entities/match.entity';
-import { MatchPrediction } from '../matches/entities/match-prediction.entity';
-import { WebsocketModule } from '../websocket/websocket.module';
 
 @Module({
   imports: [
@@ -26,12 +22,8 @@ import { WebsocketModule } from '../websocket/websocket.module';
       NotificationCategoryPreference,
       User,
       UserPreferences,
-      CreatorEvent,
-      Match,
-      MatchPrediction,
     ]),
     UsersModule,
-    WebsocketModule,
   ],
   controllers: [NotificationsController],
   providers: [

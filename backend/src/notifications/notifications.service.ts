@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, FindOptionsWhere } from 'typeorm';
 import { Notification, NotificationType } from './entities/notification.entity';
@@ -11,7 +11,6 @@ import {
   NotificationCategoryPreference,
   NotificationCategory,
 } from './entities/notification-category-preference.entity';
-import { NotificationBroadcasterService } from '../websocket/notification-broadcaster.service';
 import { UpdateCategoryPreferenceDto } from './dto/update-category-preference.dto';
 import { CategoryPreferenceResponseDto } from './dto/category-preference-response.dto';
 
@@ -58,6 +57,8 @@ export function isInQuietHours(quietHours: string, now = new Date()): boolean {
 
 @Injectable()
 export class NotificationsService {
+  private readonly logger = new Logger(NotificationsService.name);
+
   /**
    * In-memory pending buckets for HOURLY and DAILY users.
    * Key: `${frequency}:${userAddress}`, Value: ordered list of saved notifications.
@@ -73,7 +74,6 @@ export class NotificationsService {
     private readonly preferencesRepository: Repository<NotificationPreference>,
     @InjectRepository(NotificationCategoryPreference)
     private readonly categoryPreferencesRepository: Repository<NotificationCategoryPreference>,
-    private readonly notificationBroadcaster: NotificationBroadcasterService,
   ) {}
 
   // -------------------------------------------------------------------------
@@ -159,15 +159,11 @@ export class NotificationsService {
   // Instant delivery (WebSocket broadcast)
   // -------------------------------------------------------------------------
 
-  private deliverInstant(userAddress: string, saved: Notification): void {
-    this.notificationBroadcaster.broadcastNewNotification(userAddress, {
-      id: saved.id,
-      type: saved.type,
-      title: saved.title,
-      message: saved.message,
-      data: saved.data ?? undefined,
-      created_at: saved.created_at,
-    });
+  private deliverInstant(_userAddress: string, saved: Notification): void {
+    // TODO(issue): push `saved` to the user in real time (WebSocket/SSE).
+    // Real-time transport was removed in the savings pivot; persistence above
+    // already stored the notification for polling clients.
+    this.logger.debug(`notification ${saved.id} ready for instant delivery`);
   }
 
   // -------------------------------------------------------------------------
@@ -263,7 +259,8 @@ export class NotificationsService {
       throw new NotFoundException('Notification not found');
     }
 
-    this.notificationBroadcaster.broadcastNotificationRead(userAddress, id);
+    // TODO(issue): push a "notification read" event over real-time transport.
+    void userAddress;
   }
 
   async markAllAsRead(userAddress: string): Promise<{ unreadCount: number }> {
