@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import Navbar from "@/components/Navbar";
 import GithubIcon from "@/components/GithubIcon";
+import WaitlistForm from "@/components/WaitlistForm";
 
 const coreFeatures = [
   {
@@ -269,7 +270,7 @@ export default function Home() {
                 <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
               </a>
               <a
-                href="https://github.com/your-org/stow"
+                href="https://github.com/stowp/Stow"
                 className="flex w-full items-center justify-center gap-2 rounded-xl border border-border bg-card px-6 py-3.5 text-sm font-semibold text-foreground transition-colors hover:border-brand/40 sm:w-auto"
               >
                 <GithubIcon className="h-4 w-4" /> View on GitHub
@@ -529,11 +530,15 @@ export default function Home() {
               </h2>
               <p className="mx-auto mt-4 max-w-xl text-base leading-relaxed text-muted">
                 Built for developers, contributors and financial communities on
-                low-fee, fast-finality Stellar. Clone the repo and start building.
+                low-fee, fast-finality Stellar. Join the waitlist for launch
+                updates, or clone the repo and start building.
               </p>
+
+              <WaitlistForm />
+
               <div className="mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row">
                 <a
-                  href="https://github.com/your-org/stow"
+                  href="https://github.com/stowp/Stow"
                   className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-brand to-brand-2 px-6 py-3.5 text-sm font-semibold text-background shadow-xl shadow-brand/25 transition-transform hover:scale-[1.03] sm:w-auto"
                 >
                   <GithubIcon className="h-4 w-4" /> Clone the repository
@@ -586,8 +591,8 @@ export default function Home() {
               <div>
                 <h4 className="text-sm font-semibold">Community</h4>
                 <ul className="mt-4 space-y-2.5 text-sm text-muted">
-                  <li><a href="https://github.com/your-org/stow" className="hover:text-foreground">GitHub</a></li>
-                  <li><a href="https://github.com/your-org/stow/issues" className="hover:text-foreground">Issues</a></li>
+                  <li><a href="https://github.com/stowp/Stow" className="hover:text-foreground">GitHub</a></li>
+                  <li><a href="https://github.com/stowp/Stow/issues" className="hover:text-foreground">Issues</a></li>
                   <li><a href="https://discord.gg/stow" className="hover:text-foreground">Discord</a></li>
                 </ul>
               </div>

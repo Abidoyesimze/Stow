@@ -15,12 +15,33 @@ const links = [
 export default function Navbar() {
   const [open, setOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
+  const [active, setActive] = useState<string>("");
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 12);
     onScroll();
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
+  // Scroll-spy: highlight the nav link for the section currently in view.
+  useEffect(() => {
+    const sections = links
+      .map((l) => document.getElementById(l.href.slice(1)))
+      .filter((el): el is HTMLElement => el !== null);
+    if (sections.length === 0) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) setActive(`#${entry.target.id}`);
+        }
+      },
+      { rootMargin: "-45% 0px -50% 0px", threshold: 0 },
+    );
+
+    sections.forEach((el) => observer.observe(el));
+    return () => observer.disconnect();
   }, []);
 
   return (
@@ -44,7 +65,10 @@ export default function Navbar() {
             <a
               key={l.href}
               href={l.href}
-              className="text-sm text-muted transition-colors hover:text-foreground"
+              aria-current={active === l.href ? "true" : undefined}
+              className={`text-sm transition-colors hover:text-foreground ${
+                active === l.href ? "text-brand" : "text-muted"
+              }`}
             >
               {l.label}
             </a>
@@ -53,7 +77,7 @@ export default function Navbar() {
 
         <div className="hidden items-center gap-3 md:flex">
           <a
-            href="https://github.com/your-org/stow"
+            href="https://github.com/stowp/Stow"
             className="flex items-center gap-2 rounded-lg border border-border px-3.5 py-2 text-sm text-muted transition-colors hover:border-brand/40 hover:text-foreground"
           >
             <GithubIcon className="h-4 w-4" /> GitHub
@@ -84,7 +108,10 @@ export default function Navbar() {
                 key={l.href}
                 href={l.href}
                 onClick={() => setOpen(false)}
-                className="rounded-lg px-3 py-2.5 text-sm text-muted transition-colors hover:bg-white/5 hover:text-foreground"
+                aria-current={active === l.href ? "true" : undefined}
+                className={`rounded-lg px-3 py-2.5 text-sm transition-colors hover:bg-white/5 hover:text-foreground ${
+                  active === l.href ? "text-brand" : "text-muted"
+                }`}
               >
                 {l.label}
               </a>
