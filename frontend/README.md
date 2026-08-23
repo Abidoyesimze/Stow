@@ -1,120 +1,36 @@
-# InsightArena — Frontend
-
-Next.js web application for the InsightArena decentralized prediction market platform. Built with React 19, Tailwind CSS, and Framer Motion.
-
----
-
-## Tech Stack
-
-| Layer           | Technology              |
-| --------------- | ----------------------- |
-| Framework       | Next.js 16 (App Router) |
-| Language        | TypeScript 5            |
-| Styling         | Tailwind CSS 4          |
-| Animations      | Framer Motion           |
-| UI Primitives   | Radix UI                |
-| Icons           | Lucide React            |
-| Package Manager | pnpm                    |
-
----
-
-## Prerequisites
-
-- Node.js 20+
-- pnpm — `npm install -g pnpm`
-
----
+This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
 ## Getting Started
 
-```bash
-# 1. Install dependencies
-pnpm install
-
-# 2. Start the development server
-pnpm run dev
-```
-
-Open `http://localhost:3000` in your browser.
-
----
-
-## Scripts
+First, run the development server:
 
 ```bash
-pnpm run dev      # Start development server (Turbopack)
-pnpm run build    # Build for production
-pnpm run start    # Start production server
-pnpm run lint     # Run Next.js ESLint
+npm run dev
+# or
+yarn dev
+# or
+pnpm dev
+# or
+bun dev
 ```
 
----
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
-## Project Structure
+You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
-```
-src/
-├── app/                        # Next.js App Router pages
-│   ├── (authenticated)/        # Protected routes (dashboard, profile, etc.)
-│   │   ├── dashboard/
-│   │   ├── markets/
-│   │   ├── competitions/
-│   │   ├── leaderboards/
-│   │   ├── my-predictions/
-│   │   ├── rewards/
-│   │   ├── wallet/
-│   │   ├── profile/
-│   │   └── settings/
-│   ├── events/                 # Public events page
-│   ├── leaderboard/            # Public leaderboard
-│   ├── docs/                   # Documentation page
-│   ├── trading/                # Trading interface
-│   ├── login/ & signin/        # Auth pages
-│   ├── terms/ & privacy/       # Legal pages
-│   └── page.tsx                # Landing page
-├── component/                  # Reusable components
-│   ├── Homepage/               # Landing page sections
-│   ├── dashboard/              # Dashboard components
-│   ├── leaderboard/            # Leaderboard components
-│   ├── events/                 # Events components
-│   ├── rewards/                # Rewards components
-│   ├── trading/                # Trading components
-│   └── ui/                     # Base UI primitives
-└── lib/                        # Utilities and helpers
-```
+This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
----
+## Learn More
 
-## Pages Overview
+To learn more about Next.js, take a look at the following resources:
 
-| Route           | Description                              |
-| --------------- | ---------------------------------------- |
-| `/`             | Landing page                             |
-| `/events`       | Public events and competitions           |
-| `/leaderboard`  | Global leaderboard                       |
-| `/docs`         | Platform documentation                   |
-| `/trading`      | Trading interface                        |
-| `/dashboard`    | User dashboard (authenticated)           |
-| `/markets`      | Prediction markets (authenticated)       |
-| `/competitions` | Competitions (authenticated)             |
-| `/rewards`      | Rewards and achievements (authenticated) |
-| `/wallet`       | Wallet management (authenticated)        |
-| `/profile`      | User profile (authenticated)             |
-| `/settings`     | Account settings (authenticated)         |
+- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
+- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
 
----
+You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
 
-## Building for Production
+## Deploy on Vercel
 
-```bash
-pnpm run build
-pnpm run start
-```
+The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
-The build output goes to `.next/`. Make sure all environment variables are set before building.
-
----
-
-## Contributing
-
-See the root [CONTRIBUTING.md](../CONTRIBUTING.md) for the full contribution guide.
+Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
