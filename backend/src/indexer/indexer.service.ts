@@ -10,6 +10,7 @@ import {
 import { FeeHistory } from './entities/fee-history.entity';
 import { IndexerCheckpoint } from './entities/indexer-checkpoint.entity';
 import { IndexerMetricsDto } from './dto/indexer-metrics.dto';
+import { BackfillResponseDto } from './dto/backfill.dto';
 import { ReconciliationService } from './reconciliation.service';
 
 export const CHECKPOINT_LEDGER_KEY = 'indexer:last_processed_ledger';
@@ -123,10 +124,20 @@ export class IndexerService implements OnModuleInit {
     await this.pollContractEvents();
   }
 
-  async backfillEvents(fromLedger: number, toLedger: number): Promise<number> {
+  async backfillEvents(
+    fromLedger: number,
+    toLedger: number,
+  ): Promise<BackfillResponseDto> {
     // TODO(issue): page through [fromLedger, toLedger] and enqueue events.
     this.logger.log(`Backfill requested ${fromLedger}..${toLedger}`);
-    return 0;
+    return {
+      total_fetched: 0,
+      newly_processed: 0,
+      already_indexed: 0,
+      errors: 0,
+      from_ledger: fromLedger,
+      to_ledger: toLedger,
+    };
   }
 
   async retryFailedEvents(): Promise<number> {
