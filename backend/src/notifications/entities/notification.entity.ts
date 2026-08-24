@@ -16,6 +16,7 @@ export enum NotificationType {
   EventCancelled = 'event_cancelled',
   DisputeSlaApproaching = 'dispute_sla_approaching',
   DisputeSlaBreached = 'dispute_sla_breached',
+  GoalReached = 'goal_reached',
 }
 
 @Entity('notifications')
