@@ -4,12 +4,15 @@ import {
   Put,
   Patch,
   Delete,
+  Sse,
   Param,
   Query,
   Body,
   HttpCode,
   HttpStatus,
   UseGuards,
+  UnauthorizedException,
+  MessageEvent,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -19,6 +22,7 @@ import {
   ApiQuery,
   ApiBody,
 } from '@nestjs/swagger';
+import { Observable } from 'rxjs';
 import { IsEnum, IsOptional, IsString, Matches } from 'class-validator';
 import { NotificationsService } from './notifications.service';
 import {
@@ -123,6 +127,35 @@ export class NotificationsController {
       readFilter,
       type,
     );
+  }
+
+  // -------------------------------------------------------------------------
+  // Real-time stream (Server-Sent Events)
+  // -------------------------------------------------------------------------
+
+  @Sse(':address/stream')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({
+    summary: 'Stream new notifications for a user in real time via SSE',
+    description:
+      'Server-Sent Events stream. Emits one `notification` event per new ' +
+      'notification created for this user while connected. Does not replay ' +
+      'history — fetch GET /notifications/:address first, then subscribe.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'text/event-stream of newly created notifications',
+  })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  streamNotifications(
+    @Param('address') address: string,
+    @CurrentUser() user: User,
+  ): Observable<MessageEvent> {
+    if (user.stellar_address !== address) {
+      throw new UnauthorizedException();
+    }
+
+    return this.notificationsService.streamForUser(address);
   }
 
   // -------------------------------------------------------------------------
