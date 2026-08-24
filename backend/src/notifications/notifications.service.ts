@@ -1,6 +1,12 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  MessageEvent,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, FindOptionsWhere } from 'typeorm';
+import { Observable, Subject, filter, map } from 'rxjs';
 import { Notification, NotificationType } from './entities/notification.entity';
 import {
   NotificationPreference,
@@ -22,6 +28,11 @@ interface PendingEntry {
   userAddress: string;
   notification: Notification;
   enqueuedAt: Date;
+}
+
+interface InstantNotificationEvent {
+  userAddress: string;
+  notification: Notification;
 }
 
 // ---------------------------------------------------------------------------
@@ -66,6 +77,14 @@ export class NotificationsService {
    * The DigestService (or a scheduler) calls `drainPending` to consume these.
    */
   private readonly pendingBuckets = new Map<string, PendingEntry[]>();
+
+  /**
+   * Broadcast bus for real-time (SSE) delivery. Every instant-delivered
+   * notification is published here; `streamForUser` filters to one user's
+   * subscription. In-process only — a multi-instance deployment needs a
+   * shared bus (e.g. Redis pub/sub) fed from the same publish point.
+   */
+  private readonly instantNotifications$ = new Subject<InstantNotificationEvent>();
 
   constructor(
     @InjectRepository(Notification)
@@ -156,14 +175,30 @@ export class NotificationsService {
   }
 
   // -------------------------------------------------------------------------
-  // Instant delivery (WebSocket broadcast)
+  // Instant delivery (Server-Sent Events)
   // -------------------------------------------------------------------------
 
-  private deliverInstant(_userAddress: string, saved: Notification): void {
-    // TODO(issue): push `saved` to the user in real time (WebSocket/SSE).
-    // Real-time transport was removed in the savings pivot; persistence above
-    // already stored the notification for polling clients.
-    this.logger.debug(`notification ${saved.id} ready for instant delivery`);
+  private deliverInstant(userAddress: string, saved: Notification): void {
+    this.instantNotifications$.next({ userAddress, notification: saved });
+    this.logger.debug(`notification ${saved.id} published to SSE stream`);
+  }
+
+  /**
+   * Observable of new notifications for `userAddress`, formatted as SSE
+   * `MessageEvent`s. Subscribed by the controller's `@Sse` endpoint — one
+   * subscription per connected client.
+   */
+  streamForUser(userAddress: string): Observable<MessageEvent> {
+    return this.instantNotifications$.pipe(
+      filter((event: InstantNotificationEvent) => event.userAddress === userAddress),
+      map(
+        (event: InstantNotificationEvent): MessageEvent => ({
+          type: 'notification',
+          data: event.notification,
+          id: String(event.notification.id),
+        }),
+      ),
+    );
   }
 
   // -------------------------------------------------------------------------
