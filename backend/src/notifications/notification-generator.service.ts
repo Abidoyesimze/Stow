@@ -24,9 +24,19 @@ export class NotificationGeneratorService {
   ) {}
 
   /** A savings goal reached its target. */
-  async handleGoalReached(_data: Record<string, unknown>): Promise<void> {
-    // TODO(issue): look up goal + owner, then notificationsService.create(...).
-    this.logger.debug('handleGoalReached: not yet implemented');
+  async handleGoalReached(data: {
+    goalId: string;
+    owner: string;
+    name: string;
+    targetAmount: string;
+  }): Promise<void> {
+    await this.notificationsService.create(
+      data.owner,
+      NotificationType.GoalReached,
+      'Savings goal reached',
+      `Your goal "${data.name}" reached its target of ${data.targetAmount}.`,
+      { goal_id: data.goalId, target_amount: data.targetAmount },
+    );
   }
 
   /** A locked savings plan passed its unlock time. */
@@ -40,7 +50,4 @@ export class NotificationGeneratorService {
     // TODO(issue): notify each member of their settled share.
     this.logger.debug('handleGroupSettled: not yet implemented');
   }
-
-  /** Reference to keep NotificationType wired for savings notification kinds. */
-  protected readonly types = NotificationType;
 }

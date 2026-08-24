@@ -10,6 +10,9 @@ import { FeeHistory } from './entities/fee-history.entity';
 import { IndexerCheckpoint } from './entities/indexer-checkpoint.entity';
 import { ReconciliationService } from './reconciliation.service';
 import { SorobanService, SorobanRpcEvent } from '../soroban/soroban.service';
+import { GoalsService } from '../goals/goals.service';
+import { BalanceService } from '../savings/balance.service';
+import { NotificationGeneratorService } from '../notifications/notification-generator.service';
 
 describe('IndexerService', () => {
   let service: IndexerService;
@@ -82,6 +85,9 @@ describe('IndexerService', () => {
         },
         { provide: ReconciliationService, useValue: {} },
         { provide: SorobanService, useValue: sorobanService },
+        { provide: GoalsService, useValue: {} },
+        { provide: BalanceService, useValue: {} },
+        { provide: NotificationGeneratorService, useValue: {} },
       ],
     }).compile();
 
