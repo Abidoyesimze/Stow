@@ -36,6 +36,7 @@ export interface SorobanRpcEvent {
   ledger: number;
   topic: string[];
   value: Record<string, unknown>;
+  txHash?: string;
 }
 
 export interface SorobanEventsResponse {
@@ -690,7 +691,14 @@ export class SorobanService {
       return null;
     }
 
-    return { id, ledger, topic, value };
+    const txHash =
+      typeof eventRecord.txHash === 'string'
+        ? eventRecord.txHash
+        : typeof eventRecord.tx_hash === 'string'
+          ? eventRecord.tx_hash
+          : undefined;
+
+    return { id, ledger, topic, value, txHash };
   }
 
   private toNumber(value: unknown): number | null {
@@ -732,6 +740,9 @@ export class SorobanService {
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       return value as Record<string, unknown>;
     }
-    return null;
+    if (value !== undefined && value !== null) {
+      return { value };
+    }
+    return {};
   }
 }

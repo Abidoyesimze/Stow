@@ -12,6 +12,7 @@ import { IndexerCheckpoint } from './entities/indexer-checkpoint.entity';
 import { IndexerMetricsDto } from './dto/indexer-metrics.dto';
 import { BackfillResponseDto } from './dto/backfill.dto';
 import { ReconciliationService } from './reconciliation.service';
+import { SorobanService } from '../soroban/soroban.service';
 
 export const CHECKPOINT_LEDGER_KEY = 'indexer:last_processed_ledger';
 const CHECKPOINT_LEDGER_KEY_LATEST = 'indexer:latest_contract_ledger';
@@ -47,6 +48,7 @@ export class IndexerService implements OnModuleInit {
     @InjectRepository(IndexerCheckpoint)
     private readonly checkpointRepository: Repository<IndexerCheckpoint>,
     private readonly reconciliationService: ReconciliationService,
+    private readonly sorobanService: SorobanService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -65,14 +67,74 @@ export class IndexerService implements OnModuleInit {
     if (this.isRunning) return;
     this.isRunning = true;
     try {
-      // TODO(issue): fetch events from Soroban RPC starting at the checkpoint,
-      // persist each as a ContractEvent(PENDING), then process the batch.
+      await this.fetchAndPersistEvents();
       await this.processPendingBatch();
     } catch (err) {
       this.logger.error('pollContractEvents failed', err as Error);
     } finally {
       this.isRunning = false;
     }
+  }
+
+  async fetchAndPersistEvents(): Promise<number> {
+    const lastProcessed = await this.getCheckpoint(CHECKPOINT_LEDGER_KEY);
+    const startLedger = lastProcessed > 0 ? lastProcessed + 1 : 1;
+
+    const { events, latestLedger } =
+      await this.sorobanService.getEvents(startLedger);
+
+    const safeLatestLedger =
+      typeof latestLedger === 'number' ? latestLedger : lastProcessed;
+    if (safeLatestLedger > 0) {
+      await this.setCheckpoint(CHECKPOINT_LEDGER_KEY_LATEST, safeLatestLedger);
+    }
+
+    let persistedCount = 0;
+    let maxEventLedger = lastProcessed;
+
+    for (let index = 0; index < events.length; index++) {
+      const rpcEvent = events[index];
+      const logIndex = index;
+
+      const existing = await this.contractEventRepository.findOne({
+        where: { ledger: rpcEvent.ledger, log_index: logIndex },
+      });
+
+      if (!existing) {
+        const eventType =
+          rpcEvent.topic && rpcEvent.topic.length > 0
+            ? rpcEvent.topic[0]
+            : 'unknown';
+
+        const contractEvent = this.contractEventRepository.create({
+          ledger: rpcEvent.ledger,
+          log_index: logIndex,
+          event_type: eventType,
+          data: rpcEvent.value,
+          tx_hash: rpcEvent.txHash ?? null,
+          status: ContractEventStatus.PENDING,
+          retry_count: 0,
+        });
+
+        await this.contractEventRepository.save(contractEvent);
+        persistedCount++;
+      }
+
+      if (rpcEvent.ledger > maxEventLedger) {
+        maxEventLedger = rpcEvent.ledger;
+      }
+    }
+
+    const newCheckpoint =
+      events.length > 0
+        ? Math.max(maxEventLedger, safeLatestLedger)
+        : Math.max(lastProcessed, safeLatestLedger);
+
+    if (newCheckpoint > lastProcessed) {
+      await this.setCheckpoint(CHECKPOINT_LEDGER_KEY, newCheckpoint);
+    }
+
+    return persistedCount;
   }
 
   private async processPendingBatch(): Promise<void> {
@@ -128,13 +190,66 @@ export class IndexerService implements OnModuleInit {
     fromLedger: number,
     toLedger: number,
   ): Promise<BackfillResponseDto> {
-    // TODO(issue): page through [fromLedger, toLedger] and enqueue events.
     this.logger.log(`Backfill requested ${fromLedger}..${toLedger}`);
+    let totalFetched = 0;
+    let newlyProcessed = 0;
+    let alreadyIndexed = 0;
+    let errors = 0;
+
+    try {
+      const { events } = await this.sorobanService.getEvents(fromLedger);
+      const inRangeEvents = events.filter(
+        (e) => e.ledger >= fromLedger && e.ledger <= toLedger,
+      );
+      totalFetched = inRangeEvents.length;
+
+      for (let index = 0; index < inRangeEvents.length; index++) {
+        const rpcEvent = inRangeEvents[index];
+        const logIndex = index;
+
+        const existing = await this.contractEventRepository.findOne({
+          where: { ledger: rpcEvent.ledger, log_index: logIndex },
+        });
+
+        if (existing) {
+          alreadyIndexed++;
+        } else {
+          try {
+            const eventType =
+              rpcEvent.topic && rpcEvent.topic.length > 0
+                ? rpcEvent.topic[0]
+                : 'unknown';
+
+            const contractEvent = this.contractEventRepository.create({
+              ledger: rpcEvent.ledger,
+              log_index: logIndex,
+              event_type: eventType,
+              data: rpcEvent.value,
+              tx_hash: rpcEvent.txHash ?? null,
+              status: ContractEventStatus.PENDING,
+              retry_count: 0,
+            });
+
+            await this.contractEventRepository.save(contractEvent);
+            await this.applyEvent(contractEvent);
+            newlyProcessed++;
+          } catch {
+            errors++;
+          }
+        }
+      }
+    } catch (err) {
+      this.logger.error(
+        `Backfill failed for ${fromLedger}..${toLedger}`,
+        err as Error,
+      );
+    }
+
     return {
-      total_fetched: 0,
-      newly_processed: 0,
-      already_indexed: 0,
-      errors: 0,
+      total_fetched: totalFetched,
+      newly_processed: newlyProcessed,
+      already_indexed: alreadyIndexed,
+      errors,
       from_ledger: fromLedger,
       to_ledger: toLedger,
     };
