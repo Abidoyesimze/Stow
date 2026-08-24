@@ -23,6 +23,7 @@ import { UsersModule } from './users/users.module';
 import { ContractModule } from './contract/contract.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { AccountModule } from './account/account.module';
+import { SavingsModule } from './savings/savings.module';
 import { TieredThrottlerGuard } from './common/guards/tiered-throttler.guard';
 
 @Module({
@@ -100,6 +101,7 @@ import { TieredThrottlerGuard } from './common/guards/tiered-throttler.guard';
     ContractModule,
     WebhooksModule,
     AccountModule,
+    SavingsModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
