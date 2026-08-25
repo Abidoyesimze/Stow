@@ -7,6 +7,7 @@ import { UserReferral } from './entities/user-referral.entity';
 import { UsersService } from './users.service';
 import { UsersController } from './users.controller';
 import { Notification } from '../notifications/entities/notification.entity';
+import { AnchorDeposit } from '../savings/entities/anchor-deposit.entity';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { Notification } from '../notifications/entities/notification.entity';
       UserFollow,
       UserReferral,
       Notification,
+      AnchorDeposit,
     ]),
   ],
   controllers: [UsersController],

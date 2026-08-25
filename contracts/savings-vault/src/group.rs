@@ -1,49 +1,251 @@
 //! Group savings — shared pools with contract-enforced rules and payouts.
 
-use soroban_sdk::{Address, Env, String};
+use soroban_sdk::{token, Address, Env, Map, String, Vec};
 
 use crate::error::Error;
-use crate::types::Group;
+use crate::events::{TOPIC_GROUP_CLOSED, TOPIC_GROUP_CONTRIBUTION, TOPIC_GROUP_CREATED, TOPIC_GROUP_PAYOUT};
+use crate::storage::extend_instance_ttl;
+use crate::types::{DataKey, Group};
 
 /// Create a group pool. The creator is the first member.
 ///
 /// Returns the new group id. `open == true` until `close` is called.
-pub fn create(_env: &Env, _creator: Address, _name: String) -> Result<u64, Error> {
-    // TODO(issue): allocate id, store Group with creator as sole member, emit event.
-    unimplemented!("group::create")
+pub fn create(env: &Env, creator: Address, name: String) -> Result<u64, Error> {
+    extend_instance_ttl(env);
+    creator.require_auth();
+
+    // Allocate a new group id
+    let id = next_group_id(env);
+
+    // Create members vector with creator as the sole member
+    let mut members = Vec::new(env);
+    members.push_back(creator.clone());
+
+    // Create the group with open = true and zero balance
+    let group = Group {
+        id,
+        creator: creator.clone(),
+        name: name.clone(),
+        members,
+        balance: 0,
+        shares_bps: Map::new(env),
+        open: true,
+        created_at: env.ledger().timestamp(),
+    };
+
+    // Store the group
+    env.storage()
+        .persistent()
+        .set(&DataKey::Group(id), &group);
+
+    // Emit group-created event
+    env.events()
+        .publish((TOPIC_GROUP_CREATED,), (id, creator, name));
+
+    Ok(id)
 }
 
 /// Join an open group.
 ///
 /// Errors `GroupClosed` if the group is not accepting members.
-pub fn join(_env: &Env, _member: Address, _group_id: u64) -> Result<(), Error> {
-    // TODO(issue): auth, open check, add to members (idempotent), emit event.
-    unimplemented!("group::join")
+pub fn join(env: &Env, member: Address, group_id: u64) -> Result<(), Error> {
+    extend_instance_ttl(env);
+    member.require_auth();
+
+    // Load the group
+    let mut group: Group = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Group(group_id))
+        .ok_or(Error::NotFound)?;
+
+    // Check if the group is open
+    if !group.open {
+        return Err(Error::GroupClosed);
+    }
+
+    // Check if member is already in the group (idempotent)
+    let already_member = group.members.iter().any(|m| m == member);
+    
+    if !already_member {
+        // Add member to the group
+        group.members.push_back(member.clone());
+
+        // Save the updated group
+        env.storage()
+            .persistent()
+            .set(&DataKey::Group(group_id), &group);
+
+        // Emit group-joined event
+        env.events()
+            .publish((crate::events::TOPIC_GROUP_JOINED,), (group_id, member));
+    }
+
+    Ok(())
 }
 
 /// Contribute `amount` into the shared pool.
 ///
 /// Errors `NotAMember` if the caller has not joined.
-pub fn contribute(_env: &Env, _member: Address, _group_id: u64, _amount: i128) -> Result<(), Error> {
-    // TODO(issue): auth, membership check, transfer_in, increment pool balance, event.
-    unimplemented!("group::contribute")
+pub fn contribute(env: &Env, member: Address, group_id: u64, amount: i128) -> Result<(), Error> {
+    extend_instance_ttl(env);
+    member.require_auth();
+
+    // Validate amount
+    if amount <= 0 {
+        return Err(Error::InvalidAmount);
+    }
+
+    // Load the group
+    let mut group: Group = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Group(group_id))
+        .ok_or(Error::NotFound)?;
+
+    // Verify membership
+    let is_member = group.members.iter().any(|m| m == member);
+    if !is_member {
+        return Err(Error::NotAMember);
+    }
+
+    // Get token address and transfer tokens from member to contract
+    let token_address: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::Token)
+        .ok_or(Error::NotInitialized)?;
+    
+    let token_client = token::Client::new(env, &token_address);
+    token_client.transfer(&member, &env.current_contract_address(), &amount);
+
+    // Increment pool balance
+    group.balance += amount;
+
+    // Save updated group
+    env.storage()
+        .persistent()
+        .set(&DataKey::Group(group_id), &group);
+
+    // Emit contribution event
+    env.events()
+        .publish((TOPIC_GROUP_CONTRIBUTION,), (group_id, member, amount));
+
+    Ok(())
 }
 
 /// Close the group to new members and lock the membership set so shares can
 /// be settled. Creator-only.
-pub fn close(_env: &Env, _creator: Address, _group_id: u64) -> Result<(), Error> {
-    // TODO(issue): creator auth, set open = false, emit event.
-    unimplemented!("group::close")
+pub fn close(env: &Env, creator: Address, group_id: u64) -> Result<(), Error> {
+    extend_instance_ttl(env);
+    creator.require_auth();
+
+    // Load the group
+    let mut group: Group = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Group(group_id))
+        .ok_or(Error::NotFound)?;
+
+    // Verify creator
+    if group.creator != creator {
+        return Err(Error::Unauthorized);
+    }
+
+    // Set open to false
+    group.open = false;
+
+    // Save updated group
+    env.storage()
+        .persistent()
+        .set(&DataKey::Group(group_id), &group);
+
+    // Emit group closed event
+    env.events()
+        .publish((TOPIC_GROUP_CLOSED,), (group_id, creator));
+
+    Ok(())
 }
 
 /// Equal-split payout: divide the pool balance evenly across members and
 /// transfer each member their share. See `group_split` for weighted payouts.
-pub fn payout_equal(_env: &Env, _caller: Address, _group_id: u64) -> Result<(), Error> {
-    // TODO(issue): closed check, compute balance / members.len(), transfer_out each,
-    //              handle remainder deterministically, zero the pool, emit event.
-    unimplemented!("group::payout_equal")
+pub fn payout_equal(env: &Env, _caller: Address, group_id: u64) -> Result<(), Error> {
+    extend_instance_ttl(env);
+
+    // Load the group
+    let mut group: Group = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Group(group_id))
+        .ok_or(Error::NotFound)?;
+
+    // Require closed group
+    if group.open {
+        return Err(Error::GroupClosed);
+    }
+
+    // Get the number of members
+    let member_count = group.members.len();
+    if member_count == 0 {
+        return Err(Error::NotFound); // No members to payout
+    }
+
+    // Calculate equal share and remainder
+    let total_balance = group.balance;
+    let share_per_member = total_balance / (member_count as i128);
+    let mut remainder = total_balance % (member_count as i128);
+
+    // Get token address and create client
+    let token_address: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::Token)
+        .ok_or(Error::NotInitialized)?;
+    
+    let token_client = token::Client::new(env, &token_address);
+    let contract_address = env.current_contract_address();
+
+    // Transfer to each member
+    for (index, member) in group.members.iter().enumerate() {
+        let mut payout_amount = share_per_member;
+        
+        // Assign remainder to the first member (creator) deterministically
+        if index == 0 && remainder > 0 {
+            payout_amount += remainder;
+            remainder = 0;
+        }
+
+        // Transfer tokens to member
+        token_client.transfer(&contract_address, &member, &payout_amount);
+
+        // Emit payout event for each member
+        env.events()
+            .publish((TOPIC_GROUP_PAYOUT,), (group_id, member.clone(), payout_amount));
+    }
+
+    // Zero the pool balance
+    group.balance = 0;
+
+    // Save updated group
+    env.storage()
+        .persistent()
+        .set(&DataKey::Group(group_id), &group);
+
+    Ok(())
 }
 
-pub fn get_group(_env: &Env, _group_id: u64) -> Result<Group, Error> {
-    unimplemented!("group::get_group")
+pub fn get_group(env: &Env, group_id: u64) -> Result<Group, Error> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Group(group_id))
+        .ok_or(Error::NotFound)
+}
+
+/// Helper to allocate the next group id.
+fn next_group_id(env: &Env) -> u64 {
+    let key = DataKey::NextGroupId;
+    let current: u64 = env.storage().instance().get(&key).unwrap_or(0);
+    let next = current + 1;
+    env.storage().instance().set(&key, &next);
+    next
 }

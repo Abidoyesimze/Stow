@@ -14,6 +14,7 @@ import { ApiKeyService } from './api-key.service';
 import { ApiKeyController } from './api-key.controller';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { AuthAuditEvent } from './entities/auth-audit-event.entity';
+import { WebAuthnCredential } from './entities/webauthn-credential.entity';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { AuthAuditEvent } from './entities/auth-audit-event.entity';
       UserPreferences,
       RefreshToken,
       AuthAuditEvent,
+      WebAuthnCredential,
     ]),
     JwtModule.registerAsync({
       imports: [ConfigModule],

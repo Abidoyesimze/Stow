@@ -15,6 +15,7 @@ import {
   MyReferralsResponseDto,
 } from './dto/referral.dto';
 import { Notification } from '../notifications/entities/notification.entity';
+import { AnchorDeposit } from '../savings/entities/anchor-deposit.entity';
 import { UpdateUserDto } from './dto/update-user.dto';
 import {
   UpdateUserPreferencesDto,
@@ -40,6 +41,8 @@ export class UsersService {
     private readonly notificationsRepository: Repository<Notification>,
     @InjectRepository(UserReferral)
     private readonly referralsRepository: Repository<UserReferral>,
+    @InjectRepository(AnchorDeposit)
+    private readonly anchorDepositsRepository: Repository<AnchorDeposit>,
   ) {}
 
   async findAll(): Promise<User[]> {
@@ -80,10 +83,16 @@ export class UsersService {
   async exportUserData(userId: string) {
     const user = await this.findById(userId);
 
-    const notifications = await this.notificationsRepository.find({
-      where: { user_address: user.stellar_address },
-      order: { created_at: 'DESC' },
-    });
+    const [notifications, anchorDeposits] = await Promise.all([
+      this.notificationsRepository.find({
+        where: { user_address: user.stellar_address },
+        order: { created_at: 'DESC' },
+      }),
+      this.anchorDepositsRepository.find({
+        where: { user_id: userId },
+        order: { created_at: 'DESC' },
+      }),
+    ]);
 
     return {
       profile: {
@@ -101,7 +110,17 @@ export class UsersService {
         read: n.read,
         created_at: n.created_at,
       })),
-      // TODO(issue): add savings export (accounts, locked plans, goals, groups).
+      savings: {
+        anchor_deposits: anchorDeposits.map((d) => ({
+          id: d.id,
+          asset_code: d.asset_code,
+          stellar_account: d.stellar_account,
+          transaction_id: d.transaction_id,
+          status: d.status,
+          created_at: d.created_at,
+          updated_at: d.updated_at,
+        })),
+      },
       exported_at: new Date().toISOString(),
     };
   }
@@ -128,18 +147,28 @@ export class UsersService {
     if (dto.email_notifications !== undefined) {
       prefs.email_notifications = dto.email_notifications;
     }
-    if (dto.market_resolution_notifications !== undefined) {
-      prefs.market_resolution_notifications =
-        dto.market_resolution_notifications;
-    }
-    if (dto.competition_notifications !== undefined) {
-      prefs.competition_notifications = dto.competition_notifications;
-    }
-    if (dto.leaderboard_notifications !== undefined) {
-      prefs.leaderboard_notifications = dto.leaderboard_notifications;
-    }
     if (dto.marketing_emails !== undefined) {
       prefs.marketing_emails = dto.marketing_emails;
+    }
+    if (dto.goal_created_notifications !== undefined) {
+      prefs.goal_created_notifications = dto.goal_created_notifications;
+    }
+    if (dto.goal_contribution_notifications !== undefined) {
+      prefs.goal_contribution_notifications =
+        dto.goal_contribution_notifications;
+    }
+    if (dto.goal_reached_notifications !== undefined) {
+      prefs.goal_reached_notifications = dto.goal_reached_notifications;
+    }
+    if (dto.deposit_notifications !== undefined) {
+      prefs.deposit_notifications = dto.deposit_notifications;
+    }
+    if (dto.withdrawal_notifications !== undefined) {
+      prefs.withdrawal_notifications = dto.withdrawal_notifications;
+    }
+    if (dto.group_settlement_notifications !== undefined) {
+      prefs.group_settlement_notifications =
+        dto.group_settlement_notifications;
     }
     if (dto.digest_frequency !== undefined) {
       prefs.digest_frequency = dto.digest_frequency;
@@ -156,10 +185,13 @@ export class UsersService {
     return {
       id: updated.id,
       email_notifications: updated.email_notifications,
-      market_resolution_notifications: updated.market_resolution_notifications,
-      competition_notifications: updated.competition_notifications,
-      leaderboard_notifications: updated.leaderboard_notifications,
       marketing_emails: updated.marketing_emails,
+      goal_created_notifications: updated.goal_created_notifications,
+      goal_contribution_notifications: updated.goal_contribution_notifications,
+      goal_reached_notifications: updated.goal_reached_notifications,
+      deposit_notifications: updated.deposit_notifications,
+      withdrawal_notifications: updated.withdrawal_notifications,
+      group_settlement_notifications: updated.group_settlement_notifications,
       digest_frequency: updated.digest_frequency,
       digest_hour: updated.digest_hour,
       digest_timezone: updated.digest_timezone,
