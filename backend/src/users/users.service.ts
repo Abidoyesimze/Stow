@@ -15,6 +15,7 @@ import {
   MyReferralsResponseDto,
 } from './dto/referral.dto';
 import { Notification } from '../notifications/entities/notification.entity';
+import { AnchorDeposit } from '../savings/entities/anchor-deposit.entity';
 import { UpdateUserDto } from './dto/update-user.dto';
 import {
   UpdateUserPreferencesDto,
@@ -40,6 +41,8 @@ export class UsersService {
     private readonly notificationsRepository: Repository<Notification>,
     @InjectRepository(UserReferral)
     private readonly referralsRepository: Repository<UserReferral>,
+    @InjectRepository(AnchorDeposit)
+    private readonly anchorDepositsRepository: Repository<AnchorDeposit>,
   ) {}
 
   async findAll(): Promise<User[]> {
@@ -80,10 +83,16 @@ export class UsersService {
   async exportUserData(userId: string) {
     const user = await this.findById(userId);
 
-    const notifications = await this.notificationsRepository.find({
-      where: { user_address: user.stellar_address },
-      order: { created_at: 'DESC' },
-    });
+    const [notifications, anchorDeposits] = await Promise.all([
+      this.notificationsRepository.find({
+        where: { user_address: user.stellar_address },
+        order: { created_at: 'DESC' },
+      }),
+      this.anchorDepositsRepository.find({
+        where: { user_id: userId },
+        order: { created_at: 'DESC' },
+      }),
+    ]);
 
     return {
       profile: {
@@ -101,7 +110,17 @@ export class UsersService {
         read: n.read,
         created_at: n.created_at,
       })),
-      // TODO(issue): add savings export (accounts, locked plans, goals, groups).
+      savings: {
+        anchor_deposits: anchorDeposits.map((d) => ({
+          id: d.id,
+          asset_code: d.asset_code,
+          stellar_account: d.stellar_account,
+          transaction_id: d.transaction_id,
+          status: d.status,
+          created_at: d.created_at,
+          updated_at: d.updated_at,
+        })),
+      },
       exported_at: new Date().toISOString(),
     };
   }

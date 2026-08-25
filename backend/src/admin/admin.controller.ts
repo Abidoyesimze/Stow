@@ -22,6 +22,7 @@ import { BulkUserActionDto } from './dto/bulk-user-action.dto';
 import { ListUsersQueryDto } from './dto/list-users-query.dto';
 import { ListVerifiedAddressesQueryDto } from './dto/list-verified-addresses-query.dto';
 import { UpdateUserRoleDto } from './dto/update-user-role.dto';
+import { SavingsOverviewDto } from './dto/savings-overview.dto';
 
 type RequestUser = Request & { user: { id: string } };
 
@@ -47,6 +48,20 @@ export class AdminController {
   })
   async listVerifiedAddresses(@Query() query: ListVerifiedAddressesQueryDto) {
     return this.adminService.listVerifiedAddresses(query);
+  }
+
+  @Get('savings/overview')
+  @Roles(Role.Admin, Role.Moderator)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Aggregate savings metrics (deposits, accounts, status breakdown)' })
+  @ApiResponse({
+    status: 200,
+    description: 'Savings overview metrics',
+    type: SavingsOverviewDto,
+  })
+  @ApiResponse({ status: 403, description: 'Forbidden — admin or moderator role required' })
+  async getSavingsOverview(): Promise<SavingsOverviewDto> {
+    return this.adminService.getSavingsOverview();
   }
 
   @Patch('users/:id/ban')
