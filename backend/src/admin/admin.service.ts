@@ -10,6 +10,7 @@ import { Repository } from 'typeorm';
 import { User } from '../users/entities/user.entity';
 import { UserFlag } from './entities/user-flag.entity';
 import { VerifiedAddress } from './entities/verified-address.entity';
+import { AnchorDeposit } from '../savings/entities/anchor-deposit.entity';
 import {
   BulkUserAction,
   BulkUserActionDto,
@@ -19,6 +20,7 @@ import {
 import { ListUsersQueryDto } from './dto/list-users-query.dto';
 import { ListVerifiedAddressesQueryDto } from './dto/list-verified-addresses-query.dto';
 import { UpdateUserRoleDto } from './dto/update-user-role.dto';
+import { SavingsOverviewDto } from './dto/savings-overview.dto';
 
 /**
  * Administrative operations.
@@ -39,6 +41,8 @@ export class AdminService {
     private readonly usersRepository: Repository<User>,
     @InjectRepository(VerifiedAddress)
     private readonly verifiedAddressesRepository: Repository<VerifiedAddress>,
+    @InjectRepository(AnchorDeposit)
+    private readonly anchorDepositRepository: Repository<AnchorDeposit>,
   ) {}
 
   async listUsers(query: ListUsersQueryDto) {
@@ -222,5 +226,51 @@ export class AdminService {
     );
 
     return user;
+  }
+
+  /**
+   * Aggregates savings metrics across all anchor_deposits rows.
+   *
+   * Returns:
+   *  - total_deposits           — total number of deposit rows
+   *  - total_savings_accounts   — number of distinct users with at least one deposit
+   *  - deposits_by_status       — count breakdown by status (pending / processing / completed / failed)
+   *  - computed_at              — ISO-8601 timestamp of when the query ran
+   */
+  async getSavingsOverview(): Promise<SavingsOverviewDto> {
+    // Single query: total rows, distinct users, and per-status counts in one pass
+    const rows: Array<{ status: string; count: string }> =
+      await this.anchorDepositRepository
+        .createQueryBuilder('d')
+        .select('d.status', 'status')
+        .addSelect('COUNT(*)', 'count')
+        .groupBy('d.status')
+        .getRawMany();
+
+    const statusMap: Record<string, number> = {};
+    let totalDeposits = 0;
+    for (const row of rows) {
+      const n = parseInt(row.count, 10);
+      statusMap[row.status] = n;
+      totalDeposits += n;
+    }
+
+    const totalAccounts: { count: string } | undefined =
+      await this.anchorDepositRepository
+        .createQueryBuilder('d')
+        .select('COUNT(DISTINCT d.user_id)', 'count')
+        .getRawOne();
+
+    return {
+      total_deposits: totalDeposits,
+      total_savings_accounts: parseInt(totalAccounts?.count ?? '0', 10),
+      deposits_by_status: {
+        pending: statusMap['pending'] ?? 0,
+        processing: statusMap['processing'] ?? 0,
+        completed: statusMap['completed'] ?? 0,
+        failed: statusMap['failed'] ?? 0,
+      },
+      computed_at: new Date().toISOString(),
+    };
   }
 }
