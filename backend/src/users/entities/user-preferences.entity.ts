@@ -24,35 +24,32 @@ export class UserPreferences {
   @Column({ default: true })
   email_notifications: boolean;
 
-  @Column({ default: true })
-  market_resolution_notifications: boolean;
-
-  @Column({ default: true })
-  competition_notifications: boolean;
-
-  @Column({ default: true })
-  leaderboard_notifications: boolean;
-
   @Column({ default: false })
   marketing_emails: boolean;
 
+  /** A savings goal the user created reached a milestone or was created. */
   @Column({ default: true })
-  event_created_notifications: boolean;
+  goal_created_notifications: boolean;
 
+  /** Someone contributed to a savings goal the user owns or participates in. */
   @Column({ default: true })
-  match_added_notifications: boolean;
+  goal_contribution_notifications: boolean;
 
+  /** A savings goal reached its target amount. */
   @Column({ default: true })
-  prediction_submitted_notifications: boolean;
+  goal_reached_notifications: boolean;
 
+  /** A deposit into a savings vault was confirmed. */
   @Column({ default: true })
-  match_resolved_notifications: boolean;
+  deposit_notifications: boolean;
 
+  /** A locked savings plan passed its unlock time and can be withdrawn. */
   @Column({ default: true })
-  winner_verified_notifications: boolean;
+  withdrawal_notifications: boolean;
 
+  /** A group savings pool was settled and paid out to members. */
   @Column({ default: true })
-  event_cancelled_notifications: boolean;
+  group_settlement_notifications: boolean;
 
   @Column({ type: 'varchar', default: 'off' })
   digest_frequency: 'daily' | 'weekly' | 'off';

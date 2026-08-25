@@ -10,11 +10,19 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Cron } from '@nestjs/schedule';
 import { randomBytes, randomUUID, createHash } from 'crypto';
 import { Keypair } from '@stellar/stellar-sdk';
+import {
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse,
+  type AuthenticationResponseJSON,
+  type AuthenticatorTransportFuture,
+  type PublicKeyCredentialRequestOptionsJSON,
+} from '@simplewebauthn/server';
 import { IsNull, Repository } from 'typeorm';
 import { User } from '../users/entities/user.entity';
 import { UserPreferences } from '../users/entities/user-preferences.entity';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { AuthAuditEvent } from './entities/auth-audit-event.entity';
+import { WebAuthnCredential } from './entities/webauthn-credential.entity';
 
 const DEFAULT_REFRESH_TOKEN_TTL_DAYS = 30;
 
@@ -25,6 +33,13 @@ export class AuthService implements OnModuleInit {
     { expiresAt: number; used: boolean }
   >();
   private readonly TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+  private passkeyChallengeCache = new Map<
+    string,
+    { expiresAt: number; used: boolean }
+  >();
+  private readonly PASSKEY_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
   private readonly logger = new Logger(AuthService.name);
 
   constructor(
@@ -38,6 +53,8 @@ export class AuthService implements OnModuleInit {
     private readonly refreshTokensRepository: Repository<RefreshToken>,
     @InjectRepository(AuthAuditEvent)
     private readonly authAuditEventsRepository: Repository<AuthAuditEvent>,
+    @InjectRepository(WebAuthnCredential)
+    private readonly webAuthnCredentialsRepository: Repository<WebAuthnCredential>,
   ) {}
 
   onModuleInit() {
@@ -56,6 +73,12 @@ export class AuthService implements OnModuleInit {
     for (const [key, entry] of this.challengeCache.entries()) {
       if (now > entry.expiresAt) {
         this.challengeCache.delete(key);
+        removed++;
+      }
+    }
+    for (const [key, entry] of this.passkeyChallengeCache.entries()) {
+      if (now > entry.expiresAt) {
+        this.passkeyChallengeCache.delete(key);
         removed++;
       }
     }
@@ -321,6 +344,132 @@ export class AuthService implements OnModuleInit {
     } catch (error) {
       this.logger.error(`Error verifying signature: ${error}`);
       return false;
+    }
+  }
+
+  // --- passkey (WebAuthn) login -------------------------------------------
+
+  /** Starts a passkey login: returns options for `navigator.credentials.get()`. */
+  async beginPasskeyAuthentication(): Promise<PublicKeyCredentialRequestOptionsJSON> {
+    const rpID = this.configService.get<string>('WEBAUTHN_RP_ID') ?? 'localhost';
+
+    const options = await generateAuthenticationOptions({
+      rpID,
+      userVerification: 'preferred',
+    });
+
+    this.passkeyChallengeCache.set(options.challenge, {
+      expiresAt: Date.now() + this.PASSKEY_TTL_MS,
+      used: false,
+    });
+
+    return options;
+  }
+
+  /**
+   * Completes a passkey login: verifies the signed assertion against the
+   * caller's registered credential and, on success, issues a session the
+   * same way `verifyChallenge` does for wallet logins.
+   */
+  async finishPasskeyAuthentication(
+    assertionResponse: AuthenticationResponseJSON,
+  ): Promise<{ access_token: string; refresh_token: string; user: User }> {
+    const challenge = this.extractChallengeFromClientData(
+      assertionResponse.response.clientDataJSON,
+    );
+
+    const challengeEntry = this.passkeyChallengeCache.get(challenge);
+    if (
+      !challengeEntry ||
+      challengeEntry.used ||
+      Date.now() > challengeEntry.expiresAt
+    ) {
+      throw new UnauthorizedException(
+        'No valid passkey challenge found or challenge expired',
+      );
+    }
+
+    const credential = await this.webAuthnCredentialsRepository.findOneBy({
+      credential_id: assertionResponse.id,
+    });
+    if (!credential) {
+      throw new UnauthorizedException('Passkey not recognized');
+    }
+
+    const rpID = this.configService.get<string>('WEBAUTHN_RP_ID') ?? 'localhost';
+    const origin =
+      this.configService.get<string>('WEBAUTHN_ORIGIN') ??
+      'http://localhost:3000';
+
+    let verification: Awaited<ReturnType<typeof verifyAuthenticationResponse>>;
+    try {
+      verification = await verifyAuthenticationResponse({
+        response: assertionResponse,
+        expectedChallenge: challenge,
+        expectedOrigin: origin,
+        expectedRPID: rpID,
+        credential: {
+          id: credential.credential_id,
+          publicKey: credential.public_key,
+          counter: Number(credential.counter),
+          transports: (credential.transports ?? undefined) as
+            | AuthenticatorTransportFuture[]
+            | undefined,
+        },
+      });
+    } catch (error) {
+      this.logger.warn(`Passkey verification failed: ${error}`);
+      throw new UnauthorizedException('Invalid passkey assertion');
+    }
+
+    if (!verification.verified) {
+      throw new UnauthorizedException('Invalid passkey assertion');
+    }
+
+    // Replay attack prevention: reject already-used challenges.
+    challengeEntry.used = true;
+
+    credential.counter = String(verification.authenticationInfo.newCounter);
+    credential.last_used_at = new Date();
+    await this.webAuthnCredentialsRepository.save(credential);
+
+    const user = await this.usersRepository.findOneBy({
+      id: credential.user_id,
+    });
+    if (!user) {
+      throw new UnauthorizedException('User not found or has been deleted');
+    }
+
+    const payload = { sub: user.id, stellar_address: user.stellar_address };
+    const access_token = await this.jwtService.signAsync(payload);
+
+    const familyId = randomUUID();
+    const { raw: refresh_token } = await this.issueRefreshToken(
+      user.id,
+      familyId,
+    );
+
+    return { access_token, refresh_token, user };
+  }
+
+  /**
+   * Pulls the WebAuthn challenge out of a signed assertion's clientDataJSON.
+   * The browser echoes back the exact base64url challenge it was given, so
+   * this lets a stateless server find which pending challenge to check the
+   * assertion against before running full verification.
+   */
+  private extractChallengeFromClientData(clientDataJSON: string): string {
+    try {
+      const decoded = Buffer.from(clientDataJSON, 'base64url').toString(
+        'utf8',
+      );
+      const parsed = JSON.parse(decoded) as { challenge?: string };
+      if (!parsed.challenge) {
+        throw new Error('missing challenge');
+      }
+      return parsed.challenge;
+    } catch {
+      throw new UnauthorizedException('Malformed passkey assertion');
     }
   }
 }

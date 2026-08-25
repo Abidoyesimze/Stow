@@ -147,18 +147,28 @@ export class UsersService {
     if (dto.email_notifications !== undefined) {
       prefs.email_notifications = dto.email_notifications;
     }
-    if (dto.market_resolution_notifications !== undefined) {
-      prefs.market_resolution_notifications =
-        dto.market_resolution_notifications;
-    }
-    if (dto.competition_notifications !== undefined) {
-      prefs.competition_notifications = dto.competition_notifications;
-    }
-    if (dto.leaderboard_notifications !== undefined) {
-      prefs.leaderboard_notifications = dto.leaderboard_notifications;
-    }
     if (dto.marketing_emails !== undefined) {
       prefs.marketing_emails = dto.marketing_emails;
+    }
+    if (dto.goal_created_notifications !== undefined) {
+      prefs.goal_created_notifications = dto.goal_created_notifications;
+    }
+    if (dto.goal_contribution_notifications !== undefined) {
+      prefs.goal_contribution_notifications =
+        dto.goal_contribution_notifications;
+    }
+    if (dto.goal_reached_notifications !== undefined) {
+      prefs.goal_reached_notifications = dto.goal_reached_notifications;
+    }
+    if (dto.deposit_notifications !== undefined) {
+      prefs.deposit_notifications = dto.deposit_notifications;
+    }
+    if (dto.withdrawal_notifications !== undefined) {
+      prefs.withdrawal_notifications = dto.withdrawal_notifications;
+    }
+    if (dto.group_settlement_notifications !== undefined) {
+      prefs.group_settlement_notifications =
+        dto.group_settlement_notifications;
     }
     if (dto.digest_frequency !== undefined) {
       prefs.digest_frequency = dto.digest_frequency;
@@ -175,10 +185,13 @@ export class UsersService {
     return {
       id: updated.id,
       email_notifications: updated.email_notifications,
-      market_resolution_notifications: updated.market_resolution_notifications,
-      competition_notifications: updated.competition_notifications,
-      leaderboard_notifications: updated.leaderboard_notifications,
       marketing_emails: updated.marketing_emails,
+      goal_created_notifications: updated.goal_created_notifications,
+      goal_contribution_notifications: updated.goal_contribution_notifications,
+      goal_reached_notifications: updated.goal_reached_notifications,
+      deposit_notifications: updated.deposit_notifications,
+      withdrawal_notifications: updated.withdrawal_notifications,
+      group_settlement_notifications: updated.group_settlement_notifications,
       digest_frequency: updated.digest_frequency,
       digest_hour: updated.digest_hour,
       digest_timezone: updated.digest_timezone,
