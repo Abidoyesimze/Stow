@@ -21,6 +21,7 @@ export const CHECKPOINT_LEDGER_KEY = 'indexer:last_processed_ledger';
 const CHECKPOINT_LEDGER_KEY_LATEST = 'indexer:latest_contract_ledger';
 const MAX_RETRIES = 5;
 const BATCH_SIZE = 100;
+const BACKFILL_MAX_PAGES = 1000;
 
 /**
  * Indexes on-chain events emitted by the Stow savings-vault contract into the
@@ -252,46 +253,59 @@ export class IndexerService implements OnModuleInit {
     let errors = 0;
 
     try {
-      const { events } = await this.sorobanService.getEvents(fromLedger);
-      const inRangeEvents = events.filter(
-        (e) => e.ledger >= fromLedger && e.ledger <= toLedger,
-      );
-      totalFetched = inRangeEvents.length;
+      let cursor = fromLedger;
+      let pages = 0;
 
-      for (let index = 0; index < inRangeEvents.length; index++) {
-        const rpcEvent = inRangeEvents[index];
-        const logIndex = index;
+      while (cursor <= toLedger && pages < BACKFILL_MAX_PAGES) {
+        pages++;
 
-        const existing = await this.contractEventRepository.findOne({
-          where: { ledger: rpcEvent.ledger, log_index: logIndex },
-        });
+        const { events } = await this.sorobanService.getEvents(cursor);
+        if (events.length === 0) break;
 
-        if (existing) {
-          alreadyIndexed++;
-        } else {
-          try {
-            const eventType =
-              rpcEvent.topic && rpcEvent.topic.length > 0
-                ? rpcEvent.topic[0]
-                : 'unknown';
+        const inRangeEvents = events.filter(
+          (e) => e.ledger >= fromLedger && e.ledger <= toLedger,
+        );
+        totalFetched += inRangeEvents.length;
 
-            const contractEvent = this.contractEventRepository.create({
-              ledger: rpcEvent.ledger,
-              log_index: logIndex,
-              event_type: eventType,
-              data: rpcEvent.value,
-              tx_hash: rpcEvent.txHash ?? null,
-              status: ContractEventStatus.PENDING,
-              retry_count: 0,
-            });
+        for (let index = 0; index < inRangeEvents.length; index++) {
+          const rpcEvent = inRangeEvents[index];
+          const logIndex = index;
 
-            await this.contractEventRepository.save(contractEvent);
-            await this.applyEvent(contractEvent);
-            newlyProcessed++;
-          } catch {
-            errors++;
+          const existing = await this.contractEventRepository.findOne({
+            where: { ledger: rpcEvent.ledger, log_index: logIndex },
+          });
+
+          if (existing) {
+            alreadyIndexed++;
+          } else {
+            try {
+              const eventType =
+                rpcEvent.topic && rpcEvent.topic.length > 0
+                  ? rpcEvent.topic[0]
+                  : 'unknown';
+
+              const contractEvent = this.contractEventRepository.create({
+                ledger: rpcEvent.ledger,
+                log_index: logIndex,
+                event_type: eventType,
+                data: rpcEvent.value,
+                tx_hash: rpcEvent.txHash ?? null,
+                status: ContractEventStatus.PENDING,
+                retry_count: 0,
+              });
+
+              await this.contractEventRepository.save(contractEvent);
+              await this.applyEvent(contractEvent);
+              newlyProcessed++;
+            } catch {
+              errors++;
+            }
           }
         }
+
+        const maxLedgerInPage = Math.max(...events.map((e) => e.ledger));
+        if (maxLedgerInPage < cursor) break; // no progress; avoid looping forever
+        cursor = maxLedgerInPage + 1;
       }
     } catch (err) {
       this.logger.error(

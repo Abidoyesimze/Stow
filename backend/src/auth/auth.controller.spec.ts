@@ -5,6 +5,7 @@ import { User } from '../users/entities/user.entity';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { VerifyChallengeDto } from './dto/verify-challenge.dto';
+import { PasskeyAuthenticationFinishDto } from './dto/passkey-authentication.dto';
 import { RateLimitService } from './rate-limit.service';
 
 const mockAuthService = () => ({
@@ -16,6 +17,8 @@ const mockAuthService = () => ({
   verifyChallenge: jest.fn(),
   verifyStellarSignature: jest.fn(),
   rotateRefreshToken: jest.fn(),
+  beginPasskeyAuthentication: jest.fn(),
+  finishPasskeyAuthentication: jest.fn(),
 });
 
 const mockConfigService = () => ({
@@ -108,6 +111,66 @@ describe('AuthController', () => {
       await expect(controller.verifyChallenge(dto)).rejects.toThrow(
         UnauthorizedException,
       );
+    });
+  });
+
+  describe('beginPasskeyAuthentication', () => {
+    it('returns the WebAuthn authentication options from the service', async () => {
+      const options = { challenge: 'abc123', rpId: 'localhost' };
+      authService.beginPasskeyAuthentication.mockResolvedValue(options);
+
+      const result = await controller.beginPasskeyAuthentication();
+
+      expect(result).toEqual(options);
+    });
+  });
+
+  describe('finishPasskeyAuthentication', () => {
+    const dto = {
+      response: {
+        id: 'cred-id-1',
+        rawId: 'cred-id-1',
+        type: 'public-key',
+        response: {
+          clientDataJSON: 'client-data',
+          authenticatorData: 'auth-data',
+          signature: 'sig',
+        },
+        clientExtensionResults: {},
+      },
+    } as unknown as PasskeyAuthenticationFinishDto;
+
+    it('returns access_token, refresh_token and user for a valid assertion', async () => {
+      const user = Object.assign(new User(), {
+        id: 'uuid-1',
+        stellar_address: 'GPASSKEY',
+      });
+      authService.finishPasskeyAuthentication.mockResolvedValue({
+        access_token: 'passkey.jwt.token',
+        refresh_token: 'raw-refresh-token',
+        user,
+      });
+
+      const result = await controller.finishPasskeyAuthentication(dto);
+
+      expect(authService.finishPasskeyAuthentication).toHaveBeenCalledWith(
+        dto.response,
+      );
+      expect(result).toEqual({
+        access_token: 'passkey.jwt.token',
+        refresh_token: 'raw-refresh-token',
+        user,
+      });
+    });
+
+    it('propagates UnauthorizedException for an invalid assertion', async () => {
+      authService.finishPasskeyAuthentication.mockRejectedValue(
+        new UnauthorizedException('Invalid passkey assertion'),
+      );
+
+      await expect(
+        controller.finishPasskeyAuthentication(dto),
+      ).rejects.toThrow(UnauthorizedException);
     });
   });
 

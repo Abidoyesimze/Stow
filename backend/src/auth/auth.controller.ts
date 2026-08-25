@@ -12,6 +12,7 @@ import { GenerateChallengeDto } from './dto/generate-challenge.dto';
 import { VerifyChallengeDto } from './dto/verify-challenge.dto';
 import { VerifyWalletDto } from './dto/verify-wallet.dto';
 import { RateLimitStatusDto } from './dto/rate-limit-status.dto';
+import { PasskeyAuthenticationFinishDto } from './dto/passkey-authentication.dto';
 import {
   RefreshTokenResponseDto,
   RotateRefreshTokenDto,
@@ -67,6 +68,37 @@ export class AuthController {
       dto.signature,
     );
     return { verified };
+  }
+
+  @Public()
+  @Post('passkey/authenticate/begin')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Begin a passkey login: get options for navigator.credentials.get()',
+  })
+  @ApiResponse({ status: 200, description: 'WebAuthn authentication options' })
+  async beginPasskeyAuthentication() {
+    return this.authService.beginPasskeyAuthentication();
+  }
+
+  @Public()
+  @Post('passkey/authenticate/finish')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Complete a passkey login by verifying the signed assertion',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Access token, refresh token and user issued for the session',
+  })
+  @ApiResponse({
+    status: 401,
+    description: 'Unauthorized - invalid, expired, or unrecognized passkey assertion',
+  })
+  async finishPasskeyAuthentication(
+    @Body() dto: PasskeyAuthenticationFinishDto,
+  ) {
+    return this.authService.finishPasskeyAuthentication(dto.response);
   }
 
   @Get('rate-limit')

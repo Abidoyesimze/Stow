@@ -258,19 +258,6 @@ export class EmailService implements OnModuleInit, OnModuleDestroy {
       return false;
     }
 
-    // Check category-level legacy preferences
-    if (prefs) {
-      if (template === 'event_cancelled' || template === 'event_created') {
-        if (!prefs.competition_notifications) return false;
-      }
-      if (template === 'match_result_available') {
-        if (!prefs.market_resolution_notifications) return false;
-      }
-      if (template === 'event_won') {
-        if (!prefs.leaderboard_notifications) return false;
-      }
-    }
-
     // Check per-category preference for email channel
     const category = this.mapTemplateToCategory(template);
     if (category) {
