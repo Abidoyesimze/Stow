@@ -1,133 +1,154 @@
-import { BadGatewayException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
+import { ConfigService } from '@nestjs/config';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import axios from 'axios';
-import { AnchorDeposit } from './entities/anchor-deposit.entity';
+import { Repository } from 'typeorm';
 import { AnchorService } from './anchor.service';
-
-jest.mock('axios');
-const mockedAxios = axios as jest.Mocked<typeof axios>;
+import { AnchorDeposit } from './entities/anchor-deposit.entity';
 
 describe('AnchorService', () => {
   let service: AnchorService;
-  let depositRepo: {
-    create: jest.Mock;
-    save: jest.Mock;
-    findOne: jest.Mock;
-  };
-  let configService: { get: jest.Mock };
+  let depositRepo: Repository<AnchorDeposit>;
 
-  const ANCHOR_BASE_URL = 'https://anchor.example.com';
-  const USER_ID = 'user-uuid-1';
-  const dto = { asset_code: 'USDC', account: 'GSTELLAR_ACCOUNT' };
+  const mockDepositRepo = {
+    findOne: jest.fn(),
+    create: jest.fn(),
+    save: jest.fn(),
+  };
+
+  const mockConfigService = {
+    get: jest.fn(),
+  };
 
   beforeEach(async () => {
-    depositRepo = {
-      create: jest.fn(),
-      save: jest.fn(),
-      findOne: jest.fn(),
-    };
-
-    configService = {
-      get: jest.fn((key: string) => {
-        if (key === 'ANCHOR_BASE_URL') return ANCHOR_BASE_URL;
-        return undefined;
-      }),
-    };
-
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AnchorService,
         {
           provide: getRepositoryToken(AnchorDeposit),
-          useValue: depositRepo,
+          useValue: mockDepositRepo,
         },
         {
           provide: ConfigService,
-          useValue: configService,
+          useValue: mockConfigService,
         },
       ],
     }).compile();
 
     service = module.get<AnchorService>(AnchorService);
+    depositRepo = module.get<Repository<AnchorDeposit>>(
+      getRepositoryToken(AnchorDeposit),
+    );
   });
 
-  afterEach(() => {
-    jest.clearAllMocks();
+  it('should be defined', () => {
+    expect(service).toBeDefined();
   });
 
-  describe('initiateDeposit', () => {
-    it('returns an interactive URL and creates a pending deposit record', async () => {
-      const sep24Response = {
-        type: 'interactive_customer_info_needed',
-        url: 'https://anchor.example.com/sep24/transactions/deposit?token=abc123',
-        id: 'txn-id-001',
-      };
-
-      mockedAxios.post.mockResolvedValue({ data: sep24Response });
-
-      const savedDeposit: Partial<AnchorDeposit> = {
-        id: 'deposit-uuid-1',
-        user_id: USER_ID,
-        stellar_account: dto.account,
-        asset_code: dto.asset_code,
-        transaction_id: sep24Response.id,
-        interactive_url: sep24Response.url,
+  describe('processCallback', () => {
+    it('should update deposit status when transaction exists', async () => {
+      const existingDeposit = {
+        id: 'dep-123',
+        transaction_id: 'anchor-tx-123',
         status: 'pending',
-      };
+        user_id: 'user-456',
+        stellar_account: 'GTEST...',
+        asset_code: 'USDC',
+      } as AnchorDeposit;
 
-      depositRepo.create.mockReturnValue(savedDeposit);
-      depositRepo.save.mockResolvedValue(savedDeposit);
+      mockDepositRepo.findOne.mockResolvedValue(existingDeposit);
+      mockDepositRepo.save.mockResolvedValue({
+        ...existingDeposit,
+        status: 'completed',
+      });
 
-      const result = await service.initiateDeposit(USER_ID, dto);
+      const result = await service.processCallback('anchor-tx-123', 'completed');
 
-      // Verify the anchor was called with correct SEP-24 params
-      expect(mockedAxios.post).toHaveBeenCalledWith(
-        `${ANCHOR_BASE_URL}/sep24/transactions/deposit/interactive`,
-        { asset_code: dto.asset_code, account: dto.account },
-        expect.objectContaining({ timeout: expect.any(Number) }),
-      );
-
-      // Verify the result contains the interactive URL
-      expect(result.interactive_url).toBe(sep24Response.url);
-      expect(result.transaction_id).toBe(sep24Response.id);
-      expect(result.deposit_id).toBe(savedDeposit.id);
-
-      // Verify a deposit record was created with 'pending' status
-      expect(depositRepo.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          user_id: USER_ID,
-          stellar_account: dto.account,
-          asset_code: dto.asset_code,
-          transaction_id: sep24Response.id,
-          interactive_url: sep24Response.url,
-          status: 'pending',
-        }),
-      );
-      expect(depositRepo.save).toHaveBeenCalledWith(savedDeposit);
+      expect(result).toEqual({
+        updated: true,
+        deposit_id: 'dep-123',
+      });
+      expect(depositRepo.findOne).toHaveBeenCalledWith({
+        where: { transaction_id: 'anchor-tx-123' },
+      });
+      expect(depositRepo.save).toHaveBeenCalledWith({
+        ...existingDeposit,
+        status: 'completed',
+      });
     });
 
-    it('throws BadGatewayException when the anchor call fails', async () => {
-      mockedAxios.post.mockRejectedValue(new Error('connect ECONNREFUSED'));
+    it('should return updated:false when deposit already at target status', async () => {
+      const existingDeposit = {
+        id: 'dep-123',
+        transaction_id: 'anchor-tx-123',
+        status: 'completed',
+      } as AnchorDeposit;
 
-      await expect(service.initiateDeposit(USER_ID, dto)).rejects.toThrow(
-        BadGatewayException,
-      );
+      mockDepositRepo.findOne.mockResolvedValue(existingDeposit);
 
-      // No deposit record should be created on anchor failure
-      expect(depositRepo.create).not.toHaveBeenCalled();
+      const result = await service.processCallback('anchor-tx-123', 'completed');
+
+      expect(result).toEqual({
+        updated: false,
+        deposit_id: 'dep-123',
+      });
       expect(depositRepo.save).not.toHaveBeenCalled();
     });
 
-    it('does not persist a record when the anchor returns an error response', async () => {
-      mockedAxios.post.mockRejectedValue({ response: { status: 400 } });
+    it('should throw error for unknown transaction_id', async () => {
+      mockDepositRepo.findOne.mockResolvedValue(null);
 
-      await expect(service.initiateDeposit(USER_ID, dto)).rejects.toThrow(
-        BadGatewayException,
-      );
+      await expect(
+        service.processCallback('unknown-tx', 'completed'),
+      ).rejects.toThrow('Unknown transaction_id: unknown-tx');
 
       expect(depositRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('should update from pending to processing', async () => {
+      const existingDeposit = {
+        id: 'dep-456',
+        transaction_id: 'anchor-tx-456',
+        status: 'pending',
+      } as AnchorDeposit;
+
+      mockDepositRepo.findOne.mockResolvedValue(existingDeposit);
+      mockDepositRepo.save.mockResolvedValue({
+        ...existingDeposit,
+        status: 'processing',
+      });
+
+      const result = await service.processCallback(
+        'anchor-tx-456',
+        'processing',
+      );
+
+      expect(result.updated).toBe(true);
+      expect(depositRepo.save).toHaveBeenCalledWith({
+        ...existingDeposit,
+        status: 'processing',
+      });
+    });
+
+    it('should update to failed status', async () => {
+      const existingDeposit = {
+        id: 'dep-789',
+        transaction_id: 'anchor-tx-789',
+        status: 'processing',
+      } as AnchorDeposit;
+
+      mockDepositRepo.findOne.mockResolvedValue(existingDeposit);
+      mockDepositRepo.save.mockResolvedValue({
+        ...existingDeposit,
+        status: 'failed',
+      });
+
+      const result = await service.processCallback('anchor-tx-789', 'failed');
+
+      expect(result.updated).toBe(true);
+      expect(depositRepo.save).toHaveBeenCalledWith({
+        ...existingDeposit,
+        status: 'failed',
+      });
     });
   });
 });

@@ -102,4 +102,44 @@ export class AnchorService {
       interactive_url: sep24Response.url,
     };
   }
+
+  /**
+   * Processes a SEP-24 transaction status callback from the anchor.
+   * Updates the deposit record status idempotently.
+   *
+   * @param transactionId The anchor's transaction identifier
+   * @param status The new status from the callback
+   * @returns true if the status was updated, false if already at this status
+   */
+  async processCallback(
+    transactionId: string,
+    status: AnchorDepositStatus,
+  ): Promise<{ updated: boolean; deposit_id: string }> {
+    const deposit = await this.depositRepo.findOne({
+      where: { transaction_id: transactionId },
+    });
+
+    if (!deposit) {
+      this.logger.warn(
+        `Received callback for unknown transaction_id: ${transactionId}`,
+      );
+      throw new Error(`Unknown transaction_id: ${transactionId}`);
+    }
+
+    if (deposit.status === status) {
+      this.logger.debug(
+        `Deposit ${deposit.id} already at status ${status}, ignoring callback`,
+      );
+      return { updated: false, deposit_id: deposit.id };
+    }
+
+    deposit.status = status;
+    await this.depositRepo.save(deposit);
+
+    this.logger.log(
+      `Deposit ${deposit.id} (transaction_id=${transactionId}) status updated to ${status}`,
+    );
+
+    return { updated: true, deposit_id: deposit.id };
+  }
 }

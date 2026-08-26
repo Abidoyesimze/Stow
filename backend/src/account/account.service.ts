@@ -105,9 +105,7 @@ export class AccountService {
     userId: string,
   ): Promise<Record<string, unknown>> {
     const [profile] = await this.dataSource.query(
-      `SELECT id, stellar_address, username, avatar_url, email, role,
-              total_predictions, correct_predictions, reputation_score,
-              season_points, created_at
+      `SELECT id, stellar_address, username, avatar_url, email, role, created_at
        FROM users WHERE id = $1`,
       [userId],
     );
