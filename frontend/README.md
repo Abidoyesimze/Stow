@@ -55,6 +55,28 @@ When configuration is needed (e.g. backend API URL, contract addresses), use the
 
 - Restart the dev server after adding or changing variables.
 
+### Page-view ping (optional, disabled by default)
+
+The app can send a lightweight, cookieless page-view ping on route changes —
+a privacy-friendly usage signal for the landing page. It is **off by
+default**; enabling it requires an explicit opt-in.
+
+- `NEXT_PUBLIC_ENABLE_PAGE_VIEW_PING` — set to `true` (or `1`) to enable. Any
+  other value, or leaving it unset, keeps it disabled.
+- `NEXT_PUBLIC_PAGE_VIEW_PING_ENDPOINT` — optional, defaults to
+  `/api/analytics/pageview`. Point this at your own privacy-friendly
+  collector if you enable the ping.
+
+The ping never sets or reads cookies and never touches `localStorage`. Its
+payload is limited to the current path and a timestamp — no PII, no
+persistent visitor identifiers. See
+[`src/lib/analytics.ts`](src/lib/analytics.ts).
+
+To disable it, remove `NEXT_PUBLIC_ENABLE_PAGE_VIEW_PING` from your
+environment (or set it to `false`) and rebuild — since `NEXT_PUBLIC_*`
+variables are inlined at build time, changing it requires a rebuild to take
+effect.
+
 ## Folder Structure
 
 ```
@@ -66,16 +88,20 @@ frontend/
 │   │   ├── page.tsx         # Landing page (features, products, roadmap)
 │   │   ├── globals.css      # Tailwind v4 entry + design tokens
 │   │   └── favicon.ico
-│   └── components/
-│       ├── Navbar.tsx       # Top navigation
-│       ├── MobileNav.tsx    # Mobile navigation
-│       ├── WaitlistForm.tsx # Client component with form state
-│       ├── GithubIcon.tsx   # Icon wrapper
-│       └── savings/         # Savings-domain UI primitives
-│           ├── BalanceSparkline.tsx  # SVG balance trend chart (accessible)
-│           ├── ProgressRing.tsx      # SVG goal-progress ring
-│           ├── index.ts              # Barrel export for the folder
-│           └── README.md             # Per-component docs & usage
+│   ├── components/
+│   │   ├── Navbar.tsx       # Top navigation
+│   │   ├── MobileNav.tsx    # Mobile navigation
+│   │   ├── WaitlistForm.tsx # Client component with form state
+│   │   ├── GithubIcon.tsx   # Icon wrapper
+│   │   ├── analytics/
+│   │   │   └── PageViewPing.tsx  # Fires the optional page-view ping on route change
+│   │   └── savings/         # Savings-domain UI primitives
+│   │       ├── BalanceSparkline.tsx  # SVG balance trend chart (accessible)
+│   │       ├── ProgressRing.tsx      # SVG goal-progress ring
+│   │       ├── index.ts              # Barrel export for the folder
+│   │       └── README.md             # Per-component docs & usage
+│   └── lib/
+│       └── analytics.ts     # Cookieless page-view ping, gated by env flag
 ├── jest.config.js           # Jest config via next/jest
 ├── jest.setup.js            # Test setup (jest-dom, browser API mocks)
 ├── eslint.config.mjs        # ESLint flat config
