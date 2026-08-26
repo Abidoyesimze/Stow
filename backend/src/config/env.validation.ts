@@ -7,6 +7,7 @@ import {
   IsString,
   MinLength,
   validateSync,
+  Matches,
 } from 'class-validator';
 
 enum StellarNetwork {
@@ -36,7 +37,19 @@ class EnvironmentVariables {
 
   @IsString()
   @IsNotEmpty()
+  @Matches(/^C[A-Z0-9]{55}$/, {
+    message:
+      'SOROBAN_CONTRACT_ID must be a valid Stellar contract address (starts with C, 56 chars)',
+  })
   SOROBAN_CONTRACT_ID: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @Matches(/^C[A-Z0-9]{55}$/, {
+    message:
+      'USDC_TOKEN_ADDRESS must be a valid Stellar contract address (starts with C, 56 chars)',
+  })
+  USDC_TOKEN_ADDRESS: string;
 
   @IsString()
   @IsNotEmpty()

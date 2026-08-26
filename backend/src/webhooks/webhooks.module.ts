@@ -29,6 +29,10 @@ import { WebhookSignatureGuard } from './guards/webhook-signature.guard';
     WebhookSignatureService,
     WebhookSignatureGuard,
   ],
-  exports: [WebhookDispatcherService],
+  exports: [
+    WebhookDispatcherService,
+    WebhookSignatureService,
+    WebhookSignatureGuard,
+  ],
 })
 export class WebhooksModule {}

@@ -1,39 +1,57 @@
 import { validate } from 'class-validator';
 import { User } from './user.entity';
 
-describe('UserEntity validation', () => {
-  it('should validate a correct user object', async () => {
+describe('User Entity', () => {
+  it('should create a valid user without prediction fields', async () => {
     const user = new User();
-    user.stellar_address = 'GABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890';
-    user.username = 'testuser';
-    user.total_predictions = 0;
-    user.correct_predictions = 0;
-    user.total_staked_stroops = '0';
-    user.total_winnings_stroops = '0';
-    user.reputation_score = 0;
-    user.season_points = 0;
+    user.stellar_address = 'GABC123456789DEFGHIJKLMNOPQRSTUVWXYZ12345678901234567890';
+    user.username = 'test_user';
     user.role = 'user';
 
     const errors = await validate(user);
     expect(errors.length).toBe(0);
   });
 
-  it('should fail validation if stellar_address is missing', async () => {
+  it('should not have prediction-related properties', () => {
     const user = new User();
-    user.username = 'testuser';
-
-    const errors = await validate(user);
-    expect(errors.length).toBeGreaterThan(0);
-    expect(errors[0].property).toBe('stellar_address');
+    
+    expect(user).not.toHaveProperty('total_predictions');
+    expect(user).not.toHaveProperty('correct_predictions');
+    expect(user).not.toHaveProperty('total_staked_stroops');
+    expect(user).not.toHaveProperty('total_winnings_stroops');
+    expect(user).not.toHaveProperty('reputation_score');
+    expect(user).not.toHaveProperty('season_points');
   });
 
-  it('should fail validation if role is invalid', async () => {
+  it('should validate role enum', async () => {
     const user = new User();
-    user.stellar_address = 'GASDFASDF';
-    user.role = 'superadmin';
+    user.stellar_address = 'GABC123456789DEFGHIJKLMNOPQRSTUVWXYZ12345678901234567890';
+    user.role = 'invalid_role';
 
     const errors = await validate(user);
     expect(errors.length).toBeGreaterThan(0);
-    expect(errors.find((e) => e.property === 'role')).toBeDefined();
+    expect(errors[0].property).toBe('role');
+  });
+
+  it('should allow admin role', async () => {
+    const user = new User();
+    user.stellar_address = 'GABC123456789DEFGHIJKLMNOPQRSTUVWXYZ12345678901234567890';
+    user.role = 'admin';
+
+    const errors = await validate(user);
+    const roleErrors = errors.filter((e) => e.property === 'role');
+    expect(roleErrors.length).toBe(0);
+  });
+
+  it('should allow nullable optional fields', async () => {
+    const user = new User();
+    user.stellar_address = 'GABC123456789DEFGHIJKLMNOPQRSTUVWXYZ12345678901234567890';
+    user.role = 'user';
+    user.username = null;
+    user.avatar_url = null;
+    user.email = null;
+
+    const errors = await validate(user);
+    expect(errors.length).toBe(0);
   });
 });

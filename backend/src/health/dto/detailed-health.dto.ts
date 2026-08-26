@@ -24,6 +24,20 @@ export class CacheStatusDto {
   latency_ms: number;
 }
 
+export class IndexerStatusDto {
+  @ApiProperty({ example: 'up' })
+  status: string;
+
+  @ApiProperty({ example: 5 })
+  lag_ledgers: number;
+
+  @ApiProperty({ example: 12345 })
+  last_processed_ledger: number;
+
+  @ApiProperty({ example: 12350 })
+  latest_contract_ledger: number;
+}
+
 export class HealthSummaryDto {
   @ApiProperty({ enum: ['healthy', 'degraded', 'down'], example: 'healthy' })
   status: 'healthy' | 'degraded' | 'down';
@@ -41,4 +55,7 @@ export class DetailedHealthDto extends HealthSummaryDto {
 
   @ApiProperty({ type: CacheStatusDto })
   cache: CacheStatusDto;
+
+  @ApiProperty({ type: IndexerStatusDto })
+  indexer: IndexerStatusDto;
 }
