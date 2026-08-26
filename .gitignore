@@ -3,6 +3,7 @@ pr.md
 checks.md
 node_modules/
 target/
+test_snapshots/
 dist/
 build/
 *.log

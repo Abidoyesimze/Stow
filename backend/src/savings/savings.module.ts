@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { CacheModule } from '@nestjs/cache-manager';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AnchorController } from './anchor.controller';
 import { AnchorCallbackController } from './anchor-callback.controller';
@@ -12,9 +13,9 @@ import { WebhooksModule } from '../webhooks/webhooks.module';
 @Module({
   imports: [
     TypeOrmModule.forFeature([AnchorDeposit, Balance]),
-    WebhooksModule,
+    CacheModule.register({ ttl: 10_000 }),
   ],
-  controllers: [AnchorController, AnchorCallbackController, BalanceController],
+  controllers: [AnchorController, BalanceController],
   providers: [AnchorService, BalanceService],
   exports: [AnchorService, BalanceService],
 })

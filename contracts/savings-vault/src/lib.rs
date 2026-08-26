@@ -50,6 +50,16 @@ impl SavingsVault {
         admin::set_admin(&env, new_admin)
     }
 
+    /// Per-account deposit cap, in token stroops. `0` means unlimited.
+    pub fn deposit_cap(env: Env) -> i128 {
+        admin::deposit_cap(&env)
+    }
+
+    /// Set the per-account deposit cap. Admin-only; `0` disables the cap.
+    pub fn set_deposit_cap(env: Env, cap: i128) -> Result<(), Error> {
+        admin::set_deposit_cap(&env, cap)
+    }
+
     // --- flexible ----------------------------------------------------------
     pub fn deposit(env: Env, from: Address, amount: i128) -> Result<(), Error> {
         flexible::deposit(&env, from, amount)

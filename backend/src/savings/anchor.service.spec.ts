@@ -1,3 +1,6 @@
+import { BadGatewayException } from '@nestjs/common';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { getRepositoryToken } from '@nestjs/typeorm';
@@ -14,12 +17,29 @@ describe('AnchorService', () => {
     create: jest.fn(),
     save: jest.fn(),
   };
+  let configService: { get: jest.Mock };
+  let cache: { get: jest.Mock; set: jest.Mock; del: jest.Mock };
 
   const mockConfigService = {
     get: jest.fn(),
   };
 
   beforeEach(async () => {
+    depositRepo = {
+      create: jest.fn(),
+      save: jest.fn(),
+      findOne: jest.fn(),
+    };
+
+    configService = {
+      get: jest.fn((key: string) => {
+        if (key === 'ANCHOR_BASE_URL') return ANCHOR_BASE_URL;
+        return undefined;
+      }),
+    };
+
+    cache = { get: jest.fn(), set: jest.fn(), del: jest.fn() };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AnchorService,
@@ -30,6 +50,10 @@ describe('AnchorService', () => {
         {
           provide: ConfigService,
           useValue: mockConfigService,
+        },
+        {
+          provide: CACHE_MANAGER,
+          useValue: cache,
         },
       ],
     }).compile();
@@ -85,13 +109,27 @@ describe('AnchorService', () => {
 
       mockDepositRepo.findOne.mockResolvedValue(existingDeposit);
 
-      const result = await service.processCallback('anchor-tx-123', 'completed');
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        `${ANCHOR_BASE_URL}/sep24/transactions/deposit/interactive`,
+        { asset_code: dto.asset_code, account: dto.account },
+        expect.objectContaining({ timeout: expect.any(Number) }),
+      );
 
-      expect(result).toEqual({
-        updated: false,
-        deposit_id: 'dep-123',
-      });
-      expect(depositRepo.save).not.toHaveBeenCalled();
+      expect(result.interactive_url).toBe(sep24Response.url);
+      expect(result.transaction_id).toBe(sep24Response.id);
+      expect(result.deposit_id).toBe(savedDeposit.id);
+
+      expect(depositRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          user_id: USER_ID,
+          stellar_account: dto.account,
+          asset_code: dto.asset_code,
+          transaction_id: sep24Response.id,
+          interactive_url: sep24Response.url,
+          status: 'pending',
+        }),
+      );
+      expect(depositRepo.save).toHaveBeenCalledWith(savedDeposit);
     });
 
     it('should throw error for unknown transaction_id', async () => {
@@ -101,6 +139,7 @@ describe('AnchorService', () => {
         service.processCallback('unknown-tx', 'completed'),
       ).rejects.toThrow('Unknown transaction_id: unknown-tx');
 
+      expect(depositRepo.create).not.toHaveBeenCalled();
       expect(depositRepo.save).not.toHaveBeenCalled();
     });
 
@@ -149,6 +188,67 @@ describe('AnchorService', () => {
         ...existingDeposit,
         status: 'failed',
       });
+    });
+  });
+
+  describe('getQuote', () => {
+    const sellAsset = 'iso4217:NGN';
+    const buyAsset = 'stellar:USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN';
+    const sellAmount = '10000';
+    const mockQuote = {
+      sell_asset: sellAsset,
+      buy_asset: buyAsset,
+      sell_amount: sellAmount,
+      buy_amount: '9.50',
+      price: '0.00095',
+      expires_at: '2025-01-01T00:00:30Z',
+    };
+
+    it('returns a quote structure from the anchor', async () => {
+      cache.get.mockResolvedValue(null);
+      mockedAxios.get.mockResolvedValue({ data: mockQuote });
+      cache.set.mockResolvedValue(undefined);
+
+      const result = await service.getQuote(sellAsset, buyAsset, sellAmount);
+
+      expect(result).toMatchObject({
+        sell_asset: sellAsset,
+        buy_asset: buyAsset,
+        price: expect.any(String),
+        expires_at: expect.any(String),
+      });
+    });
+
+    it('returns cached quote without calling the anchor on repeated requests', async () => {
+      cache.get.mockResolvedValue(mockQuote);
+
+      const result = await service.getQuote(sellAsset, buyAsset, sellAmount);
+
+      expect(mockedAxios.get).not.toHaveBeenCalled();
+      expect(result).toEqual(mockQuote);
+    });
+
+    it('caches the quote after a fresh upstream fetch', async () => {
+      cache.get.mockResolvedValue(null);
+      mockedAxios.get.mockResolvedValue({ data: mockQuote });
+      cache.set.mockResolvedValue(undefined);
+
+      await service.getQuote(sellAsset, buyAsset, sellAmount);
+
+      expect(cache.set).toHaveBeenCalledWith(
+        `savings:quote:${sellAsset}:${buyAsset}:${sellAmount}`,
+        mockQuote,
+        30_000,
+      );
+    });
+
+    it('throws BadGatewayException when the anchor quote call fails', async () => {
+      cache.get.mockResolvedValue(null);
+      mockedAxios.get.mockRejectedValue(new Error('timeout'));
+
+      await expect(
+        service.getQuote(sellAsset, buyAsset, sellAmount),
+      ).rejects.toThrow(BadGatewayException);
     });
   });
 });

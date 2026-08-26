@@ -169,8 +169,15 @@ pub fn close(env: &Env, creator: Address, group_id: u64) -> Result<(), Error> {
 
 /// Equal-split payout: divide the pool balance evenly across members and
 /// transfer each member their share. See `group_split` for weighted payouts.
-pub fn payout_equal(env: &Env, _caller: Address, group_id: u64) -> Result<(), Error> {
+///
+/// Auth: `caller` — permissionless once the group is closed; any signed
+/// caller may trigger settlement (the payout goes to the members, not to
+/// `caller`, so there is no principal to restrict this to). `require_auth`
+/// is still enforced so every invocation is attributable to a real signer
+/// rather than an unauthenticated relay.
+pub fn payout_equal(env: &Env, caller: Address, group_id: u64) -> Result<(), Error> {
     extend_instance_ttl(env);
+    caller.require_auth();
 
     // Load the group
     let mut group: Group = env

@@ -1,8 +1,11 @@
 import {
   BadGatewayException,
+  Inject,
   Injectable,
   Logger,
 } from '@nestjs/common';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Cache } from 'cache-manager';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import axios from 'axios';
@@ -12,6 +15,22 @@ import {
   AnchorDepositStatus,
 } from './entities/anchor-deposit.entity';
 import { InitiateDepositDto } from './dto/initiate-deposit.dto';
+
+/** SEP-38 quote shape returned to callers */
+export interface Sep38Quote {
+  sell_asset: string;
+  buy_asset: string;
+  sell_amount: string;
+  buy_amount: string;
+  price: string;
+  expires_at: string;
+}
+
+/** TTL for quote cache: 30 seconds */
+const QUOTE_CACHE_TTL_MS = 30_000;
+
+const quoteCacheKey = (sellAsset: string, buyAsset: string, sellAmount: string) =>
+  `savings:quote:${sellAsset}:${buyAsset}:${sellAmount}`;
 
 export interface DepositInitiationResult {
   deposit_id: string;
@@ -37,6 +56,7 @@ export class AnchorService {
     @InjectRepository(AnchorDeposit)
     private readonly depositRepo: Repository<AnchorDeposit>,
     private readonly configService: ConfigService,
+    @Inject(CACHE_MANAGER) private readonly cache: Cache,
   ) {
     this.anchorBaseUrl = this.configService.get<string>(
       'ANCHOR_BASE_URL',
@@ -104,42 +124,33 @@ export class AnchorService {
   }
 
   /**
-   * Processes a SEP-24 transaction status callback from the anchor.
-   * Updates the deposit record status idempotently.
-   *
-   * @param transactionId The anchor's transaction identifier
-   * @param status The new status from the callback
-   * @returns true if the status was updated, false if already at this status
+   * Fetches an indicative SEP-38 quote from the anchor.
+   * Results are cached for QUOTE_CACHE_TTL_MS to reduce upstream calls.
    */
-  async processCallback(
-    transactionId: string,
-    status: AnchorDepositStatus,
-  ): Promise<{ updated: boolean; deposit_id: string }> {
-    const deposit = await this.depositRepo.findOne({
-      where: { transaction_id: transactionId },
-    });
+  async getQuote(
+    sellAsset: string,
+    buyAsset: string,
+    sellAmount: string,
+  ): Promise<Sep38Quote> {
+    const key = quoteCacheKey(sellAsset, buyAsset, sellAmount);
+    const cached = await this.cache.get<Sep38Quote>(key);
+    if (cached) return cached;
 
-    if (!deposit) {
-      this.logger.warn(
-        `Received callback for unknown transaction_id: ${transactionId}`,
-      );
-      throw new Error(`Unknown transaction_id: ${transactionId}`);
+    const sep38Url = `${this.anchorBaseUrl}/sep38/quote`;
+    let quote: Sep38Quote;
+    try {
+      const { data } = await axios.get<Sep38Quote>(sep38Url, {
+        params: { sell_asset: sellAsset, buy_asset: buyAsset, sell_amount: sellAmount },
+        timeout: 10_000,
+      });
+      quote = data;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      this.logger.error(`SEP-38 quote failed: ${message}`);
+      throw new BadGatewayException('Anchor quote service unavailable.');
     }
 
-    if (deposit.status === status) {
-      this.logger.debug(
-        `Deposit ${deposit.id} already at status ${status}, ignoring callback`,
-      );
-      return { updated: false, deposit_id: deposit.id };
-    }
-
-    deposit.status = status;
-    await this.depositRepo.save(deposit);
-
-    this.logger.log(
-      `Deposit ${deposit.id} (transaction_id=${transactionId}) status updated to ${status}`,
-    );
-
-    return { updated: true, deposit_id: deposit.id };
+    await this.cache.set(key, quote, QUOTE_CACHE_TTL_MS);
+    return quote;
   }
 }
