@@ -9,7 +9,7 @@
 //! the bare contract shell (no token) can still call [`setup`].
 
 use soroban_sdk::{
-    testutils::{Address as _, Ledger, LedgerInfo},
+    testutils::{Address as _, Events as _, Ledger, LedgerInfo},
     token::StellarAssetClient,
     Address, Env, Map, String,
 };
@@ -72,9 +72,119 @@ fn flexible_deposit_withdraw() {}
 #[ignore = "TODO(issue): locked withdraw before unlock_at returns StillLocked"]
 fn locked_respects_time_lock() {}
 
+// ---------------------------------------------------------------------------
+// Issue #36 — goal milestone + claim
+// ---------------------------------------------------------------------------
+
+/// Contributing across the target boundary sets `reached_at` exactly once
+/// and emits a `goal_reached` event alongside the `goal_contribution` event;
+/// further contributions after the target is met neither move `reached_at`
+/// nor re-emit the milestone event.
 #[test]
-#[ignore = "TODO(issue): goal contribute crossing target sets reached_at"]
-fn goal_reaches_target() {}
+fn goal_reaches_target() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+
+    const TARGET: i128 = 100_000_000; // 100 USDC
+    const FIRST: i128 = 40_000_000; // below target
+    const SECOND: i128 = 70_000_000; // 40 + 70 = 110 -> crosses target
+    const THIRD: i128 = 1_000_000; // contributed after already reached
+
+    mint(&env, &token, &token_admin, &owner, FIRST + SECOND + THIRD);
+
+    let goal_id = client.goal_create(&owner, &String::from_str(&env, "holiday"), &TARGET);
+
+    // Contribute below the target: not yet reached. `events().all()` scopes
+    // to the most recent top-level invocation, so this call's log holds
+    // exactly the token transfer + the contribution event (no reached event).
+    client.goal_contribute(&owner, &goal_id, &FIRST);
+    let events_after_first = env.events().all().len();
+
+    let goal = client.goal(&goal_id);
+    assert_eq!(goal.saved_amount, FIRST);
+    assert!(
+        goal.reached_at.is_none(),
+        "goal must not be reached before the target is crossed"
+    );
+    assert_eq!(
+        events_after_first, 2,
+        "a below-target contribution emits a transfer and a contribution event, no reached event"
+    );
+
+    // Contribute across the target boundary: reached_at set, and this
+    // call's event log additionally carries the reached event.
+    client.goal_contribute(&owner, &goal_id, &SECOND);
+    let events_after_second = env.events().all().len();
+
+    let goal = client.goal(&goal_id);
+    assert_eq!(goal.saved_amount, FIRST + SECOND);
+    assert!(
+        goal.reached_at.is_some(),
+        "reached_at must be set once the target is crossed"
+    );
+    let reached_at_first = goal.reached_at;
+    assert_eq!(
+        events_after_second, 3,
+        "crossing the target emits a transfer, contribution, and reached event"
+    );
+
+    // Contribute again after already reached: reached_at unchanged, and no
+    // reached event shows up in this call's log.
+    client.goal_contribute(&owner, &goal_id, &THIRD);
+    let events_after_third = env.events().all().len();
+
+    let goal = client.goal(&goal_id);
+    assert_eq!(
+        goal.reached_at, reached_at_first,
+        "reached_at must be set only once"
+    );
+    assert_eq!(
+        events_after_third, 2,
+        "a post-target contribution does not re-emit the reached event"
+    );
+}
+
+/// Claiming a reached goal transfers the full saved balance back to the
+/// owner and closes the goal so it cannot be claimed a second time.
+#[test]
+fn goal_claim_after_reached_returns_funds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+
+    const TARGET: i128 = 100_000_000; // 100 USDC
+
+    mint(&env, &token, &token_admin, &owner, TARGET);
+
+    let goal_id = client.goal_create(&owner, &String::from_str(&env, "holiday"), &TARGET);
+    client.goal_contribute(&owner, &goal_id, &TARGET);
+
+    let goal = client.goal(&goal_id);
+    assert!(goal.reached_at.is_some(), "goal must be reached before claim");
+
+    let token_client = soroban_sdk::token::Client::new(&env, &token);
+    let owner_balance_before_claim = token_client.balance(&owner);
+
+    client.goal_claim(&owner, &goal_id);
+
+    let owner_balance_after_claim = token_client.balance(&owner);
+    assert_eq!(
+        owner_balance_after_claim - owner_balance_before_claim,
+        TARGET,
+        "claim must return the full saved amount to the owner"
+    );
+
+    // The goal is closed on claim; a second claim finds nothing to pay out.
+    let result = client.try_goal_claim(&owner, &goal_id);
+    assert_eq!(result, Err(Ok(Error::NotFound)));
+}
 
 #[test]
 #[ignore = "TODO(issue): group_split settle pays members by shares and drains pool"]
@@ -1095,3 +1205,4 @@ fn set_deposit_cap_rejects_negative() {
     let result = client.try_set_deposit_cap(&-1i128);
     assert_eq!(result, Err(Ok(Error::InvalidAmount)));
 }
+
