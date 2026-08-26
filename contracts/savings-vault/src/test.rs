@@ -11,7 +11,7 @@
 use soroban_sdk::{
     testutils::{Address as _, Ledger, LedgerInfo},
     token::StellarAssetClient,
-    Address, Env,
+    Address, Env, Map, String,
 };
 
 use crate::{SavingsVault, SavingsVaultClient};
@@ -38,7 +38,7 @@ fn setup_with_token(env: &Env) -> (SavingsVaultClient, Address, Address) {
     let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token_address = token_id.address();
 
-    client.initialize(&admin, &token_address).unwrap();
+    client.initialize(&admin, &token_address);
 
     (client, admin, token_address)
 }
@@ -103,7 +103,7 @@ fn flexible_withdraw_over_balance_rejected() {
     mint(&env, &token, &token_admin, &user, DEPOSIT);
 
     // Deposit the full amount.
-    client.deposit(&user, &DEPOSIT).unwrap();
+    client.deposit(&user, &DEPOSIT);
 
     // Attempting to withdraw one stroop more than the balance must fail.
     let result = client.try_withdraw(&user, &OVER_AMOUNT);
@@ -116,7 +116,7 @@ fn flexible_withdraw_over_balance_rejected() {
     );
 
     // Balance must remain intact after the failed withdrawal.
-    let account = client.get_account(&user).unwrap();
+    let account = client.get_account(&user);
     assert_eq!(
         account.balance, DEPOSIT,
         "balance must not change after a rejected over-withdrawal",
@@ -140,13 +140,13 @@ fn flexible_withdraw_exact_balance_succeeds() {
     const DEPOSIT: i128 = 50_000_000; // 50 USDC
 
     mint(&env, &token, &token_admin, &user, DEPOSIT);
-    client.deposit(&user, &DEPOSIT).unwrap();
+    client.deposit(&user, &DEPOSIT);
 
     // Withdraw the exact amount — must not error.
-    client.withdraw(&user, &DEPOSIT).unwrap();
+    client.withdraw(&user, &DEPOSIT);
 
     // Balance must now be zero.
-    let account = client.get_account(&user).unwrap();
+    let account = client.get_account(&user);
     assert_eq!(
         account.balance, 0,
         "balance must be zero after a full withdrawal",
@@ -185,7 +185,7 @@ fn locked_withdraw_over_balance_rejected() {
 
     let unlock_at = now + 1_000; // one second from now
 
-    let plan_id = client.locked_create(&owner, &LOCKED_AMOUNT, &unlock_at).unwrap();
+    let plan_id = client.locked_create(&owner, &LOCKED_AMOUNT, &unlock_at);
 
     // Advance time past the lock.
     env.ledger().set(LedgerInfo {
@@ -210,7 +210,7 @@ fn locked_withdraw_over_balance_rejected() {
     );
 
     // Plan balance must be untouched.
-    let plan = client.locked_plan(&plan_id).unwrap();
+    let plan = client.locked_plan(&plan_id);
     assert_eq!(
         plan.balance, LOCKED_AMOUNT,
         "locked plan balance must not change after a rejected over-withdrawal",
@@ -246,7 +246,7 @@ fn locked_withdraw_exact_balance_after_unlock_succeeds() {
     });
 
     let unlock_at = now + 500;
-    let plan_id = client.locked_create(&owner, &LOCKED_AMOUNT, &unlock_at).unwrap();
+    let plan_id = client.locked_create(&owner, &LOCKED_AMOUNT, &unlock_at);
 
     // Advance past the lock.
     env.ledger().set(LedgerInfo {
@@ -261,9 +261,9 @@ fn locked_withdraw_exact_balance_after_unlock_succeeds() {
     });
 
     // Withdraw the exact amount — must not error.
-    client.locked_withdraw(&owner, &plan_id, &LOCKED_AMOUNT).unwrap();
+    client.locked_withdraw(&owner, &plan_id, &LOCKED_AMOUNT);
 
-    let plan = client.locked_plan(&plan_id).unwrap();
+    let plan = client.locked_plan(&plan_id);
     assert_eq!(
         plan.balance, 0,
         "locked plan balance must be zero after a full withdrawal",
@@ -303,7 +303,7 @@ fn locked_withdraw_still_locked_and_over_balance_prefers_insufficient_balance() 
     });
 
     let unlock_at = now + 10_000; // still in the future
-    let plan_id = client.locked_create(&owner, &LOCKED_AMOUNT, &unlock_at).unwrap();
+    let plan_id = client.locked_create(&owner, &LOCKED_AMOUNT, &unlock_at);
 
     // Attempt to withdraw more than the balance while the lock is still active.
     let result = client.try_locked_withdraw(&owner, &plan_id, &(LOCKED_AMOUNT + 1));
@@ -317,7 +317,7 @@ fn locked_withdraw_still_locked_and_over_balance_prefers_insufficient_balance() 
     );
 
     // Either way, funds must not move.
-    let plan = client.locked_plan(&plan_id).unwrap();
+    let plan = client.locked_plan(&plan_id);
     assert_eq!(plan.balance, LOCKED_AMOUNT);
 }
 
@@ -395,7 +395,7 @@ fn flexible_withdraw_by_non_owner_rejected() {
     const DEPOSIT: i128 = 100_000_000; // 100 USDC
 
     mint(&env, &token, &token_admin, &owner, DEPOSIT);
-    client.deposit(&owner, &DEPOSIT).unwrap();
+    client.deposit(&owner, &DEPOSIT);
 
     // Switch: only attacker's auth is approved from here on.
     // The contract must compare attacker != owner and return Unauthorized.
@@ -410,7 +410,7 @@ fn flexible_withdraw_by_non_owner_rejected() {
 
     // Owner's balance must be untouched.
     env.mock_all_auths();
-    let account = client.get_account(&owner).unwrap();
+    let account = client.get_account(&owner);
     assert_eq!(account.balance, DEPOSIT);
 }
 
@@ -446,7 +446,7 @@ fn locked_top_up_by_non_owner_rejected() {
         max_entry_ttl: 3_110_400,
     });
 
-    let plan_id = client.locked_create(&owner, &AMOUNT, &(now + 1_000)).unwrap();
+    let plan_id = client.locked_create(&owner, &AMOUNT, &(now + 1_000));
 
     // Attacker attempts to top-up the owner's plan.
     let result = client.try_locked_top_up(&attacker, &plan_id, &AMOUNT);
@@ -458,7 +458,7 @@ fn locked_top_up_by_non_owner_rejected() {
     );
 
     // Plan balance must not change.
-    let plan = client.locked_plan(&plan_id).unwrap();
+    let plan = client.locked_plan(&plan_id);
     assert_eq!(plan.balance, AMOUNT);
 }
 
@@ -493,7 +493,7 @@ fn locked_withdraw_by_non_owner_rejected() {
     });
 
     let unlock_at = now + 500;
-    let plan_id = client.locked_create(&owner, &AMOUNT, &unlock_at).unwrap();
+    let plan_id = client.locked_create(&owner, &AMOUNT, &unlock_at);
 
     // Advance past the lock so `StillLocked` is not a confound.
     env.ledger().set(LedgerInfo {
@@ -516,7 +516,7 @@ fn locked_withdraw_by_non_owner_rejected() {
         "attacker must not withdraw from another user's locked plan after unlock",
     );
 
-    let plan = client.locked_plan(&plan_id).unwrap();
+    let plan = client.locked_plan(&plan_id);
     assert_eq!(plan.balance, AMOUNT);
 }
 
@@ -540,10 +540,10 @@ fn goal_claim_by_non_owner_rejected() {
 
     let goal_id = client
         .goal_create(&owner, &soroban_sdk::String::from_str(&env, "holiday"), &TARGET)
-        .unwrap();
+        ;
 
     // Owner contributes the full target so the goal is reached.
-    client.goal_contribute(&owner, &goal_id, &TARGET).unwrap();
+    client.goal_contribute(&owner, &goal_id, &TARGET);
 
     // Attacker tries to claim a goal they don't own.
     let result = client.try_goal_claim(&attacker, &goal_id);
@@ -555,7 +555,7 @@ fn goal_claim_by_non_owner_rejected() {
     );
 
     // Goal's saved amount must be intact.
-    let goal = client.goal(&goal_id).unwrap();
+    let goal = client.goal(&goal_id);
     assert_eq!(goal.saved_amount, TARGET);
 }
 
@@ -574,7 +574,7 @@ fn group_close_by_non_creator_rejected() {
 
     let group_id = client
         .group_create(&creator, &soroban_sdk::String::from_str(&env, "pool-a"))
-        .unwrap();
+        ;
 
     // Non-creator attempts to close the group.
     let result = client.try_group_close(&non_creator, &group_id);
@@ -586,7 +586,7 @@ fn group_close_by_non_creator_rejected() {
     );
 
     // Group must still be open.
-    let group = client.group(&group_id).unwrap();
+    let group = client.group(&group_id);
     assert!(group.open, "group must remain open after rejected close attempt");
 }
 
@@ -606,11 +606,11 @@ fn group_set_shares_by_non_creator_rejected() {
 
     let group_id = client
         .group_create(&creator, &soroban_sdk::String::from_str(&env, "pool-b"))
-        .unwrap();
+        ;
 
     // Add a second member so a valid 10 000-bps split can be constructed.
-    client.group_join(&member, &group_id).unwrap();
-    client.group_close(&creator, &group_id).unwrap();
+    client.group_join(&member, &group_id);
+    client.group_close(&creator, &group_id);
 
     // Build a valid shares map that sums to 10_000 bps.
     let mut shares = soroban_sdk::Map::new(&env);
@@ -646,7 +646,7 @@ fn group_contribute_by_non_member_rejected() {
 
     let group_id = client
         .group_create(&creator, &soroban_sdk::String::from_str(&env, "pool-c"))
-        .unwrap();
+        ;
 
     // Outsider has never called group_join; must be rejected.
     let result = client.try_group_contribute(&outsider, &group_id, &AMOUNT);
@@ -658,7 +658,7 @@ fn group_contribute_by_non_member_rejected() {
     );
 
     // Pool balance must remain zero.
-    let group = client.group(&group_id).unwrap();
+    let group = client.group(&group_id);
     assert_eq!(group.balance, 0);
 }
 
@@ -685,4 +685,413 @@ fn initialize_twice_rejected() {
         Err(Ok(Error::AlreadyInitialized)),
         "initialize must be callable exactly once",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #31 — Auth review: require_auth on all mutations
+//
+// Two ways an unauthorized call is rejected (see the case 1 / case 2 recap
+// above the #39 tests):
+//
+//  1. No valid authorization exists for the principal at all — disabling
+//     mocked auth (`env.set_auths(&[])`) or never enabling it means the
+//     principal's `require_auth()` call inside the contract has nothing to
+//     match, so the host rejects the invocation and `try_*` returns
+//     `Err(Err(_))`.
+//  2. The principal *did* authorize (any signer can under `mock_all_auths`),
+//     but the contract compares the claimed identity against a stored
+//     owner/creator field and returns a typed `Error::Unauthorized`.
+//
+// These tests cover every state-changing entrypoint touched by this issue in
+// flexible.rs, locked.rs, and group.rs.
+// ---------------------------------------------------------------------------
+
+/// `deposit` must require `from`'s authorization — funding isn't needed
+/// since the auth check happens before anything else.
+#[test]
+fn deposit_without_signer_auth_rejected() {
+    let env = Env::default();
+    let (client, _admin, _token) = setup_with_token(&env);
+    let user = Address::generate(&env);
+
+    let result = client.try_deposit(&user, &10_000_000i128);
+
+    assert!(
+        result.is_err(),
+        "deposit must fail without `from`'s authorization"
+    );
+}
+
+/// `withdraw` must require `owner`'s authorization.
+#[test]
+fn withdraw_without_signer_auth_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+
+    const AMOUNT: i128 = 20_000_000;
+    mint(&env, &token, &token_admin, &owner, AMOUNT);
+    client.deposit(&owner, &AMOUNT);
+
+    // Disable mocking: no more auths are considered valid from here on.
+    env.set_auths(&[]);
+
+    let result = client.try_withdraw(&owner, &AMOUNT);
+    assert!(
+        result.is_err(),
+        "withdraw must fail without `owner`'s authorization"
+    );
+}
+
+/// `locked_create` must require `owner`'s authorization.
+#[test]
+fn locked_create_without_signer_auth_rejected() {
+    let env = Env::default();
+    let (client, _admin, _token) = setup_with_token(&env);
+    let owner = Address::generate(&env);
+
+    let result = client.try_locked_create(&owner, &10_000_000i128, &1_000u64);
+
+    assert!(
+        result.is_err(),
+        "locked_create must fail without `owner`'s authorization"
+    );
+}
+
+/// `locked_top_up` must reject a caller who is not the plan's owner, even
+/// though they validly authorized *themselves* (case 2).
+#[test]
+fn locked_top_up_by_non_owner_rejected_issue31() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    const AMOUNT: i128 = 30_000_000;
+    mint(&env, &token, &token_admin, &owner, AMOUNT);
+    mint(&env, &token, &token_admin, &attacker, AMOUNT);
+
+    let plan_id = client.locked_create(&owner, &AMOUNT, &1_000_000u64);
+
+    let result = client.try_locked_top_up(&attacker, &plan_id, &AMOUNT);
+    assert_eq!(
+        result,
+        Err(Ok(Error::Unauthorized)),
+        "attacker must not top-up another user's locked plan",
+    );
+
+    let plan = client.locked_plan(&plan_id);
+    assert_eq!(plan.balance, AMOUNT, "plan balance must be untouched");
+}
+
+/// `locked_withdraw` must reject a caller who is not the plan's owner.
+#[test]
+fn locked_withdraw_by_non_owner_rejected_issue31() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    const AMOUNT: i128 = 40_000_000;
+    mint(&env, &token, &token_admin, &owner, AMOUNT);
+
+    // `min_persistent_entry_ttl` set well above the sequence-number jump
+    // below (100 -> 200) so the `LockedPlan` entry is not archived before
+    // the withdrawal attempt — this test is about the ownership check, not
+    // persistent-entry TTL behavior.
+    let now: u64 = 1_000_000;
+    env.ledger().set(LedgerInfo {
+        timestamp: now,
+        protocol_version: 22,
+        sequence_number: 100,
+        network_id: Default::default(),
+        base_reserve: 5_000_000,
+        min_temp_entry_ttl: 1,
+        min_persistent_entry_ttl: 3_110_400,
+        max_entry_ttl: 3_110_400,
+    });
+    let unlock_at = now + 500;
+    let plan_id = client.locked_create(&owner, &AMOUNT, &unlock_at);
+
+    env.ledger().set(LedgerInfo {
+        timestamp: unlock_at + 1,
+        protocol_version: 22,
+        sequence_number: 200,
+        network_id: Default::default(),
+        base_reserve: 5_000_000,
+        min_temp_entry_ttl: 1,
+        min_persistent_entry_ttl: 3_110_400,
+        max_entry_ttl: 3_110_400,
+    });
+
+    let result = client.try_locked_withdraw(&attacker, &plan_id, &AMOUNT);
+    assert_eq!(
+        result,
+        Err(Ok(Error::Unauthorized)),
+        "attacker must not withdraw from another user's locked plan",
+    );
+
+    let plan = client.locked_plan(&plan_id);
+    assert_eq!(plan.balance, AMOUNT, "plan balance must be untouched");
+}
+
+/// `group_payout_equal` was missing `require_auth` on `caller` entirely —
+/// anyone could relay the call unauthenticated. It is intentionally
+/// permissionless (payouts go to members, not to `caller`), but every
+/// invocation must still be attributable to a real signer.
+#[test]
+fn group_payout_equal_without_signer_auth_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+
+    const AMOUNT: i128 = 10_000_000;
+    mint(&env, &token, &token_admin, &creator, AMOUNT);
+
+    let group_id = client.group_create(&creator, &String::from_str(&env, "payout-auth"));
+    client.group_contribute(&creator, &group_id, &AMOUNT);
+    client.group_close(&creator, &group_id);
+
+    // Disable mocking: `caller.require_auth()` now has nothing to match.
+    env.set_auths(&[]);
+
+    let result = client.try_group_payout_equal(&creator, &group_id);
+    assert!(
+        result.is_err(),
+        "group_payout_equal must fail without a signed caller",
+    );
+}
+
+/// `set_admin` must require the *current* admin's authorization.
+#[test]
+fn set_admin_without_admin_auth_rejected() {
+    let env = Env::default();
+    let (client, _admin, _token) = setup_with_token(&env);
+    let new_admin = Address::generate(&env);
+
+    let result = client.try_set_admin(&new_admin);
+
+    assert!(
+        result.is_err(),
+        "set_admin must fail without the current admin's authorization"
+    );
+}
+
+/// `set_deposit_cap` must require the current admin's authorization.
+#[test]
+fn set_deposit_cap_without_admin_auth_rejected() {
+    let env = Env::default();
+    let (client, _admin, _token) = setup_with_token(&env);
+
+    let result = client.try_set_deposit_cap(&100_000_000i128);
+
+    assert!(
+        result.is_err(),
+        "set_deposit_cap must fail without the admin's authorization"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #32 — Overflow-safe i128 arithmetic audit
+// ---------------------------------------------------------------------------
+
+/// Depositing into an account already at `i128::MAX` must return a typed
+/// `Overflow` error instead of panicking or wrapping, and must leave the
+/// balance untouched.
+#[test]
+fn deposit_overflow_rejected_with_typed_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    mint(&env, &token, &token_admin, &user, i128::MAX);
+    client.deposit(&user, &i128::MAX);
+
+    mint(&env, &token, &token_admin, &user, 1);
+    let result = client.try_deposit(&user, &1);
+
+    assert_eq!(
+        result,
+        Err(Ok(Error::Overflow)),
+        "depositing past i128::MAX must return a typed Overflow error",
+    );
+
+    let account = client.get_account(&user);
+    assert_eq!(
+        account.balance,
+        i128::MAX,
+        "balance must be unchanged after a rejected overflowing deposit",
+    );
+}
+
+/// `group_split::settle` must reject a per-member share computation that
+/// would overflow `i128` with a typed error, rather than panicking, and
+/// must leave the pool balance untouched (settlement did not proceed).
+#[test]
+fn group_split_settle_overflow_rejected_with_typed_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let member = Address::generate(&env);
+
+    // Large enough that `balance * 5_000` overflows i128.
+    const HALF: i128 = i128::MAX / 2;
+
+    mint(&env, &token, &token_admin, &creator, HALF);
+    mint(&env, &token, &token_admin, &member, HALF);
+
+    let group_id = client.group_create(&creator, &String::from_str(&env, "overflow-pool"));
+    client.group_join(&member, &group_id);
+    client.group_contribute(&creator, &group_id, &HALF);
+    client.group_contribute(&member, &group_id, &HALF);
+    client.group_close(&creator, &group_id);
+
+    let mut shares = Map::new(&env);
+    shares.set(creator.clone(), 5_000u32);
+    shares.set(member.clone(), 5_000u32);
+    client.group_set_shares(&creator, &group_id, &shares);
+
+    let result = client.try_group_settle(&creator, &group_id);
+    assert_eq!(
+        result,
+        Err(Ok(Error::Overflow)),
+        "settling a pool whose balance*bps overflows i128 must return a typed error",
+    );
+
+    let group = client.group(&group_id);
+    assert_eq!(
+        group.balance,
+        HALF + HALF,
+        "pool must be untouched after a rejected overflowing settle",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #48 — Per-account deposit cap policy
+// ---------------------------------------------------------------------------
+
+/// With no cap ever configured (defaults to `0`), deposits of any size
+/// succeed.
+#[test]
+fn deposit_cap_defaults_to_unlimited() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    const LARGE: i128 = 1_000_000_000_000;
+    mint(&env, &token, &token_admin, &user, LARGE);
+    client.deposit(&user, &LARGE);
+
+    let account = client.get_account(&user);
+    assert_eq!(account.balance, LARGE);
+}
+
+/// A deposit that lands exactly on the configured cap succeeds.
+#[test]
+fn deposit_at_cap_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    const CAP: i128 = 100_000_000;
+    client.set_deposit_cap(&CAP);
+
+    mint(&env, &token, &token_admin, &user, CAP);
+    client.deposit(&user, &CAP);
+
+    let account = client.get_account(&user);
+    assert_eq!(account.balance, CAP);
+}
+
+/// A deposit that would push the balance past the configured cap is
+/// rejected, and the balance is left unchanged.
+#[test]
+fn deposit_beyond_cap_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    const CAP: i128 = 100_000_000;
+    client.set_deposit_cap(&CAP);
+
+    mint(&env, &token, &token_admin, &user, CAP + 1);
+    client.deposit(&user, &CAP);
+
+    let result = client.try_deposit(&user, &1);
+    assert_eq!(
+        result,
+        Err(Ok(Error::DepositCapExceeded)),
+        "deposit pushing balance past the cap must be rejected",
+    );
+
+    let account = client.get_account(&user);
+    assert_eq!(account.balance, CAP, "balance must not change on a rejected deposit");
+}
+
+/// Raising the cap takes effect immediately: a deposit that was rejected
+/// under the old (lower) cap succeeds once the admin raises it, without
+/// needing to re-deploy or wait.
+#[test]
+fn deposit_cap_change_takes_effect_immediately() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    const CAP_LOW: i128 = 10_000_000;
+    const CAP_HIGH: i128 = 50_000_000;
+    const AMOUNT: i128 = CAP_LOW + 1;
+
+    client.set_deposit_cap(&CAP_LOW);
+    mint(&env, &token, &token_admin, &user, AMOUNT);
+
+    let result = client.try_deposit(&user, &AMOUNT);
+    assert_eq!(result, Err(Ok(Error::DepositCapExceeded)));
+
+    client.set_deposit_cap(&CAP_HIGH);
+
+    client.deposit(&user, &AMOUNT);
+    let account = client.get_account(&user);
+    assert_eq!(account.balance, AMOUNT);
+}
+
+/// A negative cap is rejected as an invalid amount.
+#[test]
+fn set_deposit_cap_rejects_negative() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, _token) = setup_with_token(&env);
+
+    let result = client.try_set_deposit_cap(&-1i128);
+    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
 }

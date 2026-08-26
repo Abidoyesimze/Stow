@@ -1,21 +1,66 @@
 //! Flexible savings — deposit and withdraw any time.
 
-use soroban_sdk::{Address, Env};
+use soroban_sdk::{token, Address, Env};
 
+use crate::admin;
 use crate::error::Error;
-use crate::types::FlexibleAccount;
+use crate::events::{TOPIC_DEPOSIT, TOPIC_WITHDRAW};
+use crate::storage::{self, extend_instance_ttl};
+use crate::types::{DataKey, FlexibleAccount};
 
 /// Deposit `amount` of the vault token into the caller's flexible account.
 ///
-/// - `from.require_auth()`.
+/// - `from.require_auth()`. The account is keyed by `from`, so only the
+///   real owner of that address can ever reach their own account — no
+///   separate ownership comparison is needed or possible.
 /// - Transfers tokens from `from` into the contract.
 /// - Creates the account on first deposit; increments balance otherwise.
+/// - Rejects the deposit with `DepositCapExceeded` if an admin-configured
+///   per-account cap is set (non-zero) and the resulting balance would
+///   exceed it.
 /// - Emits a `deposit` event.
 ///
-/// Errors: `InvalidAmount` if `amount <= 0`.
-pub fn deposit(_env: &Env, _from: Address, _amount: i128) -> Result<(), Error> {
-    // TODO(issue): auth, validate, token transfer_in, update FlexibleAccount, emit event.
-    unimplemented!("flexible::deposit")
+/// Errors: `InvalidAmount` if `amount <= 0`, `NotInitialized` if the vault
+/// has not been initialized, `DepositCapExceeded`, `Overflow` if the
+/// resulting balance would not fit in `i128`.
+pub fn deposit(env: &Env, from: Address, amount: i128) -> Result<(), Error> {
+    extend_instance_ttl(env);
+    from.require_auth();
+
+    if amount <= 0 {
+        return Err(Error::InvalidAmount);
+    }
+
+    let token_address = storage::get_token(env).ok_or(Error::NotInitialized)?;
+
+    let now = env.ledger().timestamp();
+    let key = DataKey::Flexible(from.clone());
+    let mut account: FlexibleAccount =
+        env.storage().persistent().get(&key).unwrap_or(FlexibleAccount {
+            owner: from.clone(),
+            balance: 0,
+            created_at: now,
+            updated_at: now,
+        });
+
+    let new_balance = account.balance.checked_add(amount).ok_or(Error::Overflow)?;
+
+    let cap = admin::deposit_cap(env);
+    if cap > 0 && new_balance > cap {
+        return Err(Error::DepositCapExceeded);
+    }
+
+    let token_client = token::Client::new(env, &token_address);
+    token_client.transfer(&from, &env.current_contract_address(), &amount);
+
+    account.balance = new_balance;
+    account.updated_at = now;
+    env.storage().persistent().set(&key, &account);
+
+    env.events()
+        .publish((TOPIC_DEPOSIT, from.clone()), (from, amount, new_balance, now));
+
+    Ok(())
 }
 
 /// Withdraw `amount` from the caller's flexible account back to their wallet.
@@ -24,12 +69,45 @@ pub fn deposit(_env: &Env, _from: Address, _amount: i128) -> Result<(), Error> {
 /// - Errors `InsufficientBalance` if `amount > balance`.
 /// - Transfers tokens out and decrements balance.
 /// - Emits a `withdraw` event.
-pub fn withdraw(_env: &Env, _owner: Address, _amount: i128) -> Result<(), Error> {
-    // TODO(issue): auth, balance check, token transfer_out, update account, emit event.
-    unimplemented!("flexible::withdraw")
+pub fn withdraw(env: &Env, owner: Address, amount: i128) -> Result<(), Error> {
+    extend_instance_ttl(env);
+    owner.require_auth();
+
+    if amount <= 0 {
+        return Err(Error::InvalidAmount);
+    }
+
+    let key = DataKey::Flexible(owner.clone());
+    let mut account: FlexibleAccount =
+        env.storage().persistent().get(&key).ok_or(Error::NotFound)?;
+
+    if amount > account.balance {
+        return Err(Error::InsufficientBalance);
+    }
+
+    let new_balance = account.balance.checked_sub(amount).ok_or(Error::Overflow)?;
+
+    let token_address = storage::get_token(env).ok_or(Error::NotInitialized)?;
+    let token_client = token::Client::new(env, &token_address);
+    token_client.transfer(&env.current_contract_address(), &owner, &amount);
+
+    let now = env.ledger().timestamp();
+    account.balance = new_balance;
+    account.updated_at = now;
+    env.storage().persistent().set(&key, &account);
+
+    env.events().publish(
+        (TOPIC_WITHDRAW, owner.clone()),
+        (owner, amount, new_balance, now),
+    );
+
+    Ok(())
 }
 
 /// Read the caller's flexible account (or `NotFound`).
-pub fn get_account(_env: &Env, _owner: Address) -> Result<FlexibleAccount, Error> {
-    unimplemented!("flexible::get_account")
+pub fn get_account(env: &Env, owner: Address) -> Result<FlexibleAccount, Error> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Flexible(owner))
+        .ok_or(Error::NotFound)
 }
