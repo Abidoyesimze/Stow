@@ -9,7 +9,7 @@ import {
   OneToOne,
   JoinColumn,
 } from 'typeorm';
-import { IsString, IsOptional, IsNumber, Min, IsIn } from 'class-validator';
+import { IsString, IsOptional, IsIn } from 'class-validator';
 import { UserPreferences } from './user-preferences.entity';
 
 @Entity('users')
@@ -31,32 +31,6 @@ export class User {
   @IsOptional()
   @IsString()
   avatar_url: string | null;
-
-  @Column({ default: 0 })
-  @IsNumber()
-  @Min(0)
-  total_predictions: number;
-
-  @Column({ default: 0 })
-  @IsNumber()
-  @Min(0)
-  correct_predictions: number;
-
-  @Column({ type: 'bigint', default: 0 })
-  @IsString()
-  total_staked_stroops: string;
-
-  @Column({ type: 'bigint', default: 0 })
-  @IsString()
-  total_winnings_stroops: string;
-
-  @Column({ default: 0 })
-  @IsNumber()
-  reputation_score: number;
-
-  @Column({ default: 0 })
-  @IsNumber()
-  season_points: number;
 
   @Column({ default: 'user' })
   @IsString()

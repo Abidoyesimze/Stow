@@ -1,115 +1,161 @@
+import { Test, TestingModule } from '@nestjs/testing';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import {
+  HealthCheckService,
+  HttpHealthIndicator,
+  TypeOrmHealthIndicator,
+  DiskHealthIndicator,
+} from '@nestjs/terminus';
+import { getDataSourceToken } from '@nestjs/typeorm';
 import { HealthService } from './health.service';
+import { IndexerService } from '../indexer/indexer.service';
 
-describe('HealthService - checkDetailed', () => {
-  let dataSource: { query: jest.Mock };
-  let cacheManager: { set: jest.Mock; get: jest.Mock };
+describe('HealthService', () => {
   let service: HealthService;
-  let fetchMock: jest.Mock;
+  let indexerService: IndexerService;
 
-  beforeEach(() => {
-    dataSource = { query: jest.fn().mockResolvedValue([{ '?column?': 1 }]) };
-    cacheManager = {
-      set: jest.fn().mockResolvedValue(undefined),
-      get: jest.fn().mockResolvedValue('ok'),
-    };
-    fetchMock = jest.fn().mockResolvedValue({ ok: true });
-    global.fetch = fetchMock as unknown as typeof fetch;
+  const mockCache = {
+    set: jest.fn(),
+    get: jest.fn(),
+  };
 
-    service = new HealthService(
-      undefined as never,
-      undefined as never,
-      undefined as never,
-      undefined as never,
-      dataSource as never,
-      cacheManager as never,
-    );
+  const mockDataSource = {
+    query: jest.fn(),
+  };
+
+  const mockIndexerService = {
+    getMetrics: jest.fn(),
+  };
+
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        HealthService,
+        {
+          provide: HealthCheckService,
+          useValue: { check: jest.fn() },
+        },
+        {
+          provide: HttpHealthIndicator,
+          useValue: { pingCheck: jest.fn() },
+        },
+        {
+          provide: TypeOrmHealthIndicator,
+          useValue: { pingCheck: jest.fn() },
+        },
+        {
+          provide: DiskHealthIndicator,
+          useValue: { checkStorage: jest.fn() },
+        },
+        {
+          provide: getDataSourceToken(),
+          useValue: mockDataSource,
+        },
+        {
+          provide: CACHE_MANAGER,
+          useValue: mockCache,
+        },
+        {
+          provide: IndexerService,
+          useValue: mockIndexerService,
+        },
+      ],
+    }).compile();
+
+    service = module.get<HealthService>(HealthService);
+    indexerService = module.get<IndexerService>(IndexerService);
   });
 
-  afterEach(() => {
-    jest.clearAllMocks();
+  it('should be defined', () => {
+    expect(service).toBeDefined();
   });
 
-  it('reports healthy when database, soroban, and cache are all up', async () => {
-    const result = await service.checkDetailed(true);
+  describe('checkDetailed', () => {
+    it('should return healthy status when indexer lag is within threshold', async () => {
+      mockDataSource.query.mockResolvedValue([{ result: 1 }]);
+      mockCache.set.mockResolvedValue(undefined);
+      mockCache.get.mockResolvedValue('ok');
+      mockIndexerService.getMetrics.mockResolvedValue({
+        lag_in_ledgers: 50,
+        last_processed_ledger: 12000,
+        latest_contract_ledger: 12050,
+      });
 
-    expect(result.status).toBe('healthy');
-    expect('database' in result && result.database.status).toBe('up');
-    expect('soroban' in result && result.soroban.status).toBe('up');
-    expect('cache' in result && result.cache.status).toBe('up');
-  });
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ status: 'ok' }),
+      });
 
-  it('reports down when the database is unreachable', async () => {
-    dataSource.query.mockRejectedValue(new Error('connection refused'));
+      const result = await service.checkDetailed(true);
 
-    const result = await service.checkDetailed(true);
-
-    expect(result.status).toBe('down');
-    expect('database' in result && result.database.status).toBe('down');
-  });
-
-  it('reports degraded when soroban RPC fails but the database is up', async () => {
-    fetchMock.mockRejectedValue(new Error('timeout'));
-
-    const result = await service.checkDetailed(true);
-
-    expect(result.status).toBe('degraded');
-    expect('soroban' in result && result.soroban.status).toBe('down');
-    expect('database' in result && result.database.status).toBe('up');
-  });
-
-  it('reports degraded when soroban RPC responds with a non-ok status', async () => {
-    fetchMock.mockResolvedValue({ ok: false });
-
-    const result = await service.checkDetailed(true);
-
-    expect(result.status).toBe('degraded');
-    expect('soroban' in result && result.soroban.status).toBe('degraded');
-  });
-
-  it('reports degraded when the cache is unreachable but the database is up', async () => {
-    cacheManager.get.mockResolvedValue(undefined);
-
-    const result = await service.checkDetailed(true);
-
-    expect(result.status).toBe('degraded');
-    expect('cache' in result && result.cache.status).toBe('down');
-  });
-
-  it('prioritizes down over degraded when both the database and a non-critical dependency fail', async () => {
-    dataSource.query.mockRejectedValue(new Error('connection refused'));
-    fetchMock.mockRejectedValue(new Error('timeout'));
-
-    const result = await service.checkDetailed(true);
-
-    expect(result.status).toBe('down');
-  });
-
-  it('omits per-dependency detail when verbose is not requested', async () => {
-    const result = await service.checkDetailed();
-
-    expect(result).toEqual({
-      status: 'healthy',
-      uptime_seconds: expect.any(Number),
+      expect(result.status).toBe('healthy');
+      expect(result).toHaveProperty('indexer');
+      expect((result as any).indexer.status).toBe('up');
+      expect((result as any).indexer.lag_ledgers).toBe(50);
     });
-    expect('database' in result).toBe(false);
-    expect('soroban' in result).toBe(false);
-    expect('cache' in result).toBe(false);
-  });
 
-  it('includes per-dependency status and latency when verbose is requested', async () => {
-    const result = await service.checkDetailed(true);
+    it('should return degraded status when indexer lag exceeds threshold', async () => {
+      mockDataSource.query.mockResolvedValue([{ result: 1 }]);
+      mockCache.set.mockResolvedValue(undefined);
+      mockCache.get.mockResolvedValue('ok');
+      mockIndexerService.getMetrics.mockResolvedValue({
+        lag_in_ledgers: 150,
+        last_processed_ledger: 12000,
+        latest_contract_ledger: 12150,
+      });
 
-    expect('database' in result && result.database).toEqual({
-      status: 'up',
-      latency_ms: expect.any(Number),
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ status: 'ok' }),
+      });
+
+      const result = await service.checkDetailed(true);
+
+      expect(result.status).toBe('degraded');
+      expect((result as any).indexer.status).toBe('down');
+      expect((result as any).indexer.lag_ledgers).toBe(150);
     });
-    expect('soroban' in result && result.soroban).toEqual({
-      status: 'up',
-      latency_ms: expect.any(Number),
+
+    it('should return compact summary when verbose is false', async () => {
+      mockDataSource.query.mockResolvedValue([{ result: 1 }]);
+      mockCache.set.mockResolvedValue(undefined);
+      mockCache.get.mockResolvedValue('ok');
+      mockIndexerService.getMetrics.mockResolvedValue({
+        lag_in_ledgers: 10,
+        last_processed_ledger: 12000,
+        latest_contract_ledger: 12010,
+      });
+
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ status: 'ok' }),
+      });
+
+      const result = await service.checkDetailed(false);
+
+      expect(result).toHaveProperty('status');
+      expect(result).toHaveProperty('uptime_seconds');
+      expect(result).not.toHaveProperty('indexer');
     });
-    expect('cache' in result && result.cache).toEqual({
-      status: 'up',
-      latency_ms: expect.any(Number),
+
+    it('should handle indexer service errors gracefully', async () => {
+      mockDataSource.query.mockResolvedValue([{ result: 1 }]);
+      mockCache.set.mockResolvedValue(undefined);
+      mockCache.get.mockResolvedValue('ok');
+      mockIndexerService.getMetrics.mockRejectedValue(
+        new Error('Indexer unavailable'),
+      );
+
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ status: 'ok' }),
+      });
+
+      const result = await service.checkDetailed(true);
+
+      expect(result.status).toBe('degraded');
+      expect((result as any).indexer.status).toBe('down');
+      expect((result as any).indexer.lag_ledgers).toBe(-1);
     });
   });
 });

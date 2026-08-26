@@ -13,11 +13,19 @@ import type { Cache } from 'cache-manager';
 import * as os from 'os';
 import { DataSource } from 'typeorm';
 import { DetailedHealthDto, HealthSummaryDto } from './dto/detailed-health.dto';
+import { IndexerService } from '../indexer/indexer.service';
 
 const START_TIME = Date.now();
 const CACHE_PROBE_KEY = '__health_check_probe__';
+const INDEXER_LAG_THRESHOLD_LEDGERS = 100;
 
 type DependencyStatus = { status: string; latency_ms: number };
+type IndexerHealthStatus = {
+  status: string;
+  lag_ledgers: number;
+  last_processed_ledger: number;
+  latest_contract_ledger: number;
+};
 
 @Injectable()
 export class HealthService {
@@ -30,6 +38,7 @@ export class HealthService {
     private readonly dataSource: DataSource,
     @Inject(CACHE_MANAGER)
     private readonly cacheManager: Cache,
+    private readonly indexerService: IndexerService,
   ) {}
 
   /**
@@ -87,16 +96,19 @@ export class HealthService {
   async checkDetailed(
     verbose = false,
   ): Promise<DetailedHealthDto | HealthSummaryDto> {
-    const [dbResult, sorobanResult, cacheResult] = await Promise.all([
-      this.checkDatabase(),
-      this.checkSoroban(),
-      this.checkCache(),
-    ]);
+    const [dbResult, sorobanResult, cacheResult, indexerResult] =
+      await Promise.all([
+        this.checkDatabase(),
+        this.checkSoroban(),
+        this.checkCache(),
+        this.checkIndexer(),
+      ]);
 
     const status = this.computeOverallStatus(
       dbResult,
       sorobanResult,
       cacheResult,
+      indexerResult,
     );
     const uptime_seconds = Math.floor((Date.now() - START_TIME) / 1000);
 
@@ -109,6 +121,7 @@ export class HealthService {
       database: dbResult,
       soroban: sorobanResult,
       cache: cacheResult,
+      indexer: indexerResult,
       uptime_seconds,
     };
   }
@@ -117,11 +130,16 @@ export class HealthService {
     database: DependencyStatus,
     soroban: DependencyStatus,
     cache: DependencyStatus,
+    indexer: IndexerHealthStatus,
   ): 'healthy' | 'degraded' | 'down' {
     if (database.status !== 'up') {
       return 'down';
     }
-    if (soroban.status !== 'up' || cache.status !== 'up') {
+    if (
+      soroban.status !== 'up' ||
+      cache.status !== 'up' ||
+      indexer.status !== 'up'
+    ) {
       return 'degraded';
     }
     return 'healthy';
@@ -175,6 +193,33 @@ export class HealthService {
       };
     } catch {
       return { status: 'down', latency_ms: Date.now() - start };
+    }
+  }
+
+  /**
+   * Checks indexer health by examining the lag between the last processed
+   * ledger and the latest contract ledger. Marks unhealthy when lag exceeds
+   * the threshold.
+   */
+  private async checkIndexer(): Promise<IndexerHealthStatus> {
+    try {
+      const metrics = await this.indexerService.getMetrics();
+      const lag = metrics.lag_in_ledgers;
+      const status = lag > INDEXER_LAG_THRESHOLD_LEDGERS ? 'down' : 'up';
+
+      return {
+        status,
+        lag_ledgers: lag,
+        last_processed_ledger: metrics.last_processed_ledger,
+        latest_contract_ledger: metrics.latest_contract_ledger,
+      };
+    } catch {
+      return {
+        status: 'down',
+        lag_ledgers: -1,
+        last_processed_ledger: 0,
+        latest_contract_ledger: 0,
+      };
     }
   }
 }

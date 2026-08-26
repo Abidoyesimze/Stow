@@ -8,14 +8,5 @@ export class PublicUserDto {
   stellar_address: string;
 
   @Expose()
-  reputation_score: number;
-
-  @Expose()
-  total_predictions: number;
-
-  @Expose()
-  correct_predictions: number;
-
-  @Expose()
   created_at: Date;
 }
