@@ -1,4 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Cache } from 'cache-manager';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Balance } from './entities/balance.entity';
@@ -8,14 +10,20 @@ export interface BalanceView {
   amount: string;
 }
 
+/** TTL for balance reads: 10 seconds */
+const BALANCE_CACHE_TTL_MS = 10_000;
+
+const cacheKey = (account: string) => `savings:balance:${account}`;
+
 @Injectable()
 export class BalanceService {
   constructor(
     @InjectRepository(Balance)
     private readonly balanceRepository: Repository<Balance>,
+    @Inject(CACHE_MANAGER) private readonly cache: Cache,
   ) {}
 
-  /** Credits `amount` stroops onto the account's running balance. */
+  /** Credits `amount` stroops onto the account's running balance and invalidates cache. */
   async credit(account: string, amount: string): Promise<Balance> {
     let balance = await this.balanceRepository.findOne({
       where: { account },
@@ -24,13 +32,21 @@ export class BalanceService {
       balance = this.balanceRepository.create({ account, amount: '0' });
     }
     balance.amount = (BigInt(balance.amount) + BigInt(amount)).toString();
-    return this.balanceRepository.save(balance);
+    const saved = await this.balanceRepository.save(balance);
+    await this.cache.del(cacheKey(account));
+    return saved;
   }
 
   async get(account: string): Promise<BalanceView> {
+    const key = cacheKey(account);
+    const cached = await this.cache.get<BalanceView>(key);
+    if (cached) return cached;
+
     const balance = await this.balanceRepository.findOne({
       where: { account },
     });
-    return { account, amount: balance?.amount ?? '0' };
+    const view: BalanceView = { account, amount: balance?.amount ?? '0' };
+    await this.cache.set(key, view, BALANCE_CACHE_TTL_MS);
+    return view;
   }
 }
