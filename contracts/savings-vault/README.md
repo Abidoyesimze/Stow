@@ -115,11 +115,35 @@ stellar contract invoke --id $CONTRACT_ID --source alice --network testnet \
   -- set_admin --new_admin GNEWADMIN...ADDRESS
 ```
 
+#### `deposit_cap() -> i128`
+- **Auth:** none (read-only).
+- **Returns:** the current per-account deposit cap, in token stroops. `0`
+  means unlimited (the default before `set_deposit_cap` is ever called).
+- **Errors:** none.
+```bash
+stellar contract invoke --id $CONTRACT_ID --source alice --network testnet \
+  -- deposit_cap
+```
+
+#### `set_deposit_cap(cap: i128) -> Result<(), Error>`
+- **Auth:** current admin.
+- **Errors:** `NotInitialized`, `InvalidAmount` if `cap < 0`.
+- Takes effect immediately — the next `deposit` call is checked against the
+  new value.
+```bash
+stellar contract invoke --id $CONTRACT_ID --source alice --network testnet \
+  -- set_deposit_cap --cap 1000000000
+```
+
 ### Flexible savings — deposit / withdraw any time
 
 #### `deposit(from: Address, amount: i128) -> Result<(), Error>`
 - **Auth:** `from`.
-- **Errors:** `InvalidAmount` if `amount <= 0`, `NotInitialized`.
+- **Errors:** `InvalidAmount` if `amount <= 0`, `NotInitialized`,
+  `DepositCapExceeded` if the admin-configured per-account cap
+  (`deposit_cap`, set via `set_deposit_cap`) is non-zero and the resulting
+  balance would exceed it, `Overflow` if the resulting balance would not
+  fit in `i128`.
 - **Events:** [`deposit`](#deposit).
 ```bash
 stellar contract invoke --id $CONTRACT_ID --source alice --network testnet \
@@ -129,7 +153,8 @@ stellar contract invoke --id $CONTRACT_ID --source alice --network testnet \
 #### `withdraw(owner: Address, amount: i128) -> Result<(), Error>`
 - **Auth:** `owner`.
 - **Errors:** `NotFound` if no account exists for `owner`, `InvalidAmount`,
-  `InsufficientBalance` if `amount` exceeds the account balance.
+  `InsufficientBalance` if `amount` exceeds the account balance, `Overflow`
+  (defensive; unreachable in practice since the balance check runs first).
 - **Events:** [`withdraw`](#withdraw).
 ```bash
 stellar contract invoke --id $CONTRACT_ID --source alice --network testnet \
@@ -160,7 +185,8 @@ stellar contract invoke --id $CONTRACT_ID --source alice --network testnet \
 #### `locked_top_up(owner: Address, plan_id: u64, amount: i128) -> Result<(), Error>`
 - **Auth:** `owner`.
 - **Errors:** `NotFound`, `Unauthorized` if `owner` does not own `plan_id`,
-  `InvalidAmount`.
+  `InvalidAmount`, `Overflow` if the resulting balance would not fit in
+  `i128`.
 - **Events:** [`locked_top_up`](#locked_top_up).
 ```bash
 stellar contract invoke --id $CONTRACT_ID --source alice --network testnet \
@@ -169,8 +195,11 @@ stellar contract invoke --id $CONTRACT_ID --source alice --network testnet \
 
 #### `locked_withdraw(owner: Address, plan_id: u64, amount: i128) -> Result<(), Error>`
 - **Auth:** `owner`.
-- **Errors:** `NotFound`, `Unauthorized`, `StillLocked` if `now < unlock_at`,
-  `InsufficientBalance`, `InvalidAmount`.
+- **Errors:** `NotFound`, `Unauthorized`, `InsufficientBalance` (checked
+  before `StillLocked` so callers get the more actionable error when both
+  conditions hold), `StillLocked` if `now < unlock_at`, `InvalidAmount`,
+  `Overflow` (defensive; unreachable in practice since the balance check
+  runs first).
 - **Events:** [`locked_withdraw`](#locked_withdraw).
 ```bash
 stellar contract invoke --id $CONTRACT_ID --source alice --network testnet \
@@ -305,7 +334,8 @@ stellar contract invoke --id $CONTRACT_ID --source alice --network testnet \
 
 #### `group_settle(caller: Address, group_id: u64) -> Result<(), Error>`
 - **Auth:** `caller` — permissionless once shares are set.
-- **Errors:** `NotFound`, `InvalidShares` if shares were never configured.
+- **Errors:** `NotFound`, `InvalidShares` if shares were never configured,
+  `Overflow` if a per-member share computation would not fit in `i128`.
 - **Events:** [`group_split_settled`](#group_split_settled), once per member.
 ```bash
 stellar contract invoke --id $CONTRACT_ID --source alice --network testnet \

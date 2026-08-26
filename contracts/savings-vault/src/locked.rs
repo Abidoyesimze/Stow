@@ -1,9 +1,11 @@
 //! Locked savings — deterministic, on-chain time locks.
 
-use soroban_sdk::{Address, Env};
+use soroban_sdk::{token, Address, Env};
 
 use crate::error::Error;
-use crate::types::LockedPlan;
+use crate::events::{TOPIC_LOCKED_CREATED, TOPIC_LOCKED_TOP_UP, TOPIC_LOCKED_WITHDRAW};
+use crate::storage::{self, extend_instance_ttl};
+use crate::types::{DataKey, LockedPlan};
 
 /// Create a locked plan that unlocks at `unlock_at` (ledger timestamp) and
 /// fund it with an initial `amount`.
@@ -11,25 +13,125 @@ use crate::types::LockedPlan;
 /// - `owner.require_auth()`, token transfer_in.
 /// - Errors `InvalidUnlockTime` if `unlock_at <= now`.
 /// - Returns the new plan id.
-pub fn create(_env: &Env, _owner: Address, _amount: i128, _unlock_at: u64) -> Result<u64, Error> {
-    // TODO(issue): validate, allocate id, transfer_in, store LockedPlan, emit event.
-    unimplemented!("locked::create")
+pub fn create(env: &Env, owner: Address, amount: i128, unlock_at: u64) -> Result<u64, Error> {
+    extend_instance_ttl(env);
+    owner.require_auth();
+
+    if amount <= 0 {
+        return Err(Error::InvalidAmount);
+    }
+    if unlock_at <= env.ledger().timestamp() {
+        return Err(Error::InvalidUnlockTime);
+    }
+
+    let token_address = storage::get_token(env).ok_or(Error::NotInitialized)?;
+    let token_client = token::Client::new(env, &token_address);
+    token_client.transfer(&owner, &env.current_contract_address(), &amount);
+
+    let id = storage::next_id(env, DataKey::NextLockedId);
+    let now = env.ledger().timestamp();
+    let plan = LockedPlan {
+        id,
+        owner: owner.clone(),
+        balance: amount,
+        unlock_at,
+        created_at: now,
+    };
+    env.storage().persistent().set(&DataKey::Locked(id), &plan);
+
+    env.events().publish(
+        (TOPIC_LOCKED_CREATED, owner.clone(), id),
+        (id, owner, amount, unlock_at, now),
+    );
+
+    Ok(id)
 }
 
 /// Add more funds to an existing locked plan (does not change unlock time).
-pub fn top_up(_env: &Env, _owner: Address, _plan_id: u64, _amount: i128) -> Result<(), Error> {
-    // TODO(issue): load plan, owner check, transfer_in, increment balance.
-    unimplemented!("locked::top_up")
+///
+/// - `owner.require_auth()`.
+/// - Errors `Unauthorized` if `owner` does not own `plan_id`.
+pub fn top_up(env: &Env, owner: Address, plan_id: u64, amount: i128) -> Result<(), Error> {
+    extend_instance_ttl(env);
+    owner.require_auth();
+
+    if amount <= 0 {
+        return Err(Error::InvalidAmount);
+    }
+
+    let key = DataKey::Locked(plan_id);
+    let mut plan: LockedPlan = env.storage().persistent().get(&key).ok_or(Error::NotFound)?;
+
+    if plan.owner != owner {
+        return Err(Error::Unauthorized);
+    }
+
+    let token_address = storage::get_token(env).ok_or(Error::NotInitialized)?;
+    let token_client = token::Client::new(env, &token_address);
+    token_client.transfer(&owner, &env.current_contract_address(), &amount);
+
+    let new_balance = plan.balance.checked_add(amount).ok_or(Error::Overflow)?;
+    plan.balance = new_balance;
+    env.storage().persistent().set(&key, &plan);
+
+    let now = env.ledger().timestamp();
+    env.events().publish(
+        (TOPIC_LOCKED_TOP_UP, owner.clone(), plan_id),
+        (plan_id, owner, amount, new_balance, now),
+    );
+
+    Ok(())
 }
 
 /// Withdraw from a locked plan. Only permitted once `now >= unlock_at`.
 ///
-/// Errors: `StillLocked` before unlock, `InsufficientBalance` if over-withdrawing.
-pub fn withdraw(_env: &Env, _owner: Address, _plan_id: u64, _amount: i128) -> Result<(), Error> {
-    // TODO(issue): load plan, owner check, time check, transfer_out, update balance.
-    unimplemented!("locked::withdraw")
+/// Errors: `Unauthorized` if `owner` does not own `plan_id`,
+/// `InsufficientBalance` if over-withdrawing (checked before the time
+/// guard so callers get the most actionable error), `StillLocked` before
+/// unlock.
+pub fn withdraw(env: &Env, owner: Address, plan_id: u64, amount: i128) -> Result<(), Error> {
+    extend_instance_ttl(env);
+    owner.require_auth();
+
+    if amount <= 0 {
+        return Err(Error::InvalidAmount);
+    }
+
+    let key = DataKey::Locked(plan_id);
+    let mut plan: LockedPlan = env.storage().persistent().get(&key).ok_or(Error::NotFound)?;
+
+    if plan.owner != owner {
+        return Err(Error::Unauthorized);
+    }
+
+    if amount > plan.balance {
+        return Err(Error::InsufficientBalance);
+    }
+
+    if env.ledger().timestamp() < plan.unlock_at {
+        return Err(Error::StillLocked);
+    }
+
+    let token_address = storage::get_token(env).ok_or(Error::NotInitialized)?;
+    let token_client = token::Client::new(env, &token_address);
+    token_client.transfer(&env.current_contract_address(), &owner, &amount);
+
+    let new_balance = plan.balance.checked_sub(amount).ok_or(Error::Overflow)?;
+    plan.balance = new_balance;
+    env.storage().persistent().set(&key, &plan);
+
+    let now = env.ledger().timestamp();
+    env.events().publish(
+        (TOPIC_LOCKED_WITHDRAW, owner.clone(), plan_id),
+        (plan_id, owner, amount, new_balance, now),
+    );
+
+    Ok(())
 }
 
-pub fn get_plan(_env: &Env, _plan_id: u64) -> Result<LockedPlan, Error> {
-    unimplemented!("locked::get_plan")
+pub fn get_plan(env: &Env, plan_id: u64) -> Result<LockedPlan, Error> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Locked(plan_id))
+        .ok_or(Error::NotFound)
 }
